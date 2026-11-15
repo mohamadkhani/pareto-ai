@@ -1,0 +1,29 @@
+# Rust
+/server/target/
+
+# Runtime data (never commit databases or credentials)
+/data/
+/server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Angular
+/node_modules/
+/web/node_modules/
+/web/dist/
+/web/.angular/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Vendored reference repository (kept locally for research only)
+/OmniRoute/
