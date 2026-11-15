@@ -7,10 +7,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::{AppState, db};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Health {
     pub status: &'static str,
     pub version: String,
@@ -18,6 +19,13 @@ pub struct Health {
     pub uptime_seconds: u64,
 }
 
+/// Process and database liveness.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "system",
+    responses((status = 200, description = "process is healthy", body = Health))
+)]
 pub async fn get(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
     let db_ok = db::ping(&state.pool).await.is_ok();
     if !db_ok {

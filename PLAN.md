@@ -16,6 +16,7 @@ with fallback, per-user budgets, and admin oversight.
 | Milestone | State | Date |
 | --- | --- | --- |
 | M0 repository skeleton | **Done** (fmt, clippy `-D warnings`, tests, `/health`, Angular build all pass) | 2026-11-15 |
+| M0.1 embedded UI + OpenAPI | **Done** (single binary serves the Angular build; `/openapi.json`; api-only feature measured at −455 KB) | 2026-11-16 |
 | M1 auth and audit | Not started | |
 | M2 providers, credentials, catalog | Not started | |
 | M3 chat data plane | Not started | |

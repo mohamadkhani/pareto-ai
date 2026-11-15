@@ -2,7 +2,10 @@
 
 mod config;
 mod db;
+mod openapi;
 mod routes;
+#[cfg(feature = "embedded-ui")]
+mod static_files;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,6 +61,11 @@ async fn main() -> Result<()> {
         ))
         .layer(PropagateRequestIdLayer::new(request_id_header))
         .with_state(state.clone());
+
+    // The compiled Angular app is the fallback handler: anything not matched by
+    // the API routes is either a static asset or an app route.
+    #[cfg(feature = "embedded-ui")]
+    let app = app.fallback(static_files::serve);
 
     let listener = tokio::net::TcpListener::bind(state.config.listen)
         .await

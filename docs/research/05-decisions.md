@@ -103,6 +103,30 @@ multi-document transactions on a single node, no foreign keys) and SurrealDB
 
 Comparison, evidence, and migration triggers: [06-database-choice.md](06-database-choice.md).
 
+### D13. sqlx over sea-orm; utoipa for the API surface
+
+**Decision:** data access through `sqlx` with hand-written SQL and checked-in
+migrations. `utoipa` documents the HTTP surface and serves `/openapi.json`.
+
+**Why:** the workload is a reservation ledger and time-series rollups, where
+the SQL is the design. An ORM adds a code-generation step and an abstraction
+over exactly the transactions we must control. The local cache has both crates,
+but `utoipa-axum` is not cached, so the OpenAPI document is assembled manually.
+
+**Consequence:** schema changes are plain SQL in `server/migrations/`. Every
+handler keeps a `#[utoipa::path]` attribute in sync with the route table.
+
+### D14. One binary that serves the UI
+
+**Decision:** the Angular build is embedded (`rust-embed`) and served by the
+gateway; a `--no-default-features` build produces an api-only binary.
+
+**Measured:** 7.1 MB with the UI, 6.7 MB without (−455 KB). The UI is cheap, so
+the single binary is the default artifact.
+
+**Consequence:** `scripts/build.sh` builds the UI first, then the binary. The
+build fails with a clear message when the Angular output is missing.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

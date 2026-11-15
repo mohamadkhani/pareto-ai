@@ -34,6 +34,27 @@ npm start
 
 First run creates `data/gateway.db` (SQLite, WAL) and applies migrations.
 
+## Production build
+
+```bash
+scripts/build.sh            # one binary: server/target/release/gateway
+```
+
+The Angular build is embedded in the binary, so production is a single
+artifact. Size at the time of writing (release, `lto = "thin"`, `strip`):
+
+| Build | Command | Size |
+| --- | --- | --- |
+| with UI embedded | `scripts/build.sh` | 7.1 MB |
+| api-only | `scripts/build.sh --no-default-features` | 6.7 MB |
+
+The UI costs about 455 KB; ship the single binary unless a target really
+cannot spare it.
+
+Serving rules: hashed assets (`main-<hash>.js`) are served with
+`Cache-Control: immutable`, `index.html` with `no-store`, and any path without a
+file extension falls back to `index.html` so Angular routes survive a reload.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -55,8 +76,9 @@ cargo test
 
 ## Network note: crates.io
 
-From this network, `index.crates.io` and `static.crates.io` do not respond, so
-cargo cannot fetch dependencies. Two known workarounds:
+From this network, `index.crates.io` and `static.crates.io` do not respond
+(re-checked 2026-11-16: still blocked), so cargo cannot fetch dependencies.
+`npm`, `git`, and GitHub are reachable. Two known workarounds:
 
 1. Build offline from the local cargo cache (what we use now): every command
    that touches dependencies carries `--offline`, for example
@@ -70,5 +92,6 @@ cargo cannot fetch dependencies. Two known workarounds:
 
 ## Status
 
-Milestone 0 of [`PLAN.md`](PLAN.md) is implemented: server skeleton, config
-from environment, SQLite with migrations, `/health`, and the Angular scaffold.
+Milestones 0 and 0.1 of [`PLAN.md`](PLAN.md) are implemented: server skeleton,
+config from environment, SQLite with migrations, `/health`, `/openapi.json`, the
+Angular scaffold, and the single-binary production build that embeds the UI.
