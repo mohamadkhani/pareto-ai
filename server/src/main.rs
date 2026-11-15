@@ -1,12 +1,20 @@
 //! pareto-ai gateway — entry point.
 
+mod auth;
+mod bootstrap;
 mod config;
 mod db;
+mod error;
+mod ip;
 mod openapi;
+mod password;
 mod routes;
 #[cfg(feature = "embedded-ui")]
 mod static_files;
+#[cfg(test)]
+mod test_support;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +31,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pool: sqlx::SqlitePool,
     pub started: Instant,
+    /// In-memory login failure tracking, shared by all requests.
+    pub login_limiter: Arc<auth::LoginRateLimiter>,
 }
 
 #[tokio::main]
@@ -40,20 +50,35 @@ async fn main() -> Result<()> {
             "GATEWAY_MASTER_KEY is not set; credential encryption is unavailable until milestone 2"
         );
     }
+    if config.trusted_proxies.is_empty() && !config.listen.ip().is_loopback() {
+        tracing::warn!(
+            "GATEWAY_TRUSTED_PROXY is not set while listening on {} (non-loopback); \
+             behind a reverse proxy every client will be recorded as the proxy's address, \
+             because X-Forwarded-For is only read from trusted proxies",
+            config.listen
+        );
+    }
 
     let pool = db::open(&config.database_path())
         .await
         .context("starting database")?;
 
+    bootstrap::ensure_admin(&pool).await?;
+
     let state = AppState {
         config,
         pool,
         started: Instant::now(),
+        login_limiter: Arc::new(auth::LoginRateLimiter::new()),
     };
 
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
     let app = Router::new()
         .merge(routes::public_routes())
+        // The API router mounts itself at `/api` with its own fallbacks:
+        // unknown `/api/*` paths and wrong methods get the uniform API error
+        // shape instead of falling through to the UI.
+        .merge(routes::api_routes(state.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::new(
             request_id_header.clone(),
@@ -62,8 +87,8 @@ async fn main() -> Result<()> {
         .layer(PropagateRequestIdLayer::new(request_id_header))
         .with_state(state.clone());
 
-    // The compiled Angular app is the fallback handler: anything not matched by
-    // the API routes is either a static asset or an app route.
+    // The compiled Angular app is the fallback handler for everything outside
+    // `/api`: either a static asset or an app route.
     #[cfg(feature = "embedded-ui")]
     let app = app.fallback(static_files::serve);
 
@@ -78,10 +103,13 @@ async fn main() -> Result<()> {
         "gateway started"
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server loop")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server loop")?;
 
     Ok(())
 }

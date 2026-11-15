@@ -62,10 +62,32 @@ mod tests {
                 .await
                 .expect("query sqlite_master");
 
-        assert!(
-            tables.contains(&"settings".to_string()),
-            "tables: {tables:?}"
-        );
+        for table in ["settings", "users", "sessions", "audit_log"] {
+            assert!(
+                tables.contains(&table.to_string()),
+                "missing table {table}: {tables:?}"
+            );
+        }
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query indexes");
+
+        for index in [
+            "idx_sessions_token_hash",
+            "idx_sessions_user_id",
+            "idx_audit_log_occurred_at",
+            "idx_audit_log_actor_user_id",
+        ] {
+            assert!(
+                indexes.contains(&index.to_string()),
+                "missing index {index}: {indexes:?}"
+            );
+        }
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

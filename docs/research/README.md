@@ -22,6 +22,11 @@ re-checked instead of re-litigated. When a fact is not verified, it is marked
 | [06-database-choice.md](06-database-choice.md) | MongoDB vs SurrealDB vs ClickHouse vs SQLite |
 | [07-scope-answers.md](07-scope-answers.md) | Credential balance, org policy limits, provider scope, pricing pipeline, body retention |
 | [08-surrealdb-deep-dive.md](08-surrealdb-deep-dive.md) | SurrealDB: license, storage churn, durability, transactions, verdict |
+| [09-environment.md](09-environment.md) | Dated environment knowledge: network, toolchain, cached crates, build quirks |
+| [10-milestones.md](10-milestones.md) | Orchestration log: runs, review findings, commits |
+
+Raw review artifacts live in [`../reviews/`](../reviews/) and are cited by the
+milestone log; specs live in [`../specs/`](../specs/).
 
 ## Method
 

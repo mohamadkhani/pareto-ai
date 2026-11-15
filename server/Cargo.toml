@@ -12,15 +12,21 @@ embedded-ui = ["dep:rust-embed", "dep:mime_guess"]
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8.9"
+base64 = "0.22.1"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+cookie = "0.18"
 futures-util = "0.3.34"
 mime_guess = { version = "2.0.5", optional = true }
+pbkdf2 = "0.12.2"
+rand = "0.9"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 rust-embed = { version = "8.14.0", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite", "migrate", "chrono", "uuid"] }
+subtle = "2.6"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-stream = "0.1.18"
@@ -29,6 +35,9 @@ tracing = { version = "0.1.44", features = ["attributes"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 # Production builds: smaller binary, no debug symbols in the artifact.
 [profile.release]

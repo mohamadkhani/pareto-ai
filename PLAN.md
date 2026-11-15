@@ -17,7 +17,7 @@ with fallback, per-user budgets, and admin oversight.
 | --- | --- | --- |
 | M0 repository skeleton | **Done** (fmt, clippy `-D warnings`, tests, `/health`, Angular build all pass) | 2026-11-15 |
 | M0.1 embedded UI + OpenAPI | **Done** (single binary serves the Angular build; `/openapi.json`; api-only feature measured at −455 KB) | 2026-11-16 |
-| M1 auth and audit | Not started | |
+| M1 auth and audit | **Done** (backend + admin UI; two review rounds closed; 63 backend tests, 24 UI tests) | 2026-11-16 |
 | M2 providers, credentials, catalog | Not started | |
 | M3 chat data plane | Not started | |
 | M4 users, keys, money | Not started | |
@@ -86,7 +86,9 @@ Tasks:
    HttpOnly cookie, CSRF token), `audit_log`.
 2. Login/logout routes, session middleware, `require_admin` guard.
 3. Bootstrap: first run creates the admin from `GATEWAY_ADMIN_EMAIL` /
-   `GATEWAY_ADMIN_PASSWORD` if no user exists; password must be rotated.
+   `GATEWAY_ADMIN_PASSWORD` if no user exists. Forced password rotation moved
+   to M4, where a password-change surface exists (review finding 7,
+   2026-11-16).
 4. Angular: login page, guarded admin shell, audit log view.
 
 Acceptance:

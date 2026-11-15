@@ -1,0 +1,68 @@
+# Project conventions — pareto-ai
+
+Rules for every agent working in this repository. They are enforced by
+`scripts/check.sh`; a change that does not pass it is not done.
+
+## Environment (read this first)
+
+- **crates.io is blocked from this network.** Cargo commands need `--offline`
+  (`cargo build --offline`, `cargo test --offline`, ...). Dependencies resolve
+  from the local cargo cache (~/.cargo/registry). Before adding a dependency:
+  `ls ~/.cargo/registry/cache/*/ | grep -E "^<crate>-[0-9]"`. If it is not
+  cached and you cannot reach crates.io, do not add it — pick a cached
+  alternative and record the choice in `docs/research/`.
+- **npm works.** `npm run build` in `web/`.
+- Angular output lands in `web/dist/web/browser/` and is embedded into the
+  binary (`server/src/static_files.rs`). The build fails without it; use
+  `--no-default-features` for an api-only binary.
+- One binary: `scripts/build.sh`. All checks: `scripts/check.sh`.
+- **Never `git commit` or `git push`.** The supervising agent commits at
+  milestone boundaries with Conventional Commits.
+
+## Code
+
+### Rust (`server/`)
+
+- `cargo fmt` before finishing; `cargo clippy --all-targets -- -D warnings`
+  must be clean; every module that holds state or logic has tests.
+- No `unwrap`/`expect` on request paths or in library code (tests and process
+  startup where failure is fatal are fine). Errors: `thiserror` per module,
+  `anyhow` only at the top level — startup/bootstrap glue may use `anyhow`,
+  since its failures are fatal and user-facing.
+- Public functions document behaviour and failure modes in one line.
+- Handlers are thin: parse → call a service → map the result. Business logic
+  lives in modules that are testable without HTTP.
+- Secrets: never log them, never return them in a response, never store them
+  plaintext. Credentials are encrypted (AEAD) or hashed (PBKDF2 for passwords,
+  SHA-256 for session/API-key tokens).
+
+### SQL (`server/migrations/`)
+
+- Numbered `000N_name.sql`, forward-only, no edits to an applied migration —
+  add a new one instead.
+- Timestamps: `TEXT` in UTC, ISO-8601 with `Z` (`strftime('%Y-%m-%dT%H:%M:%fZ','now')`).
+- Money: `REAL` in USD. Tokens: `INTEGER`. Booleans: `INTEGER` 0/1 with
+  `CHECK`.
+- Every foreign key is declared and every table that is queried by a known
+  pattern has an index.
+
+### TypeScript (`web/`)
+
+- Strict mode, standalone components, signals, no NgModules, no `any`.
+- Services call the backend through `fetch` with `credentials: 'include'`;
+  state-changing calls send the `X-CSRF-Token` header.
+
+## API
+
+- `/v1/*` is the OpenAI-compatible data plane (API-key auth).
+- `/api/*` is the admin plane (session auth + CSRF for mutations).
+- `/health`, `/openapi.json` are public. Every handler keeps its
+  `#[utoipa::path]` attribute in sync with the route table.
+- Errors follow one shape: `{ "error": { "code", "message", "request_id" } }`
+  with a sensible HTTP status. Never leak internals or secrets in a message.
+
+## Decisions
+
+Design decisions live in `docs/research/05-decisions.md` (D1–D14 and growing).
+If your work contradicts one, stop and record the conflict instead of working
+around it.

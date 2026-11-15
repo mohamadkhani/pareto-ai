@@ -1,0 +1,18 @@
+<header class="topbar">
+  <div class="brand">Pareto Gateway</div>
+  <nav class="nav">
+    <a routerLink="/audit" routerLinkActive="active">Audit log</a>
+  </nav>
+  @if (auth.user(); as user) {
+    <div class="user">
+      <span class="email">{{ user.email }}</span>
+      <span class="role-badge" [class.role-admin]="auth.isAdmin()">{{ user.role }}</span>
+      <button type="button" class="btn" (click)="signOut()" [disabled]="signingOut()">
+        {{ signingOut() ? 'Signing out…' : 'Sign out' }}
+      </button>
+    </div>
+  }
+</header>
+<main class="content">
+  <router-outlet />
+</main>

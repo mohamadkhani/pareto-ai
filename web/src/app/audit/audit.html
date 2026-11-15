@@ -1,0 +1,80 @@
+<div class="audit">
+  <header class="page-head">
+    <h1>Audit log</h1>
+    <p class="hint">Every admin action, newest first. Expand a row to inspect its detail.</p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="state">
+      <h2>Forbidden</h2>
+      <p>The audit log is restricted to administrators.</p>
+    </div>
+  } @else if (loadError()) {
+    <div class="state error" role="alert">
+      <p>{{ loadError() }}</p>
+      <button type="button" class="btn" (click)="reload()">Try again</button>
+    </div>
+  } @else {
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th scope="col" class="col-toggle"><span class="visually-hidden">Detail</span></th>
+          <th scope="col">Time</th>
+          <th scope="col">Actor</th>
+          <th scope="col">Action</th>
+          <th scope="col">Target</th>
+          <th scope="col">IP</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (entry of entries(); track entry.id) {
+          <tr [class.expanded]="isExpanded(entry.id)">
+            <td class="col-toggle">
+              <button
+                type="button"
+                class="toggle"
+                (click)="toggleDetails(entry.id)"
+                [attr.aria-expanded]="isExpanded(entry.id)"
+              >
+                <span aria-hidden="true">{{ isExpanded(entry.id) ? '▾' : '▸' }}</span>
+                <span class="visually-hidden">
+                  {{ isExpanded(entry.id) ? 'Hide' : 'Show' }} detail for {{ entry.action }}
+                </span>
+              </button>
+            </td>
+            <td class="col-time">{{ formatTime(entry.occurred_at) }}</td>
+            <td>{{ entry.actor_user_id ?? '—' }}</td>
+            <td>
+              <code>{{ entry.action }}</code>
+            </td>
+            <td>{{ target(entry) }}</td>
+            <td>{{ entry.ip ?? '—' }}</td>
+          </tr>
+          @if (isExpanded(entry.id)) {
+            <tr class="detail-row">
+              <td></td>
+              <td colspan="5">
+                <pre class="detail">{{ detailPreview(entry) }}</pre>
+              </td>
+            </tr>
+          }
+        }
+      </tbody>
+    </table>
+
+    @if (loading()) {
+      <p class="state-note">Loading…</p>
+    } @else if (entries().length === 0) {
+      <div class="state">
+        <h2>No entries yet</h2>
+        <p>Actions such as sign-in and sign-out will show up here.</p>
+      </div>
+    } @else if (hasMore()) {
+      <div class="more">
+        <button type="button" class="btn" (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
+  }
+</div>

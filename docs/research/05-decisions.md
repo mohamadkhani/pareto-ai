@@ -127,6 +127,32 @@ the single binary is the default artifact.
 **Consequence:** `scripts/build.sh` builds the UI first, then the binary. The
 build fails with a clear message when the Angular output is missing.
 
+### D15. PBKDF2-HMAC-SHA256 for passwords until Argon2 is available
+
+**Decision:** password hashing uses PBKDF2-HMAC-SHA256, 600k iterations,
+16-byte random salt, encoded as `pbkdf2$sha256$600000$<salt>$<hash>`.
+
+**Why:** `argon2`, `password-hash`, `bcrypt`, and `scrypt` are not in the local
+cargo cache and crates.io is unreachable (see
+[09-environment.md](09-environment.md)). PBKDF2 from the cached `pbkdf2`,
+`hmac`, and `sha2` crates is the standard-compliant option available.
+
+**Consequence:** revisit when crates.io is reachable and migrate to Argon2id;
+the stored format carries the algorithm id, so a re-hash on next login is a
+clean migration.
+
+### D16. AES-256-GCM via `ring` for credential encryption
+
+**Decision:** provider secrets are encrypted with AES-256-GCM from the cached
+`ring` crate, key from `GATEWAY_MASTER_KEY` (32 bytes, base64url or hex),
+stored as `v1:<nonce>:<ciphertext>` with the row id as associated data.
+
+**Why:** `aes-gcm`, `chacha20poly1305`, and `aead` are not in the local cache
+([09-environment.md](09-environment.md)); `ring` is cached and battle-tested.
+
+**Consequence:** startup fails when `GATEWAY_MASTER_KEY` is missing, so
+credentials can never be written unencrypted.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

@@ -1,0 +1,126 @@
+.page-head h1 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.hint {
+  margin: 0.25rem 0 1.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 0.88rem;
+}
+
+.audit-table th,
+.audit-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.audit-table thead th {
+  background: #f0f2f6;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.audit-table tbody tr:hover {
+  background: #f7f9fc;
+}
+
+.audit-table tr.expanded {
+  background: #eef3fb;
+}
+
+.col-toggle {
+  width: 2.25rem;
+}
+
+.col-time {
+  white-space: nowrap;
+}
+
+.toggle {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+}
+
+.toggle:hover {
+  background: var(--border);
+}
+
+.detail-row td {
+  background: #f7f9fc;
+}
+
+.detail {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 18rem;
+  overflow: auto;
+}
+
+.state {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.state h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.state p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.state.error {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.state.error p {
+  color: inherit;
+}
+
+.state.error .btn {
+  margin-top: 0.75rem;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.state-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.more {
+  margin-top: 1rem;
+  text-align: center;
+}

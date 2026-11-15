@@ -1,24 +1,32 @@
 import { TestBed } from '@angular/core/testing';
 import { App } from './app';
+import { FetchMock, errorResponse } from '../testing/fetch-mock';
 
 describe('App', () => {
+  let fetchMock: FetchMock;
+
   beforeEach(async () => {
+    fetchMock = new FetchMock();
+    fetchMock.respond(errorResponse(401, 'unauthorized', 'Sign in required.'));
+    vi.stubGlobal('fetch', fetchMock.fetch);
     await TestBed.configureTestingModule({
       imports: [App],
-    })
-      .compileComponents();
+    }).compileComponents();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('should create the app', () => {
     const fixture = TestBed.createComponent(App);
-    const app = fixture.componentInstance;
-    expect(app).toBeTruthy();
+    expect(fixture.componentInstance).toBeTruthy();
   });
 
-  it('should render title', async () => {
+  it('restores the session on startup', async () => {
     const fixture = TestBed.createComponent(App);
     await fixture.whenStable();
-    const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('h1')?.textContent).toContain('Hello, web');
+
+    expect(fetchMock.requests.map((call) => call.url)).toContain('/api/auth/me');
   });
 });
