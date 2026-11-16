@@ -4,8 +4,24 @@
 //! it: it extracts the `usage` object from the final chunk (input, output,
 //! cache, and reasoning tokens), notices `[DONE]`, and flags protocol errors
 //! (a `data:` payload that is not JSON, or an upstream `error` event) and
-//! truncation (stream end without `[DONE]`). It also counts output characters
-//! so the estimation fallback (`chars/4`) has something to work with.
+//! truncation (stream end without `[DONE]`). It also counts output **content
+//! characters** so the estimation fallback (`chars/4`) has something to work
+//! with: only `choices[].message.content` / `choices[].delta.content` (plus
+//! `reasoning` when present) is counted — never JSON scaffolding or raw body
+//! bytes (review M1).
+//!
+//! Known limitation: SSE events built from several `data:` lines (one JSON
+//! payload continued across lines) are not reassembled; each `data:` line is
+//! inspected as its own payload, so such an event is flagged `protocol_error`.
+//! Forwarding is unaffected — the bytes reach the client untouched either way.
+//!
+//! The line buffer is capped at [`MAX_LINE_BYTES`]: a single huge line (or a
+//! stream with no `\n` at all, e.g. CR-only line endings) can otherwise
+//! accumulate without bound per request (review M2). Overflow sets
+//! [`SseInspector::overflowed`]; the caller must end the stream with an
+//! in-band `upstream_stream_failed` error and never fail over.
+
+use serde_json::Value;
 
 /// Token counts as reported by an OpenAI-compatible `usage` object. Fields the
 /// upstream omits stay `None` and are stored as NULL — never as 0.
@@ -43,6 +59,39 @@ pub fn usage_from_json(value: &serde_json::Value) -> Option<Usage> {
     })
 }
 
+/// Characters of one JSON string or text-part array (multimodal content).
+/// Shared with the input estimator in [`crate::chat`].
+pub fn text_chars(value: &Value) -> usize {
+    match value {
+        Value::String(text) => text.chars().count(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text"))
+            .map(text_chars)
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// Content characters of one completion chunk: `choices[].message.content` /
+/// `choices[].delta.content`, plus `reasoning` when present. JSON scaffolding
+/// and every other field count for nothing.
+pub fn content_chars(payload: &Value) -> usize {
+    let Some(choices) = payload.get("choices").and_then(Value::as_array) else {
+        return 0;
+    };
+    let field = |container: &Value, key: &str| container.get(key).map(text_chars).unwrap_or(0);
+    choices
+        .iter()
+        .filter_map(|choice| choice.get("message").or_else(|| choice.get("delta")))
+        .map(|container| field(container, "content") + field(container, "reasoning"))
+        .sum()
+}
+
+/// The largest incomplete `data:` line kept between chunks; see the module
+/// docs (review M2).
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
 /// Incremental SSE parser: feed it the forwarded bytes, ask it at the end what
 /// it saw. Line buffering is internal, so a `data:` line split across two
 /// chunks is parsed once, not twice.
@@ -55,8 +104,11 @@ pub struct SseInspector {
     pub saw_done: bool,
     /// A `data:` payload was not JSON, or carried a non-null `error`.
     pub protocol_error: bool,
-    /// Characters of `data:` payloads forwarded (excluding `[DONE]`), used
-    /// for the token estimation fallback.
+    /// The line buffer overflowed [`MAX_LINE_BYTES`]; the stream is doomed and
+    /// nothing else is inspected.
+    pub overflowed: bool,
+    /// Content characters of `data:` payloads forwarded (excluding `[DONE]`),
+    /// for the token estimation fallback — never scaffolding, never bytes.
     pub output_chars: usize,
 }
 
@@ -66,7 +118,11 @@ impl SseInspector {
     }
 
     /// Feeds the next body chunk. Bytes are only inspected, never modified.
+    /// Stops inspecting entirely once [`Self::overflowed`] is set.
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.overflowed {
+            return;
+        }
         self.partial.extend_from_slice(bytes);
         while let Some(newline) = self.partial.iter().position(|b| *b == b'\n') {
             let mut line: Vec<u8> = self.partial.drain(..=newline).collect();
@@ -74,13 +130,33 @@ impl SseInspector {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
+            if line.len() > MAX_LINE_BYTES {
+                self.overflow();
+                return;
+            }
             self.handle_line(&line);
+        }
+        if self.partial.len() > MAX_LINE_BYTES {
+            self.overflow();
         }
     }
 
     /// True when the stream is over and was not cleanly terminated.
     pub fn truncated(&self) -> bool {
         !self.saw_done
+    }
+
+    /// The stream failed in a way that must end it in-band with
+    /// `upstream_stream_failed` (malformed payload or line-buffer overflow).
+    /// Neither may fail over: by the time this is true, bytes may already have
+    /// reached the client.
+    pub fn failed(&self) -> bool {
+        self.protocol_error || self.overflowed
+    }
+
+    fn overflow(&mut self) {
+        self.overflowed = true;
+        self.partial.clear();
     }
 
     fn handle_line(&mut self, line: &[u8]) {
@@ -104,13 +180,13 @@ impl SseInspector {
             self.saw_done = true;
             return;
         }
-        self.output_chars += text.chars().count();
         match serde_json::from_str::<serde_json::Value>(&text) {
             Err(_) => self.protocol_error = true,
             Ok(payload) => {
                 if payload.get("error").is_some_and(|e| !e.is_null()) {
                     self.protocol_error = true;
                 }
+                self.output_chars += content_chars(&payload);
                 if let Some(usage) = usage_from_json(&payload) {
                     self.usage = Some(usage);
                 }
@@ -119,17 +195,19 @@ impl SseInspector {
     }
 }
 
-/// Counts the payload bytes of a non-streaming response body and extracts its
-/// `usage`, mirroring what [`SseInspector`] does for streams.
+/// Extracts `usage` and content characters from a non-streaming response body
+/// and flags an unparseable or errored body, mirroring what [`SseInspector`]
+/// does for streams. Content characters: `choices[].message.content` (plus
+/// `reasoning`), never the JSON scaffolding (review M1).
 pub fn inspect_json_body(body: &[u8]) -> (Option<Usage>, usize, bool) {
     let text = String::from_utf8_lossy(body);
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Err(_) => (None, text.chars().count(), true),
+        Err(_) => (None, 0, true),
         Ok(payload) => {
             let protocol_error = payload.get("error").is_some_and(|e| !e.is_null());
             (
                 usage_from_json(&payload),
-                text.chars().count(),
+                content_chars(&payload),
                 protocol_error,
             )
         }
@@ -208,6 +286,7 @@ mod tests {
         let mut malformed = SseInspector::new();
         malformed.push(b"data: {not json\n\n");
         assert!(malformed.protocol_error);
+        assert!(malformed.failed());
         assert!(malformed.truncated(), "no [DONE] was seen");
 
         let mut error_event = SseInspector::new();
@@ -226,26 +305,74 @@ mod tests {
     }
 
     #[test]
-    fn output_chars_count_data_payloads_without_done() {
+    fn output_chars_count_content_not_json_scaffolding() {
+        // 39 characters on the wire, one content character: the estimate must
+        // see the "x", not the frame around it (review M1).
+        let frame = r#"{"choices":[{"delta":{"content":"x"}}]}"#;
+        assert_eq!(frame.chars().count(), 39);
+
         let mut inspector = SseInspector::new();
-        inspector.push(b"data: {\"a\":1}\n\ndata: [DONE]\n\n");
-        assert_eq!(inspector.output_chars, "{\"a\":1}".chars().count());
-    }
+        inspector.push(format!("data: {frame}\n\n").as_bytes());
+        inspector.push(b"data: [DONE]\n\n");
+        assert_eq!(inspector.output_chars, 1, "content only, not {frame}");
 
-    #[test]
-    fn json_body_inspection_mirrors_the_stream() {
-        let body = br#"{"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":8}}"#;
+        // `reasoning` counts too; empty and non-content fields do not.
+        let mut reasoning = SseInspector::new();
+        reasoning.push(b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"abcd\"}}]}\n\n");
+        reasoning.push(b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n");
+        assert_eq!(reasoning.output_chars, 4);
+
+        // A non-streaming body mirrors the stream: "hello", not 43 characters.
+        let body = br#"{"choices":[{"message":{"content":"hello"}}]}"#;
         let (usage, chars, protocol_error) = inspect_json_body(body);
-        assert_eq!(usage.unwrap().input_tokens, Some(4));
-        assert_eq!(chars, body.len());
+        assert!(usage.is_none(), "no usage field means no usage");
+        assert_eq!(chars, 5);
         assert!(!protocol_error);
-
-        let (usage, _, protocol_error) = inspect_json_body(b"not json");
-        assert!(usage.is_none());
+        let (_, chars, protocol_error) = inspect_json_body(b"not json");
+        assert_eq!(chars, 0, "unparseable bodies claim no content");
         assert!(protocol_error, "an unparseable body is a body failure");
-
         let (usage, _, protocol_error) = inspect_json_body(br#"{"error":{"message":"x"}}"#);
         assert!(usage.is_none());
         assert!(protocol_error);
+    }
+
+    #[test]
+    fn a_single_huge_line_overflows_the_line_cap() {
+        // One complete line larger than the cap, fed in two pushes.
+        let huge = format!("data: {}\n\n", "x".repeat(MAX_LINE_BYTES + 1));
+        let (head, tail) = huge.split_at(MAX_LINE_BYTES / 2);
+
+        let mut inspector = SseInspector::new();
+        inspector.push(head.as_bytes());
+        assert!(!inspector.overflowed, "half a line fits");
+        inspector.push(tail.as_bytes());
+        assert!(inspector.overflowed, "the completed line is over the cap");
+        assert!(inspector.failed());
+        assert_eq!(
+            inspector.output_chars, 0,
+            "nothing is inspected after overflow"
+        );
+
+        // Once overflowed the inspector stays done: later pushes are ignored.
+        inspector.push(b"data: {\"usage\":{\"prompt_tokens\":5}}\n\n");
+        assert!(inspector.usage.is_none());
+    }
+
+    #[test]
+    fn cr_only_line_endings_overflow_the_cap_too() {
+        // SSE lines separated by bare CR never form a `\n`-terminated line, so
+        // without the cap they would accumulate forever.
+        let cr_line = format!("data: {}\r", "y".repeat(128));
+        let mut inspector = SseInspector::new();
+        let mut fed = 0;
+        while fed <= MAX_LINE_BYTES {
+            inspector.push(cr_line.as_bytes());
+            fed += cr_line.len();
+        }
+        assert!(
+            inspector.overflowed,
+            "unterminated lines are capped at 1 MiB"
+        );
+        assert!(inspector.failed());
     }
 }

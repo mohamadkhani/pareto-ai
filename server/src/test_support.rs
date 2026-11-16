@@ -68,13 +68,15 @@ impl TestApp {
         Self { state, dir }
     }
 
-    /// The full router, wired like `main`: public routes, the API router with
-    /// its error-shape fallbacks, and (when built with `embedded-ui`) the UI
-    /// fallback for everything else.
+    /// The full router, wired like `main`: the request-id stack, public
+    /// routes, the API router with its error-shape fallbacks, and (when built
+    /// with `embedded-ui`) the UI fallback for everything else.
     pub fn router(&self) -> Router {
-        let app = Router::new()
-            .merge(routes::public_routes())
-            .merge(routes::api_routes(self.state.clone()));
+        let app = crate::request_id::stack(
+            Router::new()
+                .merge(routes::public_routes())
+                .merge(routes::api_routes(self.state.clone())),
+        );
         #[cfg(feature = "embedded-ui")]
         let app = app.fallback(crate::static_files::serve);
         app.with_state(self.state.clone())

@@ -7,8 +7,11 @@
 //!
 //! Secrets: the credential secret is decrypted here and goes on the wire as
 //! bearer auth (unless a merged header overrides `authorization`) and nowhere
-//! else. [`UpstreamCall`]'s `Debug` prints neither headers nor the secret, and
-//! the bearer value is marked sensitive so reqwest itself redacts it.
+//! else. [`UpstreamCall`]'s `Debug` prints neither headers nor the secret, the
+//! bearer value is marked sensitive so reqwest itself redacts it, and every
+//! merged `authorization` / `x-api-key` value is marked sensitive the same way
+//! (review m4). Upstream failures are logged at [`UpstreamError::classify`];
+//! the error strings are secret-free by construction — keep them that way.
 //!
 //! Timeout budgets ([`Budget`]): the first-byte deadline covers everything
 //! from request start to the first body chunk, the idle duration bounds the
@@ -79,6 +82,11 @@ pub enum UpstreamError {
     /// truncated stream, or malformed SSE/JSON.
     #[error("upstream body failed: {0}")]
     Body(String),
+    /// The buffered (non-streaming) response exceeded the in-memory cap.
+    /// Terminal: retrying on another candidate could buffer the cap again per
+    /// candidate (review m5).
+    #[error("upstream response exceeded the buffering cap")]
+    TooLarge,
     /// The stored credential or its headers could not be decrypted or were
     /// not valid header material. Configuration problem, never retryable.
     #[error("credential material unusable: {0}")]
@@ -102,7 +110,8 @@ pub struct FailureClass {
 impl UpstreamError {
     /// Maps the failure onto the taxonomy table of the M3 spec. Position
     /// (before/after the first byte) is applied by the caller: failover is
-    /// only ever allowed before the first byte.
+    /// only ever allowed before the first byte. Logs a `warn` with the failure
+    /// and its class (review m3); the error strings are secret-free.
     pub fn classify(&self) -> FailureClass {
         let class = |code, status, retryable, cooldown| FailureClass {
             code,
@@ -110,7 +119,7 @@ impl UpstreamError {
             retryable_before_first_byte: retryable,
             cooldown,
         };
-        match self {
+        let class = match self {
             // 400/422 are returned to the caller; 401/403 cool the credential
             // down but are never retried (spec failure rules).
             UpstreamError::Http {
@@ -157,10 +166,20 @@ impl UpstreamError {
                 true,
                 None,
             ),
+            // A too-large buffered response is terminal: failover would let
+            // every candidate buffer the cap again (review m5).
+            UpstreamError::TooLarge => class(
+                "upstream_stream_failed",
+                StatusCode::BAD_GATEWAY,
+                false,
+                None,
+            ),
             UpstreamError::Credential(_) => {
                 class("internal", StatusCode::INTERNAL_SERVER_ERROR, false, None)
             }
-        }
+        };
+        tracing::warn!(error = %self, code = class.code, "upstream call failed");
+        class
     }
 }
 
@@ -269,8 +288,7 @@ impl UpstreamClient {
         for (name, value) in &call.headers {
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                 .map_err(|e| UpstreamError::Credential(format!("header name: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|e| UpstreamError::Credential(format!("header value: {e}")))?;
+            let value = header_value(name.as_str(), value)?;
             request = request.header(name, value);
         }
         // Bearer unless a merged header already sets `authorization`
@@ -362,6 +380,18 @@ impl UpstreamStream {
             Ok(Some(Err(e))) => Err(UpstreamError::Transport(e.to_string())),
         }
     }
+}
+
+/// Builds one wire header value, marking credential-carrying headers
+/// (`authorization`, `x-api-key`) sensitive so reqwest redacts them in its own
+/// error reporting and debug output (review m4).
+fn header_value(name: &str, value: &str) -> Result<reqwest::header::HeaderValue, UpstreamError> {
+    let mut value = reqwest::header::HeaderValue::from_str(value)
+        .map_err(|e| UpstreamError::Credential(format!("header value: {e}")))?;
+    if name.eq_ignore_ascii_case("authorization") || name.eq_ignore_ascii_case("x-api-key") {
+        value.set_sensitive(true);
+    }
+    Ok(value)
 }
 
 /// Parses `Retry-After` as delta-seconds or an HTTP date, when present and

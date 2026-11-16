@@ -12,6 +12,7 @@ mod openapi;
 mod password;
 mod pricing;
 mod probe;
+mod request_id;
 mod routes;
 mod secrets;
 #[cfg(feature = "embedded-ui")]
@@ -26,7 +27,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
@@ -87,20 +87,16 @@ async fn main() -> Result<()> {
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),
     };
 
-    let request_id_header = axum::http::HeaderName::from_static("x-request-id");
-    let app = Router::new()
-        .merge(routes::public_routes())
-        // The API router mounts itself at `/api` with its own fallbacks:
-        // unknown `/api/*` paths and wrong methods get the uniform API error
-        // shape instead of falling through to the UI.
-        .merge(routes::api_routes(state.clone()))
-        .layer(TraceLayer::new_for_http())
-        .layer(SetRequestIdLayer::new(
-            request_id_header.clone(),
-            MakeRequestUuid,
-        ))
-        .layer(PropagateRequestIdLayer::new(request_id_header))
-        .with_state(state.clone());
+    let app = request_id::stack(
+        Router::new()
+            .merge(routes::public_routes())
+            // The API router mounts itself at `/api` with its own fallbacks:
+            // unknown `/api/*` paths and wrong methods get the uniform API error
+            // shape instead of falling through to the UI.
+            .merge(routes::api_routes(state.clone())),
+    )
+    .layer(TraceLayer::new_for_http())
+    .with_state(state.clone());
 
     // The compiled Angular app is the fallback handler for everything outside
     // `/api`: either a static asset or an app route.

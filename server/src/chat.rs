@@ -18,8 +18,12 @@
 //! * **Settle**: exactly one `usage_events` and one `request_logs` row per
 //!   request (never one per attempt — a failed over request is not double
 //!   spent). Upstream `usage` is authoritative; when missing, tokens are
-//!   estimated `chars/4` and `tokens_estimated` is set. `cost_usd` stays NULL
-//!   in M3: price-aware costing is part of M4's budget settlement (D7).
+//!   estimated `chars/4` from **content text only** (`choices[].message.content`
+//!   / `delta.content`, plus `reasoning`; input from the message text) and
+//!   `tokens_estimated` is set — never from JSON scaffolding or raw bytes, and
+//!   only when a request was actually sent upstream (review M1/M3).
+//!   `cost_usd` stays NULL in M3: price-aware costing is part of M4's budget
+//!   settlement (D7).
 //!
 //! Cancellation: the response body (or the awaiting handler for buffered
 //! calls) holds a guard; when the client disconnects the guard signals the
@@ -28,7 +32,9 @@
 //!
 //! Mid-stream failures cannot change the already-committed `200` status: they
 //! surface in-band as one SSE `data: {"error": {...}}` event in the uniform
-//! error shape, followed by `data: [DONE]`, then the stream ends.
+//! error shape, preceded by a blank line (`\n\n`) so it can never concatenate
+//! onto a partial upstream line, followed by `data: [DONE]`, then the stream
+//! ends.
 
 use std::time::Instant;
 
@@ -44,7 +50,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::AppState;
 use crate::catalog;
 use crate::upstream::sse::{self, SseInspector, Usage};
-use crate::upstream::{Budget, FailureClass, UpstreamCall, UpstreamError, UpstreamStream};
+use crate::upstream::{
+    Budget, FailureClass, TimeoutKind, UpstreamCall, UpstreamError, UpstreamStream,
+};
 
 /// Maximum number of chat messages in one request.
 pub const MAX_MESSAGES: usize = 200;
@@ -56,8 +64,12 @@ const CLIENT_DISCONNECTED_STATUS: i64 = 499;
 /// Everything the pipeline knows about the HTTP request around the body.
 #[derive(Debug, Clone)]
 pub struct RequestMeta {
-    /// `x-request-id` (or a fresh id when absent); joins both accounting rows.
+    /// Server-generated ledger key (the request-id middleware's stamp or a
+    /// fresh UUID); joins both accounting rows and is what error bodies show.
     pub request_id: String,
+    /// The client's optional `x-request-id` echo, preserved in
+    /// `request_logs.client_request_id` and never used as a key (review B1).
+    pub client_request_id: Option<String>,
     /// The authenticated caller (admin session until M4 API keys).
     pub user_id: String,
     pub method: String,
@@ -138,6 +150,18 @@ struct WireRequest {
     stream: bool,
     max_tokens: Option<i64>,
     extra: serde_json::Map<String, Value>,
+}
+
+/// Message-text characters of the request: the `content` of each message
+/// (string or text parts). This is what the input estimate counts — never the
+/// raw body bytes, which inflate UTF-8 text and count JSON scaffolding
+/// (review M1).
+fn message_text_chars(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter_map(|message| message.get("content"))
+        .map(sse::text_chars)
+        .sum()
 }
 
 /// Parses and validates the request body. Failure mode: `400 invalid_request`.
@@ -486,6 +510,7 @@ pub async fn execute(
             return Err(failure);
         }
     };
+    let input_chars = message_text_chars(&parsed.messages);
 
     let candidates = resolve_candidates(&state.pool, &parsed.model, &catalog::now_ts()).await?;
     if candidates.is_empty() {
@@ -557,7 +582,8 @@ pub async fn execute(
         let max_tokens =
             crate::upstream::clamp_max_tokens(parsed.max_tokens, candidate.max_output_tokens);
         if let Some(context) = candidate.context_length {
-            let estimated_input = (bytes_in / 4) as i64;
+            // The same content-only estimator as settlement (review M1).
+            let estimated_input = (input_chars / 4) as i64;
             let reservation = max_tokens.unwrap_or(0);
             if estimated_input.saturating_add(reservation) > context {
                 decision.candidates[decision_idx].outcome = "skipped_context";
@@ -618,6 +644,7 @@ pub async fn execute(
         decision,
         requested_model: parsed.model,
         bytes_in,
+        input_chars,
         has_request_body: bytes_in > 0,
     };
     let runner_state = state.clone();
@@ -703,6 +730,8 @@ struct Plan {
     decision: Decision,
     requested_model: String,
     bytes_in: u64,
+    /// Message-text characters, the input estimator's base (review M1).
+    input_chars: usize,
     has_request_body: bool,
 }
 
@@ -725,12 +754,17 @@ struct RunResult {
     offering_id: Option<String>,
     model_id: Option<String>,
     usage: Option<Usage>,
+    /// Content characters produced (never scaffolding), for estimation.
     output_chars: usize,
     bytes_out: u64,
     ttft_ms: Option<i64>,
+    /// An upstream call was actually opened (`open()` returned a stream);
+    /// only then may tokens be estimated (review M3).
+    sent: bool,
 }
 
 /// A [`RunResult`] for the attempt currently owning the chosen slot.
+#[allow(clippy::too_many_arguments)]
 fn chosen_result(
     decision: &mut Decision,
     offering_id: &str,
@@ -739,6 +773,7 @@ fn chosen_result(
     output_chars: usize,
     bytes_out: u64,
     ttft_ms: Option<i64>,
+    sent: bool,
 ) -> RunResult {
     RunResult {
         decision: std::mem::take(decision),
@@ -748,10 +783,12 @@ fn chosen_result(
         output_chars,
         bytes_out,
         ttft_ms,
+        sent,
     }
 }
 
 /// A [`RunResult`] attributed to the last candidate tried (failure paths).
+#[allow(clippy::too_many_arguments)]
 fn last_result(
     decision: &mut Decision,
     last: &Option<(String, String)>,
@@ -759,6 +796,7 @@ fn last_result(
     output_chars: usize,
     bytes_out: u64,
     ttft_ms: Option<i64>,
+    sent: bool,
 ) -> RunResult {
     RunResult {
         decision: std::mem::take(decision),
@@ -768,6 +806,7 @@ fn last_result(
         output_chars,
         bytes_out,
         ttft_ms,
+        sent,
     }
 }
 
@@ -786,6 +825,7 @@ async fn runner(
         decision,
         requested_model,
         bytes_in,
+        input_chars,
         has_request_body,
     } = plan;
     let mut decision = decision;
@@ -827,21 +867,25 @@ async fn runner(
             model_id: result.model_id,
             usage: result.usage,
             output_chars: result.output_chars,
+            sent: result.sent,
             status,
             error_class,
             started,
             ttft_ms: result.ttft_ms,
             bytes_out: result.bytes_out,
             bytes_in,
+            input_chars,
             has_request_body,
         },
     )
     .await;
 
     // A failure becomes the terminal channel item (an error response for
-    // buffered calls, an in-band error event for streams).
+    // buffered calls, an in-band error event for streams). The send is raced
+    // against the total deadline: a stalled reader must not pin the runner —
+    // the rows are settled above either way (review m1).
     if let Some(failure) = failure {
-        let _ = tx.send(Err(failure)).await;
+        let _ = tokio::time::timeout_at(total, tx.send(Err(failure))).await;
     }
 }
 
@@ -926,6 +970,7 @@ async fn run_streaming(
     let mut last_failure: Option<ChatFailure> = None;
     let mut last: Option<(String, String)> = None;
     let mut rate_budget = 1i32;
+    let mut sent = false;
 
     for attempt in attempts {
         let decision_idx = attempt.decision_idx;
@@ -934,45 +979,59 @@ async fn run_streaming(
         let offering_id = candidate.offering_id.clone();
         let model_id = candidate.model_id.clone();
 
-        let (mut stream, first, ttft_ms) =
-            match start_attempt(state, &attempt, &mut cancel, total).await {
-                AttemptStart::Started {
-                    stream,
-                    first,
-                    ttft_ms,
-                } => (stream, first, ttft_ms),
-                AttemptStart::Canceled => {
-                    return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None));
-                }
-                AttemptStart::Failed(e) => {
-                    if let Some(credential) = &candidate.credential {
-                        let class = e.classify();
-                        if let Some(cooldown) = class.cooldown {
-                            record_cooldown(&state.pool, &credential.id, cooldown).await;
-                        }
-                        record_failure(decision, decision_idx, &class, upstream_status(&e));
-                        let failure = failure_from_class(&class);
-                        if can_fail_over(&class, &failure, &mut rate_budget) {
-                            last_failure = Some(failure);
-                            continue;
-                        }
-                        return RunEnd::Failed {
-                            result: last_result(decision, &last, None, 0, 0, None),
-                            failure,
-                        };
+        let (mut stream, first, ttft_ms) = match start_attempt(state, &attempt, &mut cancel, total)
+            .await
+        {
+            AttemptStart::Started {
+                stream,
+                first,
+                ttft_ms,
+            } => {
+                sent = true;
+                (stream, first, ttft_ms)
+            }
+            AttemptStart::Canceled => {
+                return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None, sent));
+            }
+            AttemptStart::Failed(e) => {
+                if let Some(credential) = &candidate.credential {
+                    let class = e.classify();
+                    if let Some(cooldown) = class.cooldown {
+                        record_cooldown(&state.pool, &credential.id, cooldown).await;
                     }
-                    let failure = ChatFailure::internal();
+                    record_failure(decision, decision_idx, &class, upstream_status(&e));
+                    let failure = failure_from_class(&class);
+                    if can_fail_over(&class, &failure, &mut rate_budget) {
+                        last_failure = Some(failure);
+                        continue;
+                    }
                     return RunEnd::Failed {
-                        result: last_result(decision, &last, None, 0, 0, None),
+                        result: last_result(decision, &last, None, 0, 0, None, sent),
                         failure,
                     };
                 }
-            };
+                let failure = ChatFailure::internal();
+                return RunEnd::Failed {
+                    result: last_result(decision, &last, None, 0, 0, None, sent),
+                    failure,
+                };
+            }
+        };
 
         // The first chunk decides the boundary: inspect before forwarding, so
         // a protocol error on the very first chunk can still fail over.
         let mut inspector = SseInspector::new();
         inspector.push(&first);
+        if inspector.overflowed {
+            // Line-cap overflow is terminal even here: retrying could just
+            // buffer the cap again per candidate (review M2).
+            let class = UpstreamError::Body("response line too large".to_string()).classify();
+            record_failure(decision, decision_idx, &class, None);
+            return RunEnd::Failed {
+                result: last_result(decision, &last, None, 0, 0, None, sent),
+                failure: failure_from_class(&class),
+            };
+        }
         if inspector.protocol_error {
             let class = UpstreamError::Body("malformed SSE".to_string()).classify();
             record_failure(decision, decision_idx, &class, None);
@@ -982,7 +1041,7 @@ async fn run_streaming(
                 continue;
             }
             return RunEnd::Failed {
-                result: last_result(decision, &last, None, 0, 0, None),
+                result: last_result(decision, &last, None, 0, 0, None, sent),
                 failure,
             };
         }
@@ -991,9 +1050,10 @@ async fn run_streaming(
         decision.chosen_offering_id = Some(offering_id.clone());
 
         // Forwarding starts here: from now on no failover is allowed.
-        let mut bytes_out = first.len() as u64;
-        match or_cancel(&mut cancel, tx.send(Ok(first))).await {
-            Wait::Canceled => {
+        let first_len = first.len() as u64;
+        let mut bytes_out = 0u64;
+        match send_item(&mut cancel, tx, total, Ok(first)).await {
+            Sent::Gone => {
                 return RunEnd::Disconnected(chosen_result(
                     decision,
                     &offering_id,
@@ -1002,23 +1062,37 @@ async fn run_streaming(
                     0,
                     bytes_out,
                     Some(ttft_ms),
+                    sent,
                 ));
             }
-            Wait::Done(Err(_)) => {
-                return RunEnd::Disconnected(chosen_result(
-                    decision,
-                    &offering_id,
-                    &model_id,
-                    None,
-                    0,
-                    bytes_out,
-                    Some(ttft_ms),
-                ));
+            Sent::TimedOut => {
+                return RunEnd::Failed {
+                    result: chosen_result(
+                        decision,
+                        &offering_id,
+                        &model_id,
+                        None,
+                        0,
+                        bytes_out,
+                        Some(ttft_ms),
+                        sent,
+                    ),
+                    failure: total_timeout_failure(),
+                };
             }
-            Wait::Done(Ok(())) => {}
+            Sent::Ok => {}
         }
+        bytes_out = first_len;
 
-        let end = pump(&mut stream, &mut inspector, tx, &mut cancel, &mut bytes_out).await;
+        let end = pump(
+            &mut stream,
+            &mut inspector,
+            tx,
+            &mut cancel,
+            &mut bytes_out,
+            total,
+        )
+        .await;
         return match end {
             PumpEnd::Done => RunEnd::Delivered(chosen_result(
                 decision,
@@ -1028,6 +1102,7 @@ async fn run_streaming(
                 inspector.output_chars,
                 bytes_out,
                 Some(ttft_ms),
+                sent,
             )),
             PumpEnd::Failed(failure) => {
                 // The chosen record keeps its outcome but records how the
@@ -1043,6 +1118,7 @@ async fn run_streaming(
                         inspector.output_chars,
                         bytes_out,
                         Some(ttft_ms),
+                        sent,
                     ),
                     failure,
                 }
@@ -1055,13 +1131,14 @@ async fn run_streaming(
                 inspector.output_chars,
                 bytes_out,
                 Some(ttft_ms),
+                sent,
             )),
         };
     }
 
     // Every candidate failed before the first byte.
     RunEnd::Failed {
-        result: last_result(decision, &last, None, 0, 0, None),
+        result: last_result(decision, &last, None, 0, 0, None, sent),
         failure: last_failure.unwrap_or_else(ChatFailure::internal),
     }
 }
@@ -1080,6 +1157,7 @@ async fn run_buffered(
     let mut last_failure: Option<ChatFailure> = None;
     let mut last: Option<(String, String)> = None;
     let mut rate_budget = 1i32;
+    let mut sent = false;
 
     for attempt in attempts {
         let decision_idx = attempt.decision_idx;
@@ -1088,85 +1166,116 @@ async fn run_buffered(
         let offering_id = candidate.offering_id.clone();
         let model_id = candidate.model_id.clone();
 
-        let (mut stream, first, ttft_ms) =
-            match start_attempt(state, &attempt, &mut cancel, total).await {
-                AttemptStart::Started {
-                    stream,
-                    first,
-                    ttft_ms,
-                } => (stream, first, ttft_ms),
-                AttemptStart::Canceled => {
-                    return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None));
-                }
-                AttemptStart::Failed(e) => {
-                    let class = e.classify();
-                    if let Some(credential) = &candidate.credential
-                        && let Some(cooldown) = class.cooldown
-                    {
-                        record_cooldown(&state.pool, &credential.id, cooldown).await;
-                    }
-                    record_failure(decision, decision_idx, &class, upstream_status(&e));
-                    let failure = failure_from_class(&class);
-                    if can_fail_over(&class, &failure, &mut rate_budget) {
-                        last_failure = Some(failure);
-                        continue;
-                    }
-                    return RunEnd::Failed {
-                        result: last_result(decision, &last, None, 0, 0, None),
-                        failure,
-                    };
-                }
-            };
-
-        // Read the full body under the idle/total budgets. The client has
-        // seen nothing yet, so any failure may fail over.
-        let mut buffer: Vec<u8> = first.to_vec();
-        let read_failure = loop {
-            if buffer.len() > MAX_BUFFERED_RESPONSE {
-                break Some(UpstreamError::Body("response too large".to_string()));
+        let (mut stream, first, ttft_ms) = match start_attempt(state, &attempt, &mut cancel, total)
+            .await
+        {
+            AttemptStart::Started {
+                stream,
+                first,
+                ttft_ms,
+            } => {
+                sent = true;
+                (stream, first, ttft_ms)
             }
-            match or_cancel(&mut cancel, stream.next_chunk()).await {
-                Wait::Canceled => {
-                    return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None));
+            AttemptStart::Canceled => {
+                return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None, sent));
+            }
+            AttemptStart::Failed(e) => {
+                let class = e.classify();
+                if let Some(credential) = &candidate.credential
+                    && let Some(cooldown) = class.cooldown
+                {
+                    record_cooldown(&state.pool, &credential.id, cooldown).await;
                 }
-                Wait::Done(Ok(Some(chunk))) => buffer.extend_from_slice(&chunk),
-                Wait::Done(Ok(None)) => break None,
-                Wait::Done(Err(e)) => break Some(e),
+                record_failure(decision, decision_idx, &class, upstream_status(&e));
+                let failure = failure_from_class(&class);
+                if can_fail_over(&class, &failure, &mut rate_budget) {
+                    last_failure = Some(failure);
+                    continue;
+                }
+                return RunEnd::Failed {
+                    result: last_result(decision, &last, None, 0, 0, None, sent),
+                    failure,
+                };
             }
         };
-        let (usage, output_chars, protocol_error) = sse::inspect_json_body(&buffer);
-        let failure = read_failure.or_else(|| match protocol_error {
-            true => Some(UpstreamError::Body("invalid JSON body".to_string())),
-            false => None,
-        });
+
+        // Read the full body under the idle/total budgets. The client has
+        // seen nothing yet, so any failure may fail over — except the cap
+        // below, which is terminal (review m5).
+        let mut buffer: Vec<u8> = Vec::with_capacity(first.len().min(MAX_BUFFERED_RESPONSE));
+        let read_failure = if !push_bounded(&mut buffer, &first) {
+            Some(UpstreamError::TooLarge)
+        } else {
+            loop {
+                match or_cancel(&mut cancel, stream.next_chunk()).await {
+                    Wait::Canceled => {
+                        return RunEnd::Disconnected(last_result(
+                            decision, &last, None, 0, 0, None, sent,
+                        ));
+                    }
+                    Wait::Done(Ok(Some(chunk))) => {
+                        if !push_bounded(&mut buffer, &chunk) {
+                            break Some(UpstreamError::TooLarge);
+                        }
+                    }
+                    Wait::Done(Ok(None)) => break None,
+                    Wait::Done(Err(e)) => break Some(e),
+                }
+            }
+        };
+        let (usage, output_chars, failure) = match read_failure {
+            // A cap failure is terminal and the oversized buffer is never
+            // parsed (review m5).
+            Some(e) => (None, 0, Some(e)),
+            None => {
+                let (usage, output_chars, protocol_error) = sse::inspect_json_body(&buffer);
+                let failure = match protocol_error {
+                    true => Some(UpstreamError::Body("invalid JSON body".to_string())),
+                    false => None,
+                };
+                (usage, output_chars, failure)
+            }
+        };
         let Some(e) = failure else {
             decision.candidates[decision_idx].outcome = "chosen";
             decision.chosen_offering_id = Some(offering_id.clone());
             let bytes_out = buffer.len() as u64;
-            match or_cancel(&mut cancel, tx.send(Ok(Bytes::from(buffer)))).await {
-                Wait::Done(Ok(())) => {
-                    return RunEnd::Delivered(RunResult {
-                        decision: std::mem::take(decision),
-                        offering_id: Some(offering_id),
-                        model_id: Some(model_id),
+            return match send_item(&mut cancel, tx, total, Ok(Bytes::from(buffer))).await {
+                Sent::Ok => RunEnd::Delivered(chosen_result(
+                    decision,
+                    &offering_id,
+                    &model_id,
+                    usage,
+                    output_chars,
+                    bytes_out,
+                    Some(ttft_ms),
+                    sent,
+                )),
+                Sent::Gone => RunEnd::Disconnected(chosen_result(
+                    decision,
+                    &offering_id,
+                    &model_id,
+                    usage,
+                    output_chars,
+                    bytes_out,
+                    Some(ttft_ms),
+                    sent,
+                )),
+                Sent::TimedOut => RunEnd::Failed {
+                    result: chosen_result(
+                        decision,
+                        &offering_id,
+                        &model_id,
                         usage,
                         output_chars,
                         bytes_out,
-                        ttft_ms: Some(ttft_ms),
-                    });
-                }
-                Wait::Canceled | Wait::Done(Err(_)) => {
-                    return RunEnd::Disconnected(RunResult {
-                        decision: std::mem::take(decision),
-                        offering_id: Some(offering_id),
-                        model_id: Some(model_id),
-                        usage,
-                        output_chars,
-                        bytes_out,
-                        ttft_ms: Some(ttft_ms),
-                    });
-                }
-            }
+                        Some(ttft_ms),
+                        sent,
+                    ),
+                    failure: total_timeout_failure(),
+                },
+            };
         };
 
         let class = e.classify();
@@ -1177,13 +1286,13 @@ async fn run_buffered(
             continue;
         }
         return RunEnd::Failed {
-            result: last_result(decision, &last, usage, output_chars, 0, Some(ttft_ms)),
+            result: last_result(decision, &last, usage, output_chars, 0, Some(ttft_ms), sent),
             failure,
         };
     }
 
     RunEnd::Failed {
-        result: last_result(decision, &last, None, 0, 0, None),
+        result: last_result(decision, &last, None, 0, 0, None, sent),
         failure: last_failure.unwrap_or_else(ChatFailure::internal),
     }
 }
@@ -1195,13 +1304,16 @@ enum PumpEnd {
 }
 
 /// Forwards chunks as they arrive; the offending chunk of a malformed stream
-/// is never forwarded — the in-band error replaces it.
+/// is never forwarded — the in-band error replaces it. A stalled reader that
+/// stops consuming is bounded by the total deadline (review m1).
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     stream: &mut UpstreamStream,
     inspector: &mut SseInspector,
     tx: &mpsc::Sender<Result<Bytes, ChatFailure>>,
     cancel: &mut oneshot::Receiver<()>,
     bytes_out: &mut u64,
+    total: tokio::time::Instant,
 ) -> PumpEnd {
     loop {
         let chunk = match or_cancel(cancel, stream.next_chunk()).await {
@@ -1223,19 +1335,71 @@ async fn pump(
             }
             Ok(Some(bytes)) => {
                 inspector.push(&bytes);
-                if inspector.protocol_error {
-                    return PumpEnd::Failed(failure_from_class(
-                        &UpstreamError::Body("malformed SSE".to_string()).classify(),
-                    ));
+                if inspector.failed() {
+                    // A malformed payload or a line-buffer overflow (review
+                    // M2): both end the stream in-band, never fail over.
+                    let class =
+                        UpstreamError::Body("malformed or oversized SSE".to_string()).classify();
+                    return PumpEnd::Failed(failure_from_class(&class));
                 }
-                *bytes_out += bytes.len() as u64;
-                match or_cancel(cancel, tx.send(Ok(bytes))).await {
-                    Wait::Canceled | Wait::Done(Err(_)) => return PumpEnd::Disconnected,
-                    Wait::Done(Ok(())) => {}
+                let len = bytes.len() as u64;
+                match send_item(cancel, tx, total, Ok(bytes)).await {
+                    Sent::Ok => *bytes_out += len,
+                    Sent::Gone => return PumpEnd::Disconnected,
+                    Sent::TimedOut => return PumpEnd::Failed(total_timeout_failure()),
                 }
             }
         }
     }
+}
+
+/// How a channel send ended.
+enum Sent {
+    /// The item reached the consumer.
+    Ok,
+    /// The client disconnected (cancel fired) or the consumer is gone.
+    Gone,
+    /// The total deadline passed while the consumer was not reading.
+    TimedOut,
+}
+
+/// Sends one item to the consumer, racing client cancellation and the total
+/// deadline. A reader that stops consuming must not pin the runner past the
+/// budget — settlement must happen promptly (review m1).
+async fn send_item(
+    cancel: &mut oneshot::Receiver<()>,
+    tx: &mpsc::Sender<Result<Bytes, ChatFailure>>,
+    total: tokio::time::Instant,
+    item: Result<Bytes, ChatFailure>,
+) -> Sent {
+    tokio::select! {
+        _ = &mut *cancel => Sent::Gone,
+        () = tokio::time::sleep_until(total) => Sent::TimedOut,
+        result = tx.send(item) => match result {
+            Ok(()) => Sent::Ok,
+            Err(_) => Sent::Gone,
+        },
+    }
+}
+
+/// The failure for a run that ran out of its absolute total budget.
+fn total_timeout_failure() -> ChatFailure {
+    failure_from_class(
+        &UpstreamError::Timeout {
+            kind: TimeoutKind::Total,
+        }
+        .classify(),
+    )
+}
+
+/// Appends `chunk` unless that would exceed the buffering cap. `false` means
+/// the cap tripped: the buffer never overshoots by a chunk (review m5).
+fn push_bounded(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    if buffer.len() + chunk.len() > MAX_BUFFERED_RESPONSE {
+        return false;
+    }
+    buffer.extend_from_slice(chunk);
+    true
 }
 
 /// Failover is allowed only before the first byte, never for 400/401/403, and
@@ -1317,7 +1481,9 @@ async fn or_cancel<F: std::future::Future>(
 }
 
 /// The in-band error event for a stream that failed after first byte: the
-/// uniform error shape as one SSE `data:` event, then `[DONE]`.
+/// uniform error shape as one SSE `data:` event, then `[DONE]`. It is preceded
+/// by a blank line so it can never concatenate onto a partial upstream line
+/// (review m2).
 fn in_band_error_bytes(failure: &ChatFailure, request_id: &str) -> Bytes {
     let payload = json!({
         "error": {
@@ -1326,7 +1492,7 @@ fn in_band_error_bytes(failure: &ChatFailure, request_id: &str) -> Bytes {
             "request_id": request_id,
         }
     });
-    Bytes::from(format!("data: {payload}\n\ndata: [DONE]\n\n"))
+    Bytes::from(format!("\n\ndata: {payload}\n\ndata: [DONE]\n\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,7 +1506,13 @@ struct Settlement {
     offering_id: Option<String>,
     model_id: Option<String>,
     usage: Option<Usage>,
+    /// Content characters produced (never scaffolding), for estimation.
     output_chars: usize,
+    /// Message-text characters sent, for estimation (review M1).
+    input_chars: usize,
+    /// A request was actually sent upstream (an attempt opened its stream);
+    /// only then may tokens be estimated (review M3).
+    sent: bool,
     status: i64,
     error_class: Option<&'static str>,
     started: Instant,
@@ -1366,6 +1538,8 @@ impl Settlement {
             model_id: None,
             usage: None,
             output_chars: 0,
+            input_chars: 0,
+            sent: false,
             status: failure.status.as_u16() as i64,
             error_class: Some(failure.code),
             started,
@@ -1392,18 +1566,17 @@ impl Settlement {
     }
 }
 
-/// The token counts to store: upstream `usage` when present, else the
-/// `chars/4` estimate (flagged) when an upstream attempt was made, else NULL.
+/// The token counts to store: upstream `usage` when present, else the `chars/4`
+/// content estimate (flagged) — but only when a request was actually sent
+/// upstream, never for pre-send failures (review M1/M3).
 fn resolve_usage(settlement: &Settlement) -> (Option<Usage>, bool) {
     if let Some(usage) = &settlement.usage {
         return (Some(usage.clone()), false);
     }
-    let attempted =
-        settlement.offering_id.is_some() || settlement.error_class == Some("client_disconnected");
-    match attempted {
+    match settlement.sent {
         true => (
             Some(Usage {
-                input_tokens: Some((settlement.bytes_in / 4) as i64),
+                input_tokens: Some((settlement.input_chars / 4) as i64),
                 output_tokens: Some((settlement.output_chars / 4) as i64),
                 cache_read_tokens: None,
                 cache_write_tokens: None,
@@ -1464,12 +1637,13 @@ async fn settle(state: &AppState, settlement: &Settlement) {
 
     let log_result = sqlx::query(
         "INSERT INTO request_logs \
-         (request_id, occurred_at, method, path, requested_model, resolved_offering_id, \
-          decision_json, status, error_class, bytes_in, bytes_out, user_id, api_key_id, \
-          has_request_body) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+         (request_id, client_request_id, occurred_at, method, path, requested_model, \
+          resolved_offering_id, decision_json, status, error_class, bytes_in, bytes_out, user_id, \
+          api_key_id, has_request_body) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
     )
     .bind(&settlement.meta.request_id)
+    .bind(&settlement.meta.client_request_id)
     .bind(&occurred_at)
     .bind(&settlement.meta.method)
     .bind(&settlement.meta.path)
@@ -1717,6 +1891,7 @@ mod tests {
     #[derive(sqlx::FromRow, Debug)]
     struct LogRow {
         request_id: String,
+        client_request_id: Option<String>,
         requested_model: Option<String>,
         resolved_offering_id: Option<String>,
         decision_json: Option<String>,
@@ -1741,8 +1916,8 @@ mod tests {
 
     async fn log_rows(app: &TestApp) -> Vec<LogRow> {
         sqlx::query_as::<_, LogRow>(
-            "SELECT request_id, requested_model, resolved_offering_id, decision_json, status, \
-             error_class, bytes_in, bytes_out, has_request_body \
+            "SELECT request_id, client_request_id, requested_model, resolved_offering_id, \
+             decision_json, status, error_class, bytes_in, bytes_out, has_request_body \
              FROM request_logs ORDER BY rowid",
         )
         .fetch_all(&app.state.pool)
@@ -1895,11 +2070,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_without_usage_estimates_chars_over_four() {
-        let events = vec![event(0), event(1)];
-        let output_chars: usize = events.iter().map(|event| event.chars().count()).sum();
+    async fn stream_without_usage_estimates_content_chars_over_four() {
+        // 39 characters on the wire, one content character: the estimate is
+        // content/4 = 0, never frame/4 = 9 (review M1).
+        let frame = r#"{"choices":[{"delta":{"content":"x"}}]}"#.to_string();
+        assert_eq!(frame.chars().count(), 39);
         let stub = Stub::spawn(vec![Scenario::Stream {
-            events,
+            events: vec![frame],
             usage: None,
         }])
         .await;
@@ -1918,8 +2095,11 @@ mod tests {
         )
         .await;
 
-        let body = chat_body("m", true);
-        let body_len = body.to_string().len() as i64;
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+        });
         let (_, _, response_body) =
             send_streaming(s.app.router(), chat_request(&s.cookie, body)).await;
         let text = body_text(response_body).await;
@@ -1927,9 +2107,57 @@ mod tests {
 
         let row = &usage_rows(&s.app).await[0];
         assert_eq!(row.tokens_estimated, 1, "estimation must be flagged");
-        assert_eq!(row.input_tokens, Some(body_len / 4));
-        assert_eq!(row.output_tokens, Some((output_chars / 4) as i64));
+        assert_eq!(
+            row.input_tokens,
+            Some(1),
+            "message text (\"hello\" = 5 chars) / 4, not raw body bytes"
+        );
+        assert_eq!(
+            row.output_tokens,
+            Some(0),
+            "one content char / 4, not the 39-char frame"
+        );
         assert!(row.cache_read_tokens.is_none(), "unknown is NULL, never 0");
+    }
+
+    #[tokio::test]
+    async fn non_streaming_without_usage_estimates_content_chars() {
+        let upstream_body = r#"{"id":"cmpl-1","object":"chat.completion","model":"test-model","choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
+        let stub = Stub::spawn(vec![Scenario::Json {
+            body: upstream_body.to_string(),
+        }])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let body = json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false,
+        });
+        let response = send(s.app.router(), chat_request(&s.cookie, body)).await;
+        assert_eq!(response.status, StatusCode::OK);
+
+        let row = &usage_rows(&s.app).await[0];
+        assert_eq!(row.tokens_estimated, 1);
+        assert_eq!(row.input_tokens, Some(1), "message text / 4");
+        assert_eq!(
+            row.output_tokens,
+            Some(1),
+            "\"hello\" = 5 content chars / 4, not the ~130-char body"
+        );
     }
 
     #[tokio::test]
@@ -2737,6 +2965,8 @@ mod tests {
             "messages": [{"role": "user", "content": "x".repeat(4096)}],
             "stream": true,
         });
+        let real_len = body.to_string().len() as i64;
+        assert!(real_len > 1024);
         let response = send(s.app.router(), chat_request(&s.cookie, body)).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert_eq!(response.body["error"]["code"], "invalid_request");
@@ -2752,7 +2982,11 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].error_class.as_deref(), Some("invalid_request"));
         let log = &log_rows(&s.app).await[0];
-        assert_eq!(log.bytes_in, Some(1024));
+        assert_eq!(
+            log.bytes_in,
+            Some(real_len),
+            "bytes_in is the body size actually received, not the limit"
+        );
         assert_eq!(log.has_request_body, 1);
     }
 
@@ -2853,6 +3087,508 @@ mod tests {
         let row = &usage_rows(&s.app).await[0];
         assert_eq!(row.error_class.as_deref(), Some("upstream_error"));
         assert_eq!(row.status, Some(502));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deep-review regressions (2026-11-16)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn duplicate_client_request_ids_settle_two_independent_ledger_pairs() {
+        // Review B1: a client-chosen `x-request-id` used to be the ledger key;
+        // a duplicate made the second settlement roll back — zero rows for a
+        // full 200. Both requests must settle their own pair now.
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(1, 2)),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let mut first = chat_request(&s.cookie, chat_body("m", true));
+        first
+            .headers_mut()
+            .insert("x-request-id", "shared-echo".parse().expect("header"));
+        let mut second = chat_request(&s.cookie, chat_body("m", true));
+        second
+            .headers_mut()
+            .insert("x-request-id", "shared-echo".parse().expect("header"));
+
+        let (status, first_headers, first_body) = send_streaming(s.app.router(), first).await;
+        assert_eq!(status, StatusCode::OK);
+        body_text(first_body).await;
+        let (status, second_headers, second_body) = send_streaming(s.app.router(), second).await;
+        assert_eq!(status, StatusCode::OK);
+        body_text(second_body).await;
+
+        let logs = log_rows(&s.app).await;
+        assert_eq!(logs.len(), 2, "no rollback: both requests settle a log row");
+        assert_ne!(
+            logs[0].request_id, logs[1].request_id,
+            "the ledger key is server-generated, never the client's echo"
+        );
+        for log in &logs {
+            assert_eq!(
+                log.client_request_id.as_deref(),
+                Some("shared-echo"),
+                "the echo is preserved for the ledger"
+            );
+        }
+        let usage = usage_rows(&s.app).await;
+        assert_eq!(usage.len(), 2, "exactly one usage row per request");
+        assert_eq!(usage[0].request_id, logs[0].request_id);
+        assert_eq!(usage[1].request_id, logs[1].request_id);
+
+        // Clients see the server id (response header), never their echo.
+        let server_id = |headers: &axum::http::HeaderMap| {
+            headers
+                .get("x-request-id")
+                .map(|value| value.to_str().expect("ascii").to_string())
+                .expect("response x-request-id")
+        };
+        assert_ne!(server_id(&first_headers), "shared-echo");
+        assert_eq!(server_id(&first_headers), logs[0].request_id);
+        assert_eq!(server_id(&second_headers), logs[1].request_id);
+    }
+
+    #[tokio::test]
+    async fn a_connect_timeout_attempt_books_no_token_estimate() {
+        // Review M3: pre-send failures (decrypt errors, connect timeouts)
+        // must book NULL tokens, not a fabricated estimate. The stub is a
+        // black-hole address, so the connect never completes.
+        let s = seeded_with(|config| {
+            config.timeout_first_byte = Duration::from_millis(300);
+        })
+        .await;
+        let (provider_id, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", "http://10.255.255.1:81", None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let started = Instant::now();
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not hang: {:?}",
+            started.elapsed()
+        );
+        assert_ne!(response.status, StatusCode::OK);
+
+        let rows = usage_rows(&s.app).await;
+        assert_eq!(rows.len(), 1, "the failure is still settled");
+        assert!(rows[0].error_class.is_some());
+        assert!(
+            rows[0].input_tokens.is_none() && rows[0].output_tokens.is_none(),
+            "nothing was sent upstream, so nothing may be estimated: {:?}",
+            rows[0]
+        );
+        assert_eq!(rows[0].tokens_estimated, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_reader_cannot_pin_the_runner_past_the_total_budget() {
+        // Review m1: `tx.send` must race the total deadline. The test reads
+        // one chunk and then stops consuming (without disconnecting): the
+        // runner's channel fills and its sends block until the deadline ends
+        // the request and settles the rows.
+        let stub = Stub::spawn(vec![Scenario::Drip {
+            interval: Duration::from_millis(10),
+            chunk: format!("data: {}\n\n", event(0)),
+        }])
+        .await;
+        let s = seeded_with(|config| {
+            config.timeout_total = Duration::from_millis(400);
+        })
+        .await;
+        let (provider_id, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let (_, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        let mut stream = response_body.into_data_stream();
+        assert!(stream.next().await.is_some(), "first chunk arrives");
+        // Stop reading here — the response body (and its cancel guard) stays
+        // alive, so this is a stalled reader, not a disconnect.
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        loop {
+            let rows = usage_rows(&s.app).await;
+            if !rows.is_empty() {
+                assert_eq!(rows[0].status, Some(200), "the stream was committed");
+                assert_eq!(rows[0].error_class.as_deref(), Some("upstream_timeout"));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the rows must settle at the total deadline: {rows:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_stream_line_ends_the_stream_in_band_without_failover() {
+        // Review M2: a single line over the 1 MiB cap is an in-band
+        // `upstream_stream_failed` error after the first byte; never failover.
+        let huge = "x".repeat(sse::MAX_LINE_BYTES + 1);
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0), huge],
+                usage: None,
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(1, 1)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the first event committed the stream"
+        );
+        let text = body_text(response_body).await;
+        assert!(text.contains("c0"), "{text}");
+        assert!(
+            text.contains("\"code\":\"upstream_stream_failed\""),
+            "{text}"
+        );
+        assert!(text.contains("data: [DONE]"), "{text}");
+        assert_eq!(
+            stub.request_count(),
+            1,
+            "line-cap overflow never fails over"
+        );
+
+        let row = &usage_rows(&s.app).await[0];
+        assert_eq!(row.error_class.as_deref(), Some("upstream_stream_failed"));
+        assert_eq!(row.status, Some(200));
+    }
+
+    #[tokio::test]
+    async fn malformed_first_chunk_fails_over_before_forwarding() {
+        // Review m6: a protocol error in the very first chunk is still before
+        // the first byte, so the next candidate is tried.
+        let stub = Stub::spawn(vec![
+            Scenario::Malformed { after: 0 },
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(1, 1)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let off1 = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(response_body).await;
+        assert!(text.contains("c0"), "{text}");
+        assert!(text.contains("data: [DONE]"), "{text}");
+        assert_eq!(stub.request_count(), 2, "the first chunk failed over");
+
+        let log = &log_rows(&s.app).await[0];
+        let decision = decision_of(log);
+        assert_eq!(decision["candidates"][0]["id"], off1);
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
+        assert_eq!(
+            decision["candidates"][0]["error_class"],
+            "upstream_stream_failed"
+        );
+        assert_eq!(decision["candidates"][1]["outcome"], "chosen");
+    }
+
+    #[tokio::test]
+    async fn empty_upstream_body_fails_over() {
+        // Review m6: a 200 with an empty body is a stream failure before the
+        // first byte, so the next candidate is tried.
+        let stub = Stub::spawn(vec![
+            Scenario::Json {
+                body: String::new(),
+            },
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(1, 1)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(response_body).await;
+        assert!(text.contains("c0"), "{text}");
+        assert_eq!(
+            stub.request_count(),
+            2,
+            "an empty body fails over before the first byte"
+        );
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
+        assert_eq!(decision["candidates"][1]["outcome"], "chosen");
+    }
+
+    #[tokio::test]
+    async fn the_total_budget_spans_both_attempts() {
+        // Review m6: the total deadline is absolute across failover attempts.
+        // Attempt 1 burns 250ms and fails; attempt 2 must hit the shared
+        // deadline at ~400ms, not restart a fresh first-byte budget.
+        let stub = Stub::spawn(vec![
+            Scenario::SlowStart {
+                delay: Duration::from_millis(250),
+                then: Box::new(Scenario::Status {
+                    code: 500,
+                    headers: Vec::new(),
+                    body: "{}".to_string(),
+                }),
+            },
+            Scenario::SlowStart {
+                delay: Duration::from_secs(10),
+                then: Box::new(Scenario::Stream {
+                    events: vec![],
+                    usage: None,
+                }),
+            },
+        ])
+        .await;
+        let s = seeded_with(|config| {
+            config.timeout_total = Duration::from_millis(400);
+            config.timeout_first_byte = Duration::from_secs(30);
+        })
+        .await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let started = Instant::now();
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(350) && elapsed < Duration::from_secs(2),
+            "the shared deadline bounds both attempts: {elapsed:?}"
+        );
+        assert_eq!(response.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(response.body["error"]["code"], "upstream_timeout");
+        assert_eq!(
+            stub.request_count(),
+            2,
+            "attempt 2 was made, then timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_cap_overflow_is_terminal_and_exact() {
+        // Review m5/m6: one over-cap buffered response must not fail over (the
+        // next candidate could buffer 32 MiB again) and the buffer must not
+        // overshoot the cap by a chunk.
+        let oversized = json!({"data": "x".repeat(MAX_BUFFERED_RESPONSE + 1)}).to_string();
+        assert!(oversized.len() > MAX_BUFFERED_RESPONSE);
+        let stub = Stub::spawn(vec![
+            Scenario::Json { body: oversized },
+            Scenario::Json {
+                body: "{}".to_string(),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.body["error"]["code"], "upstream_stream_failed");
+        assert_eq!(
+            stub.request_count(),
+            1,
+            "the cap is terminal: no second 32 MiB buffer on another candidate"
+        );
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
+        assert_eq!(
+            decision["candidates"][0]["error_class"],
+            "upstream_stream_failed"
+        );
+        assert_eq!(decision["candidates"][1]["outcome"], "not_tried");
     }
 
     // -----------------------------------------------------------------------
@@ -2961,9 +3697,28 @@ mod tests {
     }
 
     #[test]
-    fn estimation_applies_only_without_upstream_usage() {
+    fn in_band_error_is_prefixed_with_a_blank_line() {
+        // Review m2: the error frame must never concatenate onto a partial
+        // upstream SSE line.
+        let bytes = in_band_error_bytes(
+            &ChatFailure::new(
+                StatusCode::BAD_GATEWAY,
+                "upstream_stream_failed",
+                "the upstream response stream failed",
+            ),
+            "req-1",
+        );
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.starts_with("\n\ndata: {\"error\""), "{text}");
+        assert!(text.contains("\"request_id\":\"req-1\""), "{text}");
+        assert!(text.ends_with("data: [DONE]\n\n"), "{text}");
+    }
+
+    #[test]
+    fn estimation_applies_only_without_upstream_usage_and_only_after_send() {
         let meta = RequestMeta {
             request_id: "req-1".to_string(),
+            client_request_id: Some("echo-1".to_string()),
             user_id: "user-1".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
@@ -2975,17 +3730,32 @@ mod tests {
         assert!(usage.is_none());
         assert!(!estimated);
 
-        // An attempt was made but no usage arrived: chars/4, flagged.
-        let attempted = Settlement {
+        // A request that never reached upstream (decrypt failure, connect
+        // timeout, pre-send rejection) books NULL even when a candidate is
+        // attributed to the failure — never a zero-row rollback and never a
+        // fabricated estimate (review M3).
+        let pre_send = Settlement {
             offering_id: Some("off-1".to_string()),
+            input_chars: 404,
             output_chars: 400,
+            sent: false,
             ..base
         };
-        let (usage, estimated) = resolve_usage(&attempted);
+        let (usage, estimated) = resolve_usage(&pre_send);
+        assert!(usage.is_none(), "pre-send failures book no estimate");
+        assert!(!estimated);
+
+        // A request that was actually sent but got no usage: chars/4 from
+        // content characters only, flagged (review M1).
+        let sent = Settlement {
+            sent: true,
+            ..pre_send
+        };
+        let (usage, estimated) = resolve_usage(&sent);
         let usage = usage.expect("estimated");
         assert!(estimated);
-        assert_eq!(usage.input_tokens, Some(100));
-        assert_eq!(usage.output_tokens, Some(100));
+        assert_eq!(usage.input_tokens, Some(101), "message-text chars / 4");
+        assert_eq!(usage.output_tokens, Some(100), "content chars / 4");
 
         // Upstream usage is authoritative and never estimated.
         let exact = Settlement {
@@ -2996,7 +3766,7 @@ mod tests {
                 cache_write_tokens: None,
                 reasoning_tokens: None,
             }),
-            ..attempted
+            ..sent
         };
         let (usage, estimated) = resolve_usage(&exact);
         assert!(!estimated);

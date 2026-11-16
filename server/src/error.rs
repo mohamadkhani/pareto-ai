@@ -1,10 +1,13 @@
 //! Uniform API error shape.
 //!
 //! Every non-2xx API response is `{"error": {"code", "message", "request_id"}}`
-//! with a sensible HTTP status. The `request_id` is the `x-request-id` value
-//! the middleware already put on the request, so a body can be correlated with
-//! the request log. It is `null` only when the request never carried one (for
-//! example when a handler is invoked outside the HTTP stack, as in tests).
+//! with a sensible HTTP status. The `request_id` is the **server-assigned**
+//! `x-request-id` the request-id middleware stamped on the request (a fresh
+//! UUID per request), so a body can be correlated with the request log. A
+//! client-supplied `x-request-id` is never echoed into it: that echo lives
+//! only in the ledger's `client_request_id` column (review blocker B1).
+//! It is `null` only when the request never carried one (for example when a
+//! handler is invoked outside the HTTP stack, as in tests).
 //! Internals and secrets are never included in a message.
 
 use axum::Json;
@@ -26,7 +29,7 @@ pub struct ErrorDetail {
     pub code: String,
     /// Human-readable summary. Never contains internals or secrets.
     pub message: String,
-    /// The `x-request-id` of the failing request, when present.
+    /// The server-assigned request id of the failing request, when present.
     pub request_id: Option<String>,
 }
 
@@ -202,7 +205,8 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// The `x-request-id` value the request-id middleware stamped on the request.
+/// The server-assigned `x-request-id` the request-id middleware stamped on the
+/// request (never a client-supplied value — see [`crate::request_id`]).
 pub fn request_id(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-request-id")

@@ -3,13 +3,18 @@
 -- `usage_events` is the token/usage ledger: one row per completion (success or
 -- failure) of `POST /v1/chat/completions`. When the upstream reports `usage`
 -- its numbers are authoritative; when it does not, tokens are estimated as
--- chars/4 and `tokens_estimated` is 1. `cost_usd` is NULL whenever the
--- offering's price is not fully known (unknown is never 0, decision D10).
+-- chars/4 from content text only and `tokens_estimated` is 1. `cost_usd` is
+-- always NULL in M3 by design: price-aware costing is part of M4's budget
+-- settlement (decision D7) and unknown is never 0 (decision D10).
 --
--- `request_logs` is one row per chat request (the `request_id` primary key is
--- the `x-request-id` value). `decision_json` records the routing decision: the
--- candidates considered (id, provider, model, price if known), the chosen one,
--- and a one-line reason — the M5 explanation grows out of this column.
+-- `request_logs` is one row per chat request. `request_id` is **server-
+-- generated** (the request-id middleware's value or a fresh UUID) and is the
+-- ledger key; the client's optional `x-request-id` echo is preserved in
+-- `client_request_id` and is never used as a key (review blocker B1: a
+-- client-controlled primary key let a duplicate id roll back both ledger
+-- rows). `decision_json` records the routing decision: the candidates
+-- considered (id, provider, model, price if known), the chosen one, and a
+-- one-line reason — the M5 explanation grows out of this column.
 --
 -- Bodies are never stored (decision D11); `has_request_body` exists so a later
 -- opt-in body capture can be correlated without a schema change.
@@ -40,6 +45,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
 
 CREATE TABLE IF NOT EXISTS request_logs (
     request_id             TEXT PRIMARY KEY,
+    client_request_id      TEXT,
     occurred_at            TEXT NOT NULL,
     method                 TEXT,
     path                   TEXT,
@@ -55,9 +61,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
     has_request_body       INTEGER NOT NULL DEFAULT 0 CHECK (has_request_body IN (0, 1))
 );
 
+-- UNIQUE is the schema guard for exactly-once settlement: one ledger row per
+-- server-generated request id (review nit "no schema guard on exactly-once").
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_request_id
+    ON usage_events (request_id);
 CREATE INDEX IF NOT EXISTS idx_usage_events_user_id
     ON usage_events (user_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_usage_events_offering_id
     ON usage_events (offering_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_occurred_at
     ON request_logs (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_request_logs_client_request_id
+    ON request_logs (client_request_id);

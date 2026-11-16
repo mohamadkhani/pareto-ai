@@ -42,15 +42,21 @@ usage_events(id INTEGER PK AUTOINCREMENT, request_id TEXT NOT NULL, user_id TEXT
           INTEGER, ttft_ms INTEGER, status INTEGER, error_class TEXT,
           occurred_at TEXT NOT NULL)
 
-request_logs(request_id TEXT PK, occurred_at TEXT NOT NULL, method TEXT, path
-          TEXT, requested_model TEXT, resolved_offering_id TEXT, decision_json
-          TEXT, status INTEGER, error_class TEXT, bytes_in INTEGER, bytes_out
-          INTEGER, user_id TEXT, api_key_id TEXT, has_request_body INTEGER NOT
-          NULL DEFAULT 0 CHECK (has_request_body IN (0,1)))
+request_logs(request_id TEXT PK, client_request_id TEXT, occurred_at TEXT NOT
+          NULL, method TEXT, path TEXT, requested_model TEXT,
+          resolved_offering_id TEXT, decision_json TEXT, status INTEGER,
+          error_class TEXT, bytes_in INTEGER, bytes_out INTEGER, user_id TEXT,
+          api_key_id TEXT, has_request_body INTEGER NOT NULL DEFAULT 0
+          CHECK (has_request_body IN (0,1)))
 ```
 
+- `request_id` is **server-generated** and is the ledger key; the client's
+  optional `x-request-id` is preserved in `client_request_id` (amended after
+  review blocker B1, 2026-11-16: a client-controlled PK let a duplicate id
+  roll back both ledger rows).
 - Indexes: `usage_events(user_id, occurred_at)`, `usage_events(offering_id,
-  occurred_at)`, `request_logs(occurred_at)`.
+  occurred_at)`, `usage_events(request_id)`, `request_logs(occurred_at)`,
+  `request_logs(client_request_id)`.
 - `decision_json` records the candidates considered (id, provider, model,
   price if known), the chosen one, and a one-line reason — the M5 explanation
   grows out of this column.
@@ -84,7 +90,11 @@ request_logs(request_id TEXT PK, occurred_at TEXT NOT NULL, method TEXT, path
 - Failover is allowed **only before the first byte reaches the client**.
   After that, surface the error and end the stream (documented in the handler).
 - Upstream `usage` in the final chunk is authoritative; when missing, estimate
-  tokens (`chars/4` for input, output chars/4) and set `tokens_estimated=1`.
+  tokens from **content text only** (`choices[].message.content` /
+  `delta.content`, plus `reasoning` when present; input from the message text),
+  `chars/4`, and set `tokens_estimated=1` — never from JSON scaffolding or raw
+  body bytes (review M1, 2026-11-16). Estimation applies only when a request
+  was actually sent upstream (review M3).
 - Never retry a `400`/`401`/`403` from upstream; `429` is retried once on the
   next candidate honouring `Retry-After` as a cooldown on that credential.
 

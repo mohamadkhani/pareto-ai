@@ -238,6 +238,12 @@ fn classify_covers_the_taxonomy_table() {
             StatusCode::BAD_GATEWAY,
             true,
         ),
+        (
+            UpstreamError::TooLarge,
+            "upstream_stream_failed",
+            StatusCode::BAD_GATEWAY,
+            false,
+        ),
     ];
     for (error, code, status, retryable) in cases {
         let class = error.classify();
@@ -262,6 +268,21 @@ fn classify_covers_the_taxonomy_table() {
         retry_after: None,
     };
     assert_eq!(transient.classify().cooldown, None);
+}
+
+#[test]
+fn credential_header_values_are_marked_sensitive() {
+    // Review m4: merged authorization / x-api-key values must be redacted by
+    // reqwest itself (its error reporting and debug output honour the flag).
+    for name in ["authorization", "x-api-key", "X-Api-Key", "Authorization"] {
+        let value = header_value(name, "sk-live-secret").expect("header value");
+        assert!(value.is_sensitive(), "{name} must be marked sensitive");
+        let debug = format!("{value:?}");
+        assert!(!debug.contains("sk-live-secret"), "{debug}");
+    }
+    let value = header_value("x-tenant", "team-a").expect("header value");
+    assert!(!value.is_sensitive(), "ordinary headers are not sensitive");
+    assert_eq!(value, "team-a");
 }
 
 #[tokio::test]

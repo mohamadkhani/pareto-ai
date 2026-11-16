@@ -7,19 +7,28 @@
 //! `/v1` is **exempt from the CSRF guard**: OpenAI-SDK clients never send
 //! `X-CSRF-Token`, and the guard stays on cookie-authenticated `/api/*`.
 //!
+//! Request ids (review B1): the ledger key is **server-generated** (the
+//! request-id middleware's stamp or a fresh UUID) and is what error bodies and
+//! the response `x-request-id` header carry. The client's optional
+//! `x-request-id` echo is preserved only in the ledger's `client_request_id`
+//! column — never as a key and never echoed back.
+//!
 //! Client-visible contract (a future UI must know this): `stream: true`
 //! answers `200 text/event-stream` and forwards the upstream SSE untouched
 //! (`data:` lines and `data: [DONE]` included). If the stream dies after the
 //! first byte the status cannot change anymore, so the failure surfaces
 //! in-band as one `data: {"error": {"code", "message", "request_id"}}` event
-//! in the uniform error shape, followed by `data: [DONE]`, and then the stream
-//! ends. `stream: false` answers a complete `application/json` body, and every
-//! failure is a plain error response in the uniform shape.
+//! in the uniform error shape (preceded by `\n\n` so it cannot concatenate
+//! onto a partial upstream line), followed by `data: [DONE]`, and then the
+//! stream ends. `stream: false` answers a complete `application/json` body,
+//! and every failure is a plain error response in the uniform shape.
 
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
+use bytes::Bytes;
+use futures_util::StreamExt;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -66,6 +75,11 @@ pub struct ChatUsage {
 
 /// Handles one chat completion. Admin session required (M4 adds API keys);
 /// CSRF-exempt like the rest of `/v1`.
+///
+/// Failover note: the candidate order is resolved once per request, before
+/// the first attempt; a cooldown recorded while attempt 1 is failing (an
+/// upstream 401/403/402/429) therefore does not re-order the candidates of
+/// this same request — it demotes the credential only for later requests.
 #[utoipa::path(
     post,
     path = "/v1/chat/completions",
@@ -94,33 +108,61 @@ pub async fn chat_completions(
     RequireAdmin(admin): RequireAdmin,
     req: Request,
 ) -> Result<Response, ApiError> {
+    // The ledger key is server-generated (the middleware's stamp or a fresh
+    // UUID); the client's echo goes only into `client_request_id` (review B1).
     let rid = error::request_id(req.headers()).or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    let client_rid = crate::request_id::client_request_id(req.extensions());
     let meta = chat::RequestMeta {
         request_id: rid.clone().unwrap_or_default(),
+        client_request_id: client_rid,
         user_id: admin.user_id,
         method: "POST".to_string(),
         path: "/v1/chat/completions".to_string(),
     };
 
+    // Read the body with a live byte count so `bytes_in` is the size actually
+    // received — not the configured limit (review nit). The read stops as soon
+    // as the limit is crossed; the unread remainder is never pulled.
     let limit = state.config.max_body_bytes;
-    let body = match to_bytes(req.into_body(), limit).await {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::debug!(error = %e, "chat request body rejected");
-            let failure = chat::ChatFailure {
-                status: StatusCode::BAD_REQUEST,
-                code: "invalid_request",
-                message: format!("request body exceeds the {limit} byte limit"),
-                retry_after: None,
-            };
-            // Settled before the error response leaves: every completion has
-            // its rows.
-            chat::record_rejection(&state, &meta, limit as u64, &failure).await;
-            return Err(failure.into_api_error(rid.clone()));
+    let mut frames = req.into_body().into_data_stream();
+    let mut body = Vec::new();
+    let mut bytes_in = 0u64;
+    let mut rejected = None;
+    while let Some(frame) = frames.next().await {
+        match frame {
+            Ok(chunk) => {
+                bytes_in += chunk.len() as u64;
+                if bytes_in > limit as u64 {
+                    rejected = Some(chat::ChatFailure {
+                        status: StatusCode::BAD_REQUEST,
+                        code: "invalid_request",
+                        message: format!("request body exceeds the {limit} byte limit"),
+                        retry_after: None,
+                    });
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "chat request body rejected");
+                rejected = Some(chat::ChatFailure {
+                    status: StatusCode::BAD_REQUEST,
+                    code: "invalid_request",
+                    message: "could not read the request body".to_string(),
+                    retry_after: None,
+                });
+                break;
+            }
         }
-    };
+    }
+    if let Some(failure) = rejected {
+        // Settled before the error response leaves: every completion has
+        // its rows.
+        chat::record_rejection(&state, &meta, bytes_in, &failure).await;
+        return Err(failure.into_api_error(rid.clone()));
+    }
 
-    match chat::execute(&state, &meta, body).await {
+    match chat::execute(&state, &meta, Bytes::from(body)).await {
         Ok(chat::ChatOutcome::Json(bytes)) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
