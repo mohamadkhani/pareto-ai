@@ -43,7 +43,9 @@ use crate::error::{self, ApiError, ErrorBody};
 /// untouched.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ChatCompletionRequest {
-    /// Model to route (an upstream model id or a canonical name).
+    /// Model to route: an upstream model id, a canonical name, or a combo in
+    /// the `combo:<name>` namespace (M5 — expanded to its member offerings
+    /// and routed by the combo's strategy).
     pub model: String,
     /// Conversation so far; at most 200 messages.
     pub messages: Vec<serde_json::Value>,

@@ -152,6 +152,21 @@ fn require_name(raw: &str, field: &str) -> Result<String, CatalogError> {
     Ok(trimmed.to_string())
 }
 
+/// Model names in the `combo:` namespace are reserved for combo models
+/// (spec M5): a real model with that prefix would shadow `combo:<name>`
+/// addressing in `/v1/chat/completions` (review m4). Enforced at create and
+/// update so it cannot be introduced later either.
+fn require_model_name(raw: &str) -> Result<String, CatalogError> {
+    let name = require_name(raw, "canonical_name")?;
+    if name.starts_with(crate::combos::NAMESPACE) {
+        return Err(CatalogError::Invalid(format!(
+            "canonical_name must not start with {:?} (the combo model-id namespace)",
+            crate::combos::NAMESPACE
+        )));
+    }
+    Ok(name)
+}
+
 fn validate_base_url(raw: &str) -> Result<String, CatalogError> {
     let trimmed = raw.trim();
     let url = reqwest::Url::parse(trimmed)
@@ -801,7 +816,7 @@ pub async fn create_model(
     actor: &Actor<'_>,
     input: &ModelInput,
 ) -> Result<ModelRow, CatalogError> {
-    let canonical_name = require_name(&input.canonical_name, "canonical_name")?;
+    let canonical_name = require_model_name(&input.canonical_name)?;
     let family = input
         .family
         .as_deref()
@@ -863,7 +878,7 @@ pub async fn update_model(
     let canonical_name = patch
         .canonical_name
         .as_deref()
-        .map(|v| require_name(v, "canonical_name"))
+        .map(require_model_name)
         .transpose()?;
     let family = patch
         .family
@@ -1575,6 +1590,22 @@ fn build_v1_model(row: &V1Row) -> V1Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combo_namespace_model_names_are_reserved() {
+        // Review m4: a model named `combo:<name>` would shadow combo
+        // addressing in /v1/chat/completions — rejected at create and update.
+        for reserved in ["combo:smart", "combo:"] {
+            let err = require_model_name(reserved).expect_err("reserved");
+            assert!(err.to_string().contains("combo:"), "{err}");
+        }
+        assert_eq!(
+            require_model_name("combo-less").expect("plain name"),
+            "combo-less",
+            "the prefix alone is fine"
+        );
+        assert_eq!(require_model_name("gpt-4o").expect("plain name"), "gpt-4o");
+    }
 
     #[test]
     fn secret_validation_keeps_whitespace_and_long_keys_but_caps_at_8kb() {

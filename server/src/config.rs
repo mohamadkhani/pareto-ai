@@ -25,6 +25,13 @@ pub const DEFAULT_TIMEOUT_IDLE: Duration = Duration::from_secs(60);
 /// Total budget for one client request including failover attempts
 /// (`GATEWAY_TIMEOUT_TOTAL_MS`).
 pub const DEFAULT_TIMEOUT_TOTAL: Duration = Duration::from_secs(600);
+/// Telemetry cache refresh interval (`GATEWAY_TELEMETRY_REFRESH_MS`).
+pub const DEFAULT_TELEMETRY_REFRESH: Duration = Duration::from_secs(30);
+/// Consecutive failures before a (credential, offering) breaker opens
+/// (`GATEWAY_BREAKER_THRESHOLD`).
+pub const DEFAULT_BREAKER_THRESHOLD: u32 = crate::breaker::DEFAULT_THRESHOLD;
+/// How long an open breaker excludes the pair (`GATEWAY_BREAKER_COOLDOWN_MS`).
+pub const DEFAULT_BREAKER_COOLDOWN: Duration = crate::breaker::DEFAULT_COOLDOWN;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -62,6 +69,15 @@ pub struct Config {
     /// Total budget for one client request, failover attempts included
     /// (`GATEWAY_TIMEOUT_TOTAL_MS`, default 600s).
     pub timeout_total: Duration,
+    /// How often the per-offering telemetry cache rebuilds from
+    /// `telemetry_attempts` (`GATEWAY_TELEMETRY_REFRESH_MS`, default 30s).
+    pub telemetry_refresh: Duration,
+    /// Consecutive failures before a (credential, offering) circuit breaker
+    /// opens (`GATEWAY_BREAKER_THRESHOLD`, default 5).
+    pub breaker_threshold: u32,
+    /// How long an open circuit breaker excludes the pair
+    /// (`GATEWAY_BREAKER_COOLDOWN_MS`, default 60s).
+    pub breaker_cooldown: Duration,
     /// Version reported by the health endpoint.
     pub version: String,
 }
@@ -126,6 +142,9 @@ impl Config {
             )?,
             timeout_idle: parse_ms("GATEWAY_TIMEOUT_IDLE_MS", DEFAULT_TIMEOUT_IDLE)?,
             timeout_total: parse_ms("GATEWAY_TIMEOUT_TOTAL_MS", DEFAULT_TIMEOUT_TOTAL)?,
+            telemetry_refresh: parse_ms("GATEWAY_TELEMETRY_REFRESH_MS", DEFAULT_TELEMETRY_REFRESH)?,
+            breaker_threshold: parse_u32("GATEWAY_BREAKER_THRESHOLD", DEFAULT_BREAKER_THRESHOLD)?,
+            breaker_cooldown: parse_ms("GATEWAY_BREAKER_COOLDOWN_MS", DEFAULT_BREAKER_COOLDOWN)?,
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
@@ -182,6 +201,26 @@ fn parse_ms(name: &'static str, default: Duration) -> Result<Duration, ConfigErr
 /// blank. Zero and non-numeric values are startup errors.
 fn parse_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     parse_positive(name, env::var(name).ok(), default as u64).map(|value| value as usize)
+}
+
+/// Reads an unsigned 32-bit variable, falling back to `default` when absent
+/// or blank. Zero, non-numeric, and out-of-range values are startup errors:
+/// the conversion is checked, never a silent truncation (review m6 — `as u32`
+/// wrapped values above 2^32).
+fn parse_u32(name: &'static str, default: u32) -> Result<u32, ConfigError> {
+    checked_u32(
+        name,
+        parse_positive(name, env::var(name).ok(), u64::from(default))?,
+    )
+}
+
+/// The checked `u64 → u32` conversion behind [`parse_u32`]. Failure mode:
+/// [`ConfigError::Number`] naming the variable and the offending value.
+fn checked_u32(name: &'static str, value: u64) -> Result<u32, ConfigError> {
+    u32::try_from(value).map_err(|_| ConfigError::Number {
+        name,
+        value: value.to_string(),
+    })
 }
 
 /// Parses an unsigned variable value; absent or blank falls back to `default`,
@@ -263,6 +302,24 @@ mod tests {
                 .expect_err("bad values must fail");
             assert!(
                 err.to_string().contains("GATEWAY_TIMEOUT_IDLE_MS"),
+                "the error names the variable: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn breaker_threshold_conversions_are_checked_never_truncated() {
+        // Review m6: `as u32` silently wrapped values above 2^32.
+        assert_eq!(checked_u32("X", 5).expect("in range"), 5);
+        assert_eq!(
+            checked_u32("X", u64::from(u32::MAX)).expect("boundary"),
+            u32::MAX
+        );
+        for bad in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let err =
+                checked_u32("GATEWAY_BREAKER_THRESHOLD", bad).expect_err("out of range must fail");
+            assert!(
+                err.to_string().contains("GATEWAY_BREAKER_THRESHOLD"),
                 "the error names the variable: {err}"
             );
         }

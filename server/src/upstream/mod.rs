@@ -105,6 +105,11 @@ pub struct FailureClass {
     pub retryable_before_first_byte: bool,
     /// Cooldown to record on the credential (`Retry-After` when present).
     pub cooldown: Option<Duration>,
+    /// Whether this failure counts toward the (credential, offering) circuit
+    /// breaker (review M1): `invalid_request` is the caller's broken request
+    /// and `internal` is our own configuration — neither reflects the
+    /// offering's service, so neither may exclude a healthy offering.
+    pub counts_toward_breaker: bool,
 }
 
 impl UpstreamError {
@@ -113,18 +118,26 @@ impl UpstreamError {
     /// only ever allowed before the first byte. Logs a `warn` with the failure
     /// and its class (review m3); the error strings are secret-free.
     pub fn classify(&self) -> FailureClass {
-        let class = |code, status, retryable, cooldown| FailureClass {
+        let class = |code, status, retryable, cooldown, counts_toward_breaker| FailureClass {
             code,
             status,
             retryable_before_first_byte: retryable,
             cooldown,
+            counts_toward_breaker,
         };
         let class = match self {
             // 400/422 are returned to the caller; 401/403 cool the credential
-            // down but are never retried (spec failure rules).
+            // down but are never retried (spec failure rules). The caller's
+            // own invalid request never trips the breaker (review M1).
             UpstreamError::Http {
                 status: 400 | 422, ..
-            } => class("invalid_request", StatusCode::BAD_REQUEST, false, None),
+            } => class(
+                "invalid_request",
+                StatusCode::BAD_REQUEST,
+                false,
+                None,
+                false,
+            ),
             UpstreamError::Http {
                 status: 401 | 403,
                 retry_after,
@@ -133,6 +146,7 @@ impl UpstreamError {
                 StatusCode::BAD_GATEWAY,
                 false,
                 Some(retry_after.unwrap_or(DEFAULT_COOLDOWN)),
+                true,
             ),
             UpstreamError::Http {
                 status: 402,
@@ -142,6 +156,7 @@ impl UpstreamError {
                 StatusCode::BAD_GATEWAY,
                 true,
                 Some(retry_after.unwrap_or(DEFAULT_COOLDOWN)),
+                true,
             ),
             UpstreamError::Http {
                 status: 429,
@@ -151,20 +166,26 @@ impl UpstreamError {
                 StatusCode::TOO_MANY_REQUESTS,
                 true,
                 Some(retry_after.unwrap_or(DEFAULT_COOLDOWN)),
+                true,
             ),
             // Every other non-2xx status (404, 500, 503, ...) is a transient
             // upstream failure: fail over before the first byte.
             UpstreamError::Http { .. } => {
-                class("upstream_error", StatusCode::BAD_GATEWAY, true, None)
+                class("upstream_error", StatusCode::BAD_GATEWAY, true, None, true)
             }
-            UpstreamError::Timeout { .. } => {
-                class("upstream_timeout", StatusCode::GATEWAY_TIMEOUT, true, None)
-            }
+            UpstreamError::Timeout { .. } => class(
+                "upstream_timeout",
+                StatusCode::GATEWAY_TIMEOUT,
+                true,
+                None,
+                true,
+            ),
             UpstreamError::Transport(_) | UpstreamError::Body(_) => class(
                 "upstream_stream_failed",
                 StatusCode::BAD_GATEWAY,
                 true,
                 None,
+                true,
             ),
             // A too-large buffered response is terminal: failover would let
             // every candidate buffer the cap again (review m5).
@@ -173,10 +194,18 @@ impl UpstreamError {
                 StatusCode::BAD_GATEWAY,
                 false,
                 None,
+                true,
             ),
-            UpstreamError::Credential(_) => {
-                class("internal", StatusCode::INTERNAL_SERVER_ERROR, false, None)
-            }
+            // Unusable credential material is our configuration problem, not
+            // the offering's service — like `invalid_request`, it never trips
+            // the breaker (review M1).
+            UpstreamError::Credential(_) => class(
+                "internal",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                None,
+                false,
+            ),
         };
         tracing::warn!(error = %self, code = class.code, "upstream call failed");
         class

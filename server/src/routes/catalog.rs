@@ -16,7 +16,7 @@ use crate::AppState;
 use crate::auth::{ClientIp, RequireAdmin};
 use crate::catalog::{
     self, Actor, ModelInput, ModelPatch, ModelView, OfferingInput, OfferingPatch, OfferingView,
-    PriceInput, PriceView, V1ModelList,
+    PriceInput, PriceView, V1Model, V1ModelList,
 };
 use crate::error::{self, ApiError, ErrorBody};
 use crate::routes::bad_body;
@@ -405,7 +405,9 @@ pub async fn override_price(
 /// Lists the enabled offerings in OpenAI-compatible shape: one entry per
 /// enabled offering of an enabled provider, with effective limits (offering
 /// overrides win) and prices in USD per 1M tokens. Unknown price components
-/// are null — never 0. Requires an admin session until M4 API keys exist.
+/// are null — never 0. Enabled combos are appended as `combo:<name>` entries
+/// (review m4 — discoverable), with null limits and price (they vary per
+/// member). Requires an admin session until M4 API keys exist.
 #[utoipa::path(
     get,
     path = "/v1/models",
@@ -427,12 +429,13 @@ pub async fn v1_models(
         .map_err(|e| e.into_api_error(rid.clone()))?;
     // Access control (decision D9): the listing shows only the models the
     // caller may use through at least one enabled offering. Credentials are
-    // not evaluated here — the chat pipeline checks them per request.
+    // not evaluated here — the chat pipeline checks them per request. A combo
+    // is shown when at least one member offering is allowed.
     let api_key_id = caller.api_key.as_ref().map(|key| key.key_id.as_str());
     let grants = crate::access::Grants::load(&state.pool, &caller.user_id, api_key_id)
         .await
         .map_err(|e| ApiError::internal("loading grants", e).with_request_id(rid.clone()))?;
-    let data = entries
+    let mut data: Vec<V1Model> = entries
         .into_iter()
         .filter(|entry| {
             grants.allows(
@@ -446,6 +449,23 @@ pub async fn v1_models(
         })
         .map(|entry| entry.model)
         .collect();
+    let combos = crate::combos::list_v1_entries(&state.pool)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    for combo in combos {
+        if combo.members.iter().any(|(model_id, offering_id)| {
+            grants.allows(
+                caller.role,
+                &caller.user_id,
+                api_key_id,
+                model_id,
+                offering_id,
+                None,
+            )
+        }) {
+            data.push(combo.model);
+        }
+    }
     Ok(Json(V1ModelList { data }))
 }
 
@@ -1362,5 +1382,84 @@ mod tests {
             assert_eq!(response.status, StatusCode::FORBIDDEN, "{uri}");
             assert_eq!(response.body["error"]["code"], "csrf_failed", "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn v1_models_advertises_enabled_combos_as_combo_entries() {
+        // Review m4: the `combo:` namespace used to be undiscoverable —
+        // GET /v1/models must list enabled combos as `combo:<name>`.
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        let (provider_id, model_id) = provider_and_model(&router, &cookie, &csrf).await;
+        let offering_id =
+            create_offering(&router, &cookie, &csrf, &provider_id, &model_id, "brain-1").await;
+
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/combos",
+                Some(json!({
+                    "name": "smart",
+                    "strategy": "ordered",
+                    "members": [{"offering_id": offering_id}],
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let combo_id = created.body["id"].as_str().expect("id").to_string();
+
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(listing.status, StatusCode::OK);
+        let data = listing.body["data"].as_array().expect("data");
+        let combo = data
+            .iter()
+            .find(|entry| entry["id"] == "combo:smart")
+            .expect("combo entry");
+        assert_eq!(combo["name"], "smart");
+        assert!(combo["price"].is_null(), "members price their own calls");
+        assert!(combo["context_length"].is_null());
+
+        // A disabled combo is not advertised.
+        let disabled = send(
+            router.clone(),
+            api_request(
+                Method::PUT,
+                &format!("/api/combos/{combo_id}"),
+                Some(json!({
+                    "name": "smart",
+                    "strategy": "ordered",
+                    "members": [{"offering_id": offering_id}],
+                    "enabled": false,
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK);
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        assert!(
+            listing.body["data"]
+                .as_array()
+                .expect("data")
+                .iter()
+                .all(|entry| entry["id"] != "combo:smart"),
+            "disabled combos disappear from the listing"
+        );
     }
 }

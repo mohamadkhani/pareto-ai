@@ -145,12 +145,17 @@ score = w_price   * price_score
 ```
 
 - Each component is normalized to `[0, 1]` across the eligible pool.
-- Missing component → pool median (0.5), matching OmniRoute's policy, and mark it
-  as imputed in the explanation.
+- Missing component → the neutral value 0.5 (a flat imputation; the code does
+  not compute a pool median) and mark it as imputed in the explanation.
+  Telemetry-derived components (speed, reliability) with fewer than 10 window
+  samples shrink toward 0.5 by `n/(n+10)` (D27).
 - Default weights: price 0.25, speed 0.30, quality 0.30, reliability 0.15.
-  Expose presets: "cheapest", "fastest", "best", "balanced".
+  Expose presets: "cheapest", "fastest", "best", "balanced". Per D24 the
+  single-component presets are pure orders and apply no penalties (health is
+  the filters' and the breaker's job).
 - Penalties: recent failure rate, breaker open, low remaining quota, context
-  near limit, large latency standard deviation.
+  near limit, large latency standard deviation. Multi-component weights only,
+  scaled by the per-member weight.
 - Tie-break: lower price, then lower p95, then stable ID. Never random, so
   results are reproducible and explainable.
 
@@ -197,7 +202,7 @@ period it started in.
 
 | Class | Examples | Action |
 | --- | --- | --- |
-| Auth | 401/403 upstream | Mark credential bad, alert, do not retry |
+| Auth | 401/403 upstream | Mark credential bad, alert, do not retry — except inside a combo, where the member list is the operator's explicit fallback chain and the next member is tried |
 | Quota | 402, "insufficient credits", provider quota message | Cool down credential, fail over |
 | Rate limit | 429 | Honor `Retry-After`, then fail over |
 | Transient | connect error, 502/503/504, reset | Retry/fail over before first byte |

@@ -246,6 +246,53 @@ normalization step when their wire format is supported (M-later).
 sessions, so an account rotated for suspected compromise kept full `/v1`
 access through old keys.
 
+### D24. Presets are pure single-component orders
+
+**Decision:** `cheapest` = price order, `fastest` = speed order, `best` =
+quality order — with **no penalties applied**; penalties exist only in
+`weighted`/`balanced`. Health is enforced by the *filters* (breaker, cooldown,
+capability, budget) that run before any ordering.
+
+**Why:** review M3 (2026-11-16,
+[../reviews/2026-11-16-m5-routing.md](../reviews/2026-11-16-m5-routing.md)):
+penalties were applied under every preset, so `cheapest` could pick a more
+expensive offering — the documented contract was not guaranteed. A user who
+explicitly asks for "cheapest" should get price order among *eligible*
+candidates; health concerns are what the filters and the breaker are for.
+
+**Consequence:** tests pin the pure orders and the filter boundary.
+
+### D25. Quality lives on the benchmark scale; overrides are scale-checked
+
+**Decision:** quality scores (benchmarks and `model_quality_overrides`) live on
+one scale — the source's native Elo-like scale. `set_override` validates the
+value against the imported benchmark range when benchmarks exist (a likely
+scale error is rejected with a clear message), and tests use Elo-scale
+fixtures consistently.
+
+**Why:** review M4: an override entered as `0.99` against Elo values
+(1351-1433) silently ranked last after min-max normalization.
+
+### D26. Per-attempt telemetry; quota classes belong to the credential
+
+**Decision:** every classified attempt persists a telemetry sample (attempt
+outcome, latency, tokens) — a failed attempt rescued by failover must still
+teach the router about the failing offering. `upstream_quota` (402) and
+`upstream_rate_limited` (429) are attributed to the **credential**, not the
+offering.
+
+**Why:** review M5: the reliability component was blind to failover-recovered
+failures and punished offerings behind frequently-limited credentials.
+
+### D27. Telemetry warm-up: shrink toward 0.5 by sample count
+
+**Decision:** a metric with fewer than 10 samples in its window is shrunk
+toward the neutral 0.5 by `n / (n + 10)`; fully trusted at 10+ samples. This
+implements the "short warm-up" D5 promised and stops one lucky sample from
+defining an offering's speed and reliability.
+
+**Consequence:** explanation text marks shrunk metrics like imputed ones.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

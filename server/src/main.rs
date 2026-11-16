@@ -3,9 +3,12 @@
 mod access;
 mod api_keys;
 mod auth;
+mod benchmarks;
 mod bootstrap;
+mod breaker;
 mod catalog;
 mod chat;
+mod combos;
 mod config;
 mod db;
 mod error;
@@ -18,9 +21,11 @@ mod probe;
 mod reports;
 mod request_id;
 mod routes;
+mod routing;
 mod secrets;
 #[cfg(feature = "embedded-ui")]
 mod static_files;
+mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod upstream;
@@ -51,6 +56,10 @@ pub struct AppState {
     pub login_limiter: Arc<auth::LoginRateLimiter>,
     /// Per-key RPM/TPM token buckets for the data plane (M4).
     pub key_limiter: Arc<api_keys::KeyRateLimiter>,
+    /// Per-offering rolling telemetry cache (M5), refreshed in the background.
+    pub telemetry: Arc<telemetry::TelemetryStore>,
+    /// Per-(credential, offering) circuit breaker state (M5).
+    pub breaker: Arc<breaker::BreakerRegistry>,
 }
 
 #[tokio::main]
@@ -102,6 +111,8 @@ async fn main() -> Result<()> {
 
     bootstrap::ensure_admin(&pool).await?;
 
+    let breaker_threshold = config.breaker_threshold;
+    let breaker_cooldown = config.breaker_cooldown;
     let state = AppState {
         config,
         pool,
@@ -110,13 +121,32 @@ async fn main() -> Result<()> {
         started: Instant::now(),
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),
         key_limiter: Arc::new(api_keys::KeyRateLimiter::new()),
+        telemetry: Arc::new(telemetry::TelemetryStore::new()),
+        breaker: Arc::new(breaker::BreakerRegistry::new(breaker::BreakerConfig {
+            threshold: breaker_threshold,
+            cooldown: breaker_cooldown,
+        })),
     };
+
+    // Warm the telemetry cache from `telemetry_snapshots` before the first
+    // request is served — routing must not impute 0.5 for every offering
+    // until the first background refresh lands (review m1 wires
+    // `TelemetryStore::warm`; `warm_at_startup` is what runs here and what
+    // the test pins).
+    telemetry::warm_at_startup(&state.pool, &state.telemetry).await;
 
     // Background upkeep (M4): stale reservations must not lock budgets, and
     // the usage rollups are rebuilt periodically on top of the incremental
-    // settlement updates.
+    // settlement updates. M5 adds the telemetry cache refresh (derived from
+    // `telemetry_attempts`, the per-attempt samples the settle transaction
+    // writes — decision D26).
     money::spawn_reconciler(state.pool.clone(), state.config.timeout_total);
     reports::spawn_rollup_job(state.pool.clone(), state.config.tz);
+    telemetry::spawn_telemetry_job(
+        state.pool.clone(),
+        state.telemetry.clone(),
+        state.config.telemetry_refresh,
+    );
 
     let app = request_id::stack(
         Router::new()

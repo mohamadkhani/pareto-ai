@@ -25,6 +25,7 @@ pub(crate) mod health;
 pub(crate) mod money;
 pub(crate) mod openapi;
 pub(crate) mod providers;
+pub(crate) mod routing;
 pub(crate) mod sync;
 pub(crate) mod usage;
 pub(crate) mod users;
@@ -129,6 +130,24 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .route(
             "/credentials/{id}/test",
             axum::routing::post(providers::test_credential),
+        )
+        // Routing (M5): combo models, benchmark import, quality overrides.
+        .route(
+            "/combos",
+            get(routing::list_combos).post(routing::create_combo),
+        )
+        .route(
+            "/combos/{id}",
+            axum::routing::put(routing::update_combo).delete(routing::delete_combo),
+        )
+        .route(
+            "/benchmarks/import",
+            axum::routing::post(routing::import_benchmarks),
+        )
+        .route(
+            "/models/{id}/quality-override",
+            axum::routing::put(routing::set_quality_override)
+                .delete(routing::clear_quality_override),
         )
         // Models, offerings, and prices.
         .route(

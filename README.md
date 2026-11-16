@@ -76,6 +76,9 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | `GATEWAY_TIMEOUT_FIRST_BYTE_MS` | `30000` | Budget from upstream request start to the first response byte |
 | `GATEWAY_TIMEOUT_IDLE_MS` | `60000` | Maximum gap between upstream body chunks |
 | `GATEWAY_TIMEOUT_TOTAL_MS` | `600000` | Total budget for one client request, failover attempts included |
+| `GATEWAY_TELEMETRY_REFRESH_MS` | `30000` | How often the per-offering routing telemetry (TTFT, tokens/sec, latency, failure rate) rebuilds from `usage_events` |
+| `GATEWAY_BREAKER_THRESHOLD` | `5` | Consecutive failures before a (credential, offering) circuit breaker excludes the pair from routing |
+| `GATEWAY_BREAKER_COOLDOWN_MS` | `60000` | How long an open circuit breaker excludes the pair before a probe |
 | `RUST_LOG` | `gateway=info` | Log filter |
 
 ## Checks

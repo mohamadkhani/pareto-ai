@@ -23,8 +23,11 @@ categories (only generic quality for now).
 
 1. **Passive telemetry** per offering: TTFT, tokens/sec, end-to-end latency,
    failure rate, p95 — rolling window of the last 200 samples (bounded),
-   persisted cheaply (in-memory + periodic snapshot to `telemetry_snapshots`
-   or derived from `usage_events`; prefer deriving, keep a hot in-memory cache).
+   derived from `telemetry_attempts`, one sample per classified upstream
+   attempt written with the settle transaction (per **D26** failures rescued
+   by failover still count, and 402/429 are attributed to the credential, not
+   the offering). Hot in-memory cache with periodic snapshots to
+   `telemetry_snapshots` for warm starts.
 2. **Combo models**: `combo_models(id, name, strategy, weights_json,
    members_json, enabled, created_at, updated_at)` where `strategy ∈
    {'ordered','weighted','round_robin'}` and members are offerings/models with
@@ -32,10 +35,17 @@ categories (only generic quality for now).
    id in `/v1/chat/completions`.
 3. **Scoring** (weighted strategy): filter first (capability, context, grants,
    budget, breaker, enabled), then normalize price/speed/quality/reliability to
-   `[0,1]` across the eligible pool, missing components get the pool median
-   (0.5) and are marked imputed, penalties for recent failures/breaker/low
+   `[0,1]` across the eligible pool, missing components get the neutral value
+   0.5 and are marked imputed, penalties for recent failures/breaker/low
    quota; deterministic tie-break (lower price → lower p95 → stable id).
-   Presets: `cheapest`, `fastest`, `balanced`, `best`.
+   Presets: `cheapest`, `fastest`, `balanced`, `best` — per **D24** the
+   single-component presets apply no penalties (health is handled by the
+   filters). Per **D27**, telemetry metrics with fewer than 10 samples shrink
+   toward 0.5 by `n/(n+10)`.
+   - Deliberate deviation (documented in the module docs): **inside a combo**,
+     an `upstream_auth` (401/403) failure advances to the next member (the
+     member list is the operator's explicit fallback chain); plain models keep
+     M3's "401/403 never fail over" rule.
 4. **Explanation**: `request_logs.decision_json` records candidates, each
    component score, the winner, and one-line reasons (why this one, why not the
    others); surfaced in the admin UI ("why this model").
@@ -46,6 +56,8 @@ categories (only generic quality for now).
    model wins over synced scores.
 6. **Circuit breaker per (credential, offering)**: after N consecutive
    failures exclude for a cooldown window; recorded in the decision JSON.
+   Only failures that reflect the offering's service count — `invalid_request`
+   (the caller's request) and `internal` (our configuration) never trip it.
 
 ## Acceptance
 

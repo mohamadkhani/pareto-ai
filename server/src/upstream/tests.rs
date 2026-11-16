@@ -268,6 +268,64 @@ fn classify_covers_the_taxonomy_table() {
         retry_after: None,
     };
     assert_eq!(transient.classify().cooldown, None);
+
+    // Breaker accounting (review M1): the caller's own `invalid_request` and
+    // our `internal` configuration failures never count toward the
+    // (credential, offering) breaker; every upstream-service class does.
+    let breaker_cases: Vec<(UpstreamError, bool)> = vec![
+        (
+            UpstreamError::Http {
+                status: 400,
+                retry_after: None,
+            },
+            false,
+        ),
+        (
+            UpstreamError::Http {
+                status: 422,
+                retry_after: None,
+            },
+            false,
+        ),
+        (UpstreamError::Credential("bad".to_string()), false),
+        (
+            UpstreamError::Http {
+                status: 401,
+                retry_after: None,
+            },
+            true,
+        ),
+        (
+            UpstreamError::Http {
+                status: 402,
+                retry_after: None,
+            },
+            true,
+        ),
+        (
+            UpstreamError::Http {
+                status: 429,
+                retry_after: None,
+            },
+            true,
+        ),
+        (
+            UpstreamError::Http {
+                status: 500,
+                retry_after: None,
+            },
+            true,
+        ),
+        (
+            UpstreamError::Timeout {
+                kind: TimeoutKind::Idle,
+            },
+            true,
+        ),
+    ];
+    for (error, counts) in breaker_cases {
+        assert_eq!(error.classify().counts_toward_breaker, counts, "{error:?}");
+    }
 }
 
 #[test]

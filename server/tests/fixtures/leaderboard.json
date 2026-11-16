@@ -1,0 +1,61 @@
+{
+  "source": "lmarena",
+  "source_url": "https://lmarena.ai/leaderboard",
+  "fetched_at": "2026-11-10T00:00:00.000Z",
+  "entries": [
+    {
+      "rank": 1,
+      "model": "gemini-2.5-pro",
+      "vendor": "Google",
+      "score": 1432.5,
+      "ci": 45.0,
+      "votes": 21400,
+      "category": "text"
+    },
+    {
+      "rank": 2,
+      "model": "claude-sonnet-4.5",
+      "vendor": "Anthropic",
+      "score": 1412.7,
+      "ci": 11.4,
+      "votes": 128450,
+      "category": "text"
+    },
+    {
+      "rank": 3,
+      "model": "gpt-4o",
+      "vendor": "OpenAI",
+      "score": 1401.2,
+      "ci": 10.8,
+      "votes": 141230,
+      "category": "text"
+    },
+    {
+      "rank": 4,
+      "model": "deepseek-v3",
+      "vendor": "DeepSeek",
+      "score": 1351.4,
+      "ci": 15.2,
+      "votes": 60870,
+      "category": "text"
+    },
+    {
+      "rank": 1,
+      "model": "claude-sonnet-4.5",
+      "vendor": "Anthropic",
+      "score": 1420.5,
+      "ci": 13.9,
+      "votes": 44120,
+      "category": "code"
+    },
+    {
+      "rank": 2,
+      "model": "deepseek-v3",
+      "vendor": "DeepSeek",
+      "score": 1396.1,
+      "ci": 17.5,
+      "votes": 39540,
+      "category": "code"
+    }
+  ]
+}

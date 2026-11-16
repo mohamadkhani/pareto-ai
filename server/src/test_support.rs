@@ -55,9 +55,16 @@ impl TestApp {
             timeout_first_byte: crate::config::DEFAULT_TIMEOUT_FIRST_BYTE,
             timeout_idle: crate::config::DEFAULT_TIMEOUT_IDLE,
             timeout_total: crate::config::DEFAULT_TIMEOUT_TOTAL,
+            telemetry_refresh: crate::config::DEFAULT_TELEMETRY_REFRESH,
+            breaker_threshold: crate::config::DEFAULT_BREAKER_THRESHOLD,
+            breaker_cooldown: crate::config::DEFAULT_BREAKER_COOLDOWN,
             version: "test".to_string(),
         };
         mutate(&mut config);
+        let breaker_config = crate::breaker::BreakerConfig {
+            threshold: config.breaker_threshold,
+            cooldown: config.breaker_cooldown,
+        };
         let state = AppState {
             config: Arc::new(config),
             pool,
@@ -69,6 +76,8 @@ impl TestApp {
             started: Instant::now(),
             login_limiter: Arc::new(LoginRateLimiter::new()),
             key_limiter: Arc::new(crate::api_keys::KeyRateLimiter::new()),
+            telemetry: Arc::new(crate::telemetry::TelemetryStore::new()),
+            breaker: Arc::new(crate::breaker::BreakerRegistry::new(breaker_config)),
         };
         Self { state, dir }
     }
