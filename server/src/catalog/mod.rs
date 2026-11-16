@@ -1266,7 +1266,11 @@ pub async fn get_price(
 /// row, and missing components become NULL — unknown is never 0), audited as
 /// `price.override`. The row's `source` becomes `manual`, so no sync will ever
 /// touch it again (D10). One upsert statement under the `UNIQUE (offering_id)`
-/// constraint: no update-then-insert window and no duplicate rows.
+/// constraint: no update-then-insert window and no duplicate rows. Failure
+/// mode: [`CatalogError::Invalid`] (`400`) when the body carries no price
+/// field at all — an all-NULL row would make every request through the
+/// offering unpriced (alignment finding 2, the D20 "all-null patch is 400"
+/// precedent).
 pub async fn set_manual_price(
     pool: &sqlx::SqlitePool,
     actor: &Actor<'_>,
@@ -1292,6 +1296,24 @@ pub async fn set_manual_price(
                 "{field} must not be negative"
             )));
         }
+    }
+    // At least one price component must arrive: replacing the row with an
+    // all-NULL price would silently make all traffic through the offering
+    // unpriced (alignment finding 2). `currency` alone prices nothing.
+    let amounts = [
+        input_per_m,
+        output_per_m,
+        cache_read_per_m,
+        cache_write_per_m,
+        reasoning_per_m,
+        request_fee,
+    ];
+    if amounts.iter().all(Option::is_none) {
+        return Err(CatalogError::Invalid(
+            "no price fields to set; send at least one of input_per_m, output_per_m, \
+             cache_read_per_m, cache_write_per_m, reasoning_per_m, request_fee"
+                .to_string(),
+        ));
     }
     let currency = match input.currency.as_deref() {
         None | Some("") => "USD".to_string(),

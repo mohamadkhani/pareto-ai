@@ -372,7 +372,7 @@ pub async fn get_price(
     request_body = PriceInput,
     responses(
         (status = 200, description = "manual price set", body = PriceView),
-        (status = 400, description = "invalid request body", body = ErrorBody),
+        (status = 400, description = "invalid request body or no price fields at all", body = ErrorBody),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
         (status = 404, description = "no such offering", body = ErrorBody)
@@ -1015,6 +1015,69 @@ mod tests {
             .await
             .expect("price count");
         assert_eq!(prices, 0);
+    }
+
+    /// Alignment finding 2: a body without any price field must not store an
+    /// all-NULL price row (every request through the offering would count as
+    /// unpriced) — it is a 400 like any all-null patch (D20), while one
+    /// field is enough.
+    #[tokio::test]
+    async fn price_override_requires_at_least_one_price_field() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        let (provider_id, model_id) = provider_and_model(&router, &cookie, &csrf).await;
+        let offering_id =
+            create_offering(&router, &cookie, &csrf, &provider_id, &model_id, "brain-1").await;
+        let uri = format!("/api/offerings/{offering_id}/price");
+
+        // An empty body, an empty object, and a currency-only body price
+        // nothing: each is a clean 400 `invalid_request`.
+        for raw in ["", "{}", r#"{"currency": "EUR"}"#] {
+            let response = send(
+                router.clone(),
+                raw_request(Method::PUT, &uri, raw, &cookie, &csrf),
+            )
+            .await;
+            assert_eq!(
+                response.status,
+                StatusCode::BAD_REQUEST,
+                "{raw:?}: {}",
+                response.body
+            );
+            assert_eq!(
+                response.body["error"]["code"], "invalid_request",
+                "{raw:?}: {}",
+                response.body
+            );
+        }
+        let prices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prices")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("price count");
+        assert_eq!(prices, 0, "no all-NULL price row was stored");
+
+        // One price field is enough; the rest stay unknown (NULL).
+        let one = send(
+            router.clone(),
+            api_request(
+                Method::PUT,
+                &uri,
+                Some(json!({ "input_per_m": 1.5 })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(one.status, StatusCode::OK, "{}", one.body);
+        assert_eq!(one.body["input_per_m"], 1.5);
+        assert_eq!(
+            one.body["output_per_m"],
+            json!(null),
+            "unknown components stay null, never 0"
+        );
     }
 
     #[tokio::test]

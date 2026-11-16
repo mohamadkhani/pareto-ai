@@ -14,7 +14,13 @@ const session = {
     email: 'admin@example.com',
     display_name: 'Admin',
     role: 'admin' as const,
+    must_change_password: false,
   },
+  csrf_token: 'csrf-1',
+};
+
+const rotationSession = {
+  user: { ...session.user, must_change_password: true },
   csrf_token: 'csrf-1',
 };
 
@@ -117,5 +123,53 @@ describe('AuthService', () => {
 
     await expect(auth.loadMe()).resolves.toBe(false);
     expect(auth.status()).toBe('anonymous');
+  });
+
+  it('loadMe re-reads the session when forced, picking up the rotation flag', async () => {
+    fetchMock.respond(jsonResponse(200, rotationSession));
+    fetchMock.respond(jsonResponse(200, session));
+    const auth = TestBed.inject(AuthService);
+
+    await auth.loadMe();
+    expect(auth.user()?.must_change_password).toBe(true);
+
+    await expect(auth.loadMe(true)).resolves.toBe(true);
+
+    expect(fetchMock.requests.map((call) => call.url)).toEqual(['/api/auth/me', '/api/auth/me']);
+    expect(auth.user()?.must_change_password).toBe(false);
+  });
+
+  it('changePassword sends the CSRF header and clears the rotation flag', async () => {
+    fetchMock.respond(jsonResponse(200, session));
+    fetchMock.respond(noContentResponse());
+    const auth = TestBed.inject(AuthService);
+    await auth.loadMe();
+
+    await auth.changePassword('old-password-1', 'new-password-1');
+
+    const call = fetchMock.requests[1];
+    expect(call.url).toBe('/api/auth/change-password');
+    expect(call.method).toBe('POST');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(call.body).toEqual({
+      current_password: 'old-password-1',
+      new_password: 'new-password-1',
+    });
+  });
+
+  it('changePassword surfaces the invalid_credentials code', async () => {
+    fetchMock.respond(jsonResponse(200, session));
+    fetchMock.respond(errorResponse(401, 'invalid_credentials', 'invalid email or password'));
+    const auth = TestBed.inject(AuthService);
+    await auth.loadMe();
+
+    const error: unknown = await auth
+      .changePassword('wrong', 'new-password-1')
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(ApiError);
+    if (error instanceof ApiError) {
+      expect(error.code).toBe('invalid_credentials');
+    }
   });
 });

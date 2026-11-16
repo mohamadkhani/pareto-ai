@@ -12,6 +12,7 @@ function authStub(role: 'admin' | 'user'): object {
       email: 'someone@example.com',
       display_name: 'Someone',
       role,
+      must_change_password: false,
     }),
     isAdmin: signal(role === 'admin'),
     csrfToken: signal<string | null>('csrf-1'),

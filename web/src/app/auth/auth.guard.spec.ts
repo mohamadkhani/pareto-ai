@@ -15,7 +15,13 @@ const session = {
     email: 'admin@example.com',
     display_name: 'Admin',
     role: 'admin' as const,
+    must_change_password: false,
   },
+  csrf_token: 'csrf-1',
+};
+
+const rotationSession = {
+  user: { ...session.user, must_change_password: true },
   csrf_token: 'csrf-1',
 };
 
@@ -67,6 +73,34 @@ describe('authGuard', () => {
     fetchMock.respond(jsonResponse(200, session));
 
     const result = await runLoginGuard();
+
+    expect(result).toBeInstanceOf(UrlTree);
+    if (result instanceof UrlTree) {
+      expect(result.toString()).toBe('/');
+    }
+  });
+
+  it('holds accounts flagged for rotation on /change-password', async () => {
+    fetchMock.respond(jsonResponse(200, rotationSession));
+
+    const result = await runGuard('/audit');
+
+    expect(result).toBeInstanceOf(UrlTree);
+    if (result instanceof UrlTree) {
+      expect(result.toString()).toBe('/change-password');
+    }
+  });
+
+  it('lets flagged accounts reach /change-password', async () => {
+    fetchMock.respond(jsonResponse(200, rotationSession));
+
+    await expect(runGuard('/change-password')).resolves.toBe(true);
+  });
+
+  it('keeps accounts without a pending rotation off /change-password', async () => {
+    fetchMock.respond(jsonResponse(200, session));
+
+    const result = await runGuard('/change-password');
 
     expect(result).toBeInstanceOf(UrlTree);
     if (result instanceof UrlTree) {

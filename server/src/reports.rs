@@ -16,6 +16,13 @@
 //! `started_at` (the period it started in — `occurred_at` for pre-M4 rows),
 //! and `COALESCE` keeps rows of deleted users/offering visible as `''`
 //! instead of silently dropping spend from the totals.
+//!
+//! Counter semantics (migration 0006): `requests` counts every `usage_events`
+//! row — including pre-send refusals (402 budget, 429 token cap, 403 access),
+//! which consumed nothing and were never priced. Refusals have their own
+//! `refused_requests` counter and are excluded from `priced_requests`;
+//! `refused_requests` + `priced_requests` + `unpriced_requests` +
+//! `partial_requests` partition `requests` exactly.
 
 use std::collections::HashMap;
 
@@ -34,6 +41,8 @@ pub const ROLLUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// The counters of one report group; identical shape for totals and groups.
 #[derive(Debug, Clone, Default, Serialize, ToSchema, sqlx::FromRow)]
 pub struct UsageTotals {
+    /// Every request that reached the chat pipeline — refusals included
+    /// (see `refused_requests`). The four request counters below partition it.
     pub requests: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -41,13 +50,18 @@ pub struct UsageTotals {
     /// excluded and counted in `unpriced_requests` — never added as 0.
     pub cost_usd: f64,
     /// Requests whose cost is complete (every used component priced).
+    /// Refusals are excluded: they were never priced (see `refused_requests`).
     pub priced_requests: i64,
     /// Requests that could not be priced at all.
     pub unpriced_requests: i64,
     /// Requests whose cost is present but understated (`priced = 0`: a used
-    /// component had no applicable price and contributed 0). Together the
-    /// three counters partition `requests` (review m2).
+    /// component had no applicable price and contributed 0). Together with
+    /// `refused_requests` the four counters partition `requests` (review m2).
     pub partial_requests: i64,
+    /// Requests answered before anything was sent upstream (402 budget, 429
+    /// token cap, 403 access, ...). They consumed nothing and were never
+    /// priced, so they are counted here and never in `priced_requests`.
+    pub refused_requests: i64,
 }
 
 /// One `usage_daily` group as `GET /api/usage` returns it. Which key fields
@@ -122,6 +136,9 @@ pub struct UsageRow<'a> {
     pub cost_usd: Option<f64>,
     /// Whether the cost is complete.
     pub priced: bool,
+    /// The request was answered before anything was sent upstream: it
+    /// consumed nothing and was never priced (counted in `refused_requests`).
+    pub refused: bool,
 }
 
 /// One UPSERT into `usage_daily`, run inside the settlement transaction so
@@ -134,8 +151,8 @@ pub async fn record_usage(
     sqlx::query(
         "INSERT INTO usage_daily \
            (day, user_id, offering_id, input_tokens, output_tokens, requests, cost_usd, \
-            unpriced_requests, priced_requests, partial_requests) \
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?) \
+            unpriced_requests, priced_requests, partial_requests, refused_requests) \
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?) \
          ON CONFLICT (day, user_id, offering_id) DO UPDATE SET \
            input_tokens = input_tokens + excluded.input_tokens, \
            output_tokens = output_tokens + excluded.output_tokens, \
@@ -143,7 +160,8 @@ pub async fn record_usage(
            cost_usd = cost_usd + excluded.cost_usd, \
            unpriced_requests = unpriced_requests + excluded.unpriced_requests, \
            priced_requests = priced_requests + excluded.priced_requests, \
-           partial_requests = partial_requests + excluded.partial_requests",
+           partial_requests = partial_requests + excluded.partial_requests, \
+           refused_requests = refused_requests + excluded.refused_requests",
     )
     .bind(row.day)
     .bind(row.user_id)
@@ -151,9 +169,17 @@ pub async fn record_usage(
     .bind(row.input_tokens)
     .bind(row.output_tokens)
     .bind(row.cost_usd.unwrap_or(0.0))
-    .bind(i64::from(row.cost_usd.is_none()))
-    .bind(i64::from(row.priced))
-    .bind(i64::from(row.cost_usd.is_some() && !row.priced))
+    // The four counters partition `requests`: a refusal is counted only in
+    // `refused_requests`, everything else lands in exactly one of the other
+    // three (migration 0006).
+    .bind(i64::from(!row.refused && row.cost_usd.is_none()))
+    .bind(i64::from(
+        !row.refused && row.cost_usd.is_some() && row.priced,
+    ))
+    .bind(i64::from(
+        !row.refused && row.cost_usd.is_some() && !row.priced,
+    ))
+    .bind(i64::from(row.refused))
     .execute(&mut *tx)
     .await?;
     Ok(())
@@ -192,6 +218,7 @@ pub async fn rebuild_rollups(pool: &SqlitePool, tz: Tz) -> Result<RebuildStats, 
         output_tokens: Option<i64>,
         cost_usd: Option<f64>,
         priced: i64,
+        refused: i64,
     }
 
     #[derive(Default)]
@@ -203,6 +230,7 @@ pub async fn rebuild_rollups(pool: &SqlitePool, tz: Tz) -> Result<RebuildStats, 
         unpriced_requests: i64,
         priced_requests: i64,
         partial_requests: i64,
+        refused_requests: i64,
     }
 
     let mut tx = pool.begin().await?;
@@ -213,7 +241,7 @@ pub async fn rebuild_rollups(pool: &SqlitePool, tz: Tz) -> Result<RebuildStats, 
         .await?;
     let events = sqlx::query_as::<_, Event>(
         "SELECT user_id, offering_id, occurred_at, started_at, input_tokens, output_tokens, \
-                cost_usd, priced \
+                cost_usd, priced, refused \
          FROM usage_events",
     )
     .fetch_all(&mut *tx)
@@ -237,17 +265,22 @@ pub async fn rebuild_rollups(pool: &SqlitePool, tz: Tz) -> Result<RebuildStats, 
         agg.output_tokens += event.output_tokens.unwrap_or(0);
         agg.requests += 1;
         agg.cost_usd += event.cost_usd.unwrap_or(0.0);
-        agg.unpriced_requests += i64::from(event.cost_usd.is_none());
-        agg.priced_requests += event.priced;
-        agg.partial_requests += i64::from(event.cost_usd.is_some() && event.priced == 0);
+        // The same four-way partition as `record_usage` (migration 0006): a
+        // refusal lands only in `refused_requests`, never in `priced_requests`.
+        let refused = event.refused != 0;
+        agg.refused_requests += i64::from(refused);
+        agg.unpriced_requests += i64::from(!refused && event.cost_usd.is_none());
+        agg.priced_requests += i64::from(!refused && event.cost_usd.is_some() && event.priced != 0);
+        agg.partial_requests +=
+            i64::from(!refused && event.cost_usd.is_some() && event.priced == 0);
     }
 
     for ((day, user_id, offering_id), agg) in &rollup {
         sqlx::query(
             "INSERT INTO usage_daily \
                (day, user_id, offering_id, input_tokens, output_tokens, requests, cost_usd, \
-                unpriced_requests, priced_requests, partial_requests) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                unpriced_requests, priced_requests, partial_requests, refused_requests) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(day)
         .bind(user_id)
@@ -259,6 +292,7 @@ pub async fn rebuild_rollups(pool: &SqlitePool, tz: Tz) -> Result<RebuildStats, 
         .bind(agg.unpriced_requests)
         .bind(agg.priced_requests)
         .bind(agg.partial_requests)
+        .bind(agg.refused_requests)
         .execute(&mut *tx)
         .await?;
     }
@@ -292,12 +326,24 @@ pub fn spawn_rollup_job(pool: SqlitePool, tz: Tz) -> tokio::task::JoinHandle<()>
 // ---------------------------------------------------------------------------
 
 const GROUP_COLUMNS: &str = "SUM(requests), SUM(input_tokens), SUM(output_tokens), \
-     SUM(cost_usd), SUM(priced_requests), SUM(unpriced_requests), SUM(partial_requests)";
+     SUM(cost_usd), SUM(priced_requests), SUM(unpriced_requests), SUM(partial_requests), \
+     SUM(refused_requests)";
 
 /// Flat decode shapes for the aggregate queries (the fixed column order of
 /// [`GROUP_COLUMNS`], optionally preceded by the group key).
-type GroupRow = (String, i64, i64, i64, f64, i64, i64, i64);
-type UserGroupRow = (String, Option<String>, i64, i64, i64, f64, i64, i64, i64);
+type GroupRow = (String, i64, i64, i64, f64, i64, i64, i64, i64);
+type UserGroupRow = (
+    String,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    f64,
+    i64,
+    i64,
+    i64,
+    i64,
+);
 
 /// Builds totals from the fixed column order of [`GROUP_COLUMNS`].
 #[allow(clippy::too_many_arguments)]
@@ -309,6 +355,7 @@ fn totals_of(
     priced_requests: i64,
     unpriced_requests: i64,
     partial_requests: i64,
+    refused_requests: i64,
 ) -> UsageTotals {
     UsageTotals {
         requests,
@@ -318,6 +365,7 @@ fn totals_of(
         priced_requests,
         unpriced_requests,
         partial_requests,
+        refused_requests,
     }
 }
 
@@ -330,6 +378,7 @@ fn sum_totals(totals: &[UsageTotals]) -> UsageTotals {
         acc.priced_requests += row.priced_requests;
         acc.unpriced_requests += row.unpriced_requests;
         acc.partial_requests += row.partial_requests;
+        acc.refused_requests += row.refused_requests;
         acc
     })
 }
@@ -357,10 +406,10 @@ pub async fn usage_for_user(
     let days: Vec<UsageDay> = rows
         .iter()
         .map(
-            |(day, requests, input, output, cost, priced, unpriced, partial)| UsageDay {
+            |(day, requests, input, output, cost, priced, unpriced, partial, refused)| UsageDay {
                 day: day.clone(),
                 totals: totals_of(
-                    *requests, *input, *output, *cost, *priced, *unpriced, *partial,
+                    *requests, *input, *output, *cost, *priced, *unpriced, *partial, *refused,
                 ),
             },
         )
@@ -399,14 +448,17 @@ pub async fn usage_admin(
             .await?;
             rows.iter()
                 .map(
-                    |(day, requests, input, output, cost, priced, unpriced, partial)| UsageGroup {
-                        day: Some(day.clone()),
-                        user_id: None,
-                        email: None,
-                        offering_id: None,
-                        totals: totals_of(
-                            *requests, *input, *output, *cost, *priced, *unpriced, *partial,
-                        ),
+                    |(day, requests, input, output, cost, priced, unpriced, partial, refused)| {
+                        UsageGroup {
+                            day: Some(day.clone()),
+                            user_id: None,
+                            email: None,
+                            offering_id: None,
+                            totals: totals_of(
+                                *requests, *input, *output, *cost, *priced, *unpriced, *partial,
+                                *refused,
+                            ),
+                        }
                     },
                 )
                 .collect()
@@ -426,7 +478,18 @@ pub async fn usage_admin(
             .await?;
             rows.iter()
                 .map(
-                    |(id, email, requests, input, output, cost, priced, unpriced, partial)| {
+                    |(
+                        id,
+                        email,
+                        requests,
+                        input,
+                        output,
+                        cost,
+                        priced,
+                        unpriced,
+                        partial,
+                        refused,
+                    )| {
                         UsageGroup {
                             day: None,
                             user_id: Some(id.clone()),
@@ -434,6 +497,7 @@ pub async fn usage_admin(
                             offering_id: None,
                             totals: totals_of(
                                 *requests, *input, *output, *cost, *priced, *unpriced, *partial,
+                                *refused,
                             ),
                         }
                     },
@@ -454,7 +518,17 @@ pub async fn usage_admin(
             .await?;
             rows.iter()
                 .map(
-                    |(offering_id, requests, input, output, cost, priced, unpriced, partial)| {
+                    |(
+                        offering_id,
+                        requests,
+                        input,
+                        output,
+                        cost,
+                        priced,
+                        unpriced,
+                        partial,
+                        refused,
+                    )| {
                         UsageGroup {
                             day: None,
                             user_id: None,
@@ -462,6 +536,7 @@ pub async fn usage_admin(
                             offering_id: Some(offering_id.clone()),
                             totals: totals_of(
                                 *requests, *input, *output, *cost, *priced, *unpriced, *partial,
+                                *refused,
                             ),
                         }
                     },
@@ -572,7 +647,19 @@ mod tests {
     use super::*;
 
     /// `usage_daily` rows as the tests compare them.
-    type RollupRow = (String, String, String, i64, i64, i64, f64, i64, i64, i64);
+    type RollupRow = (
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        f64,
+        i64,
+        i64,
+        i64,
+        i64,
+    );
     use crate::catalog::PriceRow;
     use crate::money::compute_cost;
     use crate::upstream::sse::Usage;
@@ -664,6 +751,32 @@ mod tests {
         .expect("insert event");
     }
 
+    /// Inserts one `usage_events` row the way settlement books a pre-send
+    /// refusal: nothing consumed (tokens NULL), cost 0.0, fully "priced",
+    /// `refused = 1` (migration 0006).
+    async fn seed_refusal(
+        pool: &SqlitePool,
+        request_id: &str,
+        user_id: Option<&str>,
+        offering_id: Option<&str>,
+        started_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO usage_events \
+               (request_id, user_id, offering_id, input_tokens, output_tokens, \
+                tokens_estimated, cost_usd, priced, refused, started_at, occurred_at) \
+             VALUES (?, ?, ?, NULL, NULL, 0, 0.0, 1, 1, ?, ?)",
+        )
+        .bind(request_id)
+        .bind(user_id)
+        .bind(offering_id)
+        .bind(started_at)
+        .bind(started_at)
+        .execute(pool)
+        .await
+        .expect("insert refusal event");
+    }
+
     #[tokio::test]
     async fn rollup_rebuild_is_idempotent() {
         let (dir, pool) = pool().await;
@@ -713,7 +826,7 @@ mod tests {
 
         let rows: Vec<RollupRow> = sqlx::query_as(
             "SELECT day, user_id, offering_id, input_tokens, output_tokens, requests, \
-                        cost_usd, unpriced_requests, priced_requests, partial_requests \
+                        cost_usd, unpriced_requests, priced_requests, partial_requests, refused_requests \
                  FROM usage_daily ORDER BY day, offering_id",
         )
         .fetch_all(&pool)
@@ -741,7 +854,7 @@ mod tests {
             .expect("third rebuild");
         let after: Vec<RollupRow> = sqlx::query_as(
             "SELECT day, user_id, offering_id, input_tokens, output_tokens, requests, \
-                    cost_usd, unpriced_requests, priced_requests, partial_requests \
+                    cost_usd, unpriced_requests, priced_requests, partial_requests, refused_requests \
              FROM usage_daily ORDER BY day, offering_id",
         )
         .fetch_all(&pool)
@@ -899,6 +1012,7 @@ mod tests {
                     output_tokens: 5,
                     cost_usd: cost,
                     priced,
+                    refused: false,
                 },
             )
             .await
@@ -908,7 +1022,7 @@ mod tests {
 
         let incremental: Vec<RollupRow> = sqlx::query_as(
             "SELECT day, user_id, offering_id, input_tokens, output_tokens, requests, \
-                        cost_usd, unpriced_requests, priced_requests, partial_requests \
+                        cost_usd, unpriced_requests, priced_requests, partial_requests, refused_requests \
                  FROM usage_daily",
         )
         .fetch_all(&pool)
@@ -918,7 +1032,7 @@ mod tests {
         rebuild_rollups(&pool, Tz::UTC).await.expect("rebuild");
         let rebuilt: Vec<RollupRow> = sqlx::query_as(
             "SELECT day, user_id, offering_id, input_tokens, output_tokens, requests, \
-                    cost_usd, unpriced_requests, priced_requests, partial_requests \
+                    cost_usd, unpriced_requests, priced_requests, partial_requests, refused_requests \
              FROM usage_daily",
         )
         .fetch_all(&pool)
@@ -1050,6 +1164,7 @@ mod tests {
                     output_tokens: 5,
                     cost_usd: cost,
                     priced,
+                    refused: false,
                 },
             )
             .await
@@ -1071,9 +1186,10 @@ mod tests {
         assert_eq!(
             incremental.totals.priced_requests
                 + incremental.totals.unpriced_requests
-                + incremental.totals.partial_requests,
+                + incremental.totals.partial_requests
+                + incremental.totals.refused_requests,
             incremental.totals.requests,
-            "the three counters partition requests"
+            "the four counters partition requests"
         );
 
         // ...and the rebuild derives the same split from `usage_events`.
@@ -1084,6 +1200,95 @@ mod tests {
         assert_eq!(rebuilt.totals.partial_requests, 1);
         assert_eq!(rebuilt.totals.priced_requests, 1);
         assert_eq!(rebuilt.totals.unpriced_requests, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A pre-send refusal (nothing consumed, never priced) gets its own
+    /// counter and never inflates `priced_requests` (M4 UI-alignment finding
+    /// 1) — incrementally and after a full rollup rebuild.
+    #[tokio::test]
+    async fn refusals_get_their_own_counter_and_flow_through_the_rebuild() {
+        /// The counter split one report must show, however it was derived.
+        async fn assert_counters(pool: &SqlitePool) {
+            let report = usage_admin(pool, None, None, None, GroupBy::Day)
+                .await
+                .expect("report");
+            assert_eq!(report.totals.requests, 2, "requests counts every row");
+            assert_eq!(report.totals.priced_requests, 1);
+            assert_eq!(
+                report.totals.refused_requests, 1,
+                "the refusal has its own counter"
+            );
+            assert_eq!(report.totals.unpriced_requests, 0);
+            assert_eq!(report.totals.partial_requests, 0);
+            assert_eq!(
+                report.totals.priced_requests
+                    + report.totals.unpriced_requests
+                    + report.totals.partial_requests
+                    + report.totals.refused_requests,
+                report.totals.requests,
+                "the four counters partition requests"
+            );
+        }
+
+        let (dir, pool) = pool().await;
+        let user = seed_user(&pool).await;
+        let off = seed_offering(&pool, "a").await;
+        // One billable (fully priced) request and one refusal.
+        seed_event(
+            &pool,
+            "sent",
+            Some(&user),
+            Some(&off),
+            "2026-11-16T10:00:00.000Z",
+            10,
+            5,
+            Some(0.25),
+            true,
+        )
+        .await;
+        seed_refusal(
+            &pool,
+            "refused",
+            Some(&user),
+            Some(&off),
+            "2026-11-16T11:00:00.000Z",
+        )
+        .await;
+
+        // The incremental UPSERT books the refusal the same way settlement
+        // does (cost 0.0, "priced", nothing consumed)...
+        for row in [
+            UsageRow {
+                day: "2026-11-16",
+                user_id: &user,
+                offering_id: &off,
+                input_tokens: 10,
+                output_tokens: 5,
+                cost_usd: Some(0.25),
+                priced: true,
+                refused: false,
+            },
+            UsageRow {
+                day: "2026-11-16",
+                user_id: &user,
+                offering_id: &off,
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: Some(0.0),
+                priced: true,
+                refused: true,
+            },
+        ] {
+            let mut tx = pool.begin().await.expect("tx");
+            record_usage(&mut tx, &row).await.expect("record");
+            tx.commit().await.expect("commit");
+        }
+        assert_counters(&pool).await;
+
+        // ...and the rebuild derives the same split from `usage_events`.
+        rebuild_rollups(&pool, Tz::UTC).await.expect("rebuild");
+        assert_counters(&pool).await;
         std::fs::remove_dir_all(&dir).ok();
     }
 }

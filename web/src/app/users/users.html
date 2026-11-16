@@ -1,0 +1,210 @@
+<div class="users">
+  <header class="page-head">
+    <h1>Users</h1>
+    <p class="hint">
+      Accounts for the console and for API-key access to <code>/v1</code>. Roles decide admin
+      access; a deactivated account cannot sign in.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">The user directory is restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openCreate()">New user</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (formState(); as state) {
+      @if (state.mode === 'create') {
+        <form class="card form-card" [formGroup]="createForm" (ngSubmit)="save()" novalidate>
+          <h2>New user</h2>
+          <div class="form-grid">
+            <div class="field">
+              <label for="user-email">Email</label>
+              <input
+                id="user-email"
+                type="email"
+                formControlName="email"
+                placeholder="you@example.com"
+              />
+              @if (showCreateError('email')) {
+                <p class="field-error" role="alert">{{ createFieldError('email') }}</p>
+              }
+            </div>
+            <div class="field">
+              <label for="user-name">Display name</label>
+              <input id="user-name" type="text" formControlName="display_name" />
+              @if (showCreateError('display_name')) {
+                <p class="field-error" role="alert">{{ createFieldError('display_name') }}</p>
+              }
+            </div>
+            <div class="field">
+              <label for="user-role">Role</label>
+              <select id="user-role" formControlName="role">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="user-password">Initial password</label>
+              <input
+                id="user-password"
+                type="password"
+                formControlName="password"
+                autocomplete="new-password"
+              />
+              @if (showCreateError('password')) {
+                <p class="field-error" role="alert">{{ createFieldError('password') }}</p>
+              } @else {
+                <p class="note">At least {{ minLength }} characters.</p>
+              }
+            </div>
+            <label class="checkbox-field">
+              <input type="checkbox" formControlName="must_change_password" />
+              Require a password change at next sign-in
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary" [disabled]="saving()">
+              {{ saving() ? 'Saving…' : 'Create user' }}
+            </button>
+            <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+          </div>
+        </form>
+      } @else {
+        <form class="card form-card" [formGroup]="editForm" (ngSubmit)="save()" novalidate>
+          <h2>Edit {{ state.user.email }}</h2>
+          <div class="form-grid">
+            <div class="field">
+              <label for="edit-name">Display name</label>
+              <input id="edit-name" type="text" formControlName="display_name" />
+              @if (showEditError()) {
+                <p class="field-error" role="alert">{{ editFieldError() }}</p>
+              }
+            </div>
+            <div class="field">
+              <label for="edit-role">Role</label>
+              <select id="edit-role" formControlName="role">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+            <label class="checkbox-field">
+              <input id="edit-active" type="checkbox" formControlName="is_active" />
+              Account is active
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary" [disabled]="saving()">
+              {{ saving() ? 'Saving…' : 'Save' }}
+            </button>
+            <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+          </div>
+        </form>
+      }
+    }
+
+    @if (resetUser(); as user) {
+      <div class="card form-card reset-panel">
+        <h2>Reset password for {{ user.email }}</h2>
+        <p class="warn-note">
+          This sets a new password, revokes the account's API keys and sessions (decision D23), and
+          forces a password change at next sign-in.
+        </p>
+        <div class="form-grid">
+          <div class="field">
+            <label for="reset-password">New password</label>
+            <input
+              id="reset-password"
+              type="password"
+              [formControl]="resetForm.controls.password"
+              autocomplete="new-password"
+            />
+            @if (showResetError()) {
+              <p class="field-error" role="alert">{{ resetFieldError() }}</p>
+            } @else {
+              <p class="note">At least {{ minLength }} characters.</p>
+            }
+          </div>
+        </div>
+        <div class="form-actions">
+          <app-delete-confirm
+            label="Set new password"
+            confirmLabel="Confirm reset"
+            [pending]="resetting()"
+            (confirmed)="resetPassword()"
+          />
+          <button type="button" class="btn" (click)="closeReset()">Cancel</button>
+        </div>
+      </div>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && users().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (users().length === 0) {
+      <div class="card">
+        <h2>No users yet</h2>
+        <p class="empty-note">Create the first account above.</p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Email</th>
+            <th scope="col">Name</th>
+            <th scope="col">Role</th>
+            <th scope="col">Status</th>
+            <th scope="col">Last login</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (user of users(); track user.id) {
+            <tr>
+              <td>
+                <code>{{ user.email }}</code>
+              </td>
+              <td>{{ user.display_name }}</td>
+              <td>
+                <span class="badge" [class.role-admin]="user.role === 'admin'">{{
+                  user.role
+                }}</span>
+              </td>
+              <td>
+                @if (user.is_active) {
+                  <span class="badge ok">active</span>
+                } @else {
+                  <span class="badge error">inactive</span>
+                }
+                @if (user.must_change_password) {
+                  <span class="badge warn">password change required</span>
+                }
+              </td>
+              <td>{{ formatTime(user.last_login_at) }}</td>
+              <td class="actions">
+                <button type="button" class="btn" (click)="openEdit(user)">Edit</button>
+                <button type="button" class="btn danger" (click)="openReset(user)">
+                  Reset password
+                </button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>

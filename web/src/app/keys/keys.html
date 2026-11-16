@@ -1,0 +1,181 @@
+<div class="keys">
+  <header class="page-head">
+    <h1>API keys</h1>
+    <p class="hint">
+      @if (viewingSelf()) {
+        Keys for your account, used as <code>Authorization: Bearer</code> against <code>/v1</code>.
+        The full key is shown once at creation — copy it then.
+      } @else {
+        Keys for account <code>{{ targetUserId() }}</code>. The full key is shown once at creation —
+        copy it then.
+      }
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">You may only manage keys for your own account.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    @if (createdKey(); as shown) {
+      <div class="card key-card" role="alert">
+        <h2>Copy your new key now</h2>
+        <p class="key-warn">
+          This is the only copy of <strong>{{ shown.name }}</strong>. It is shown exactly once and
+          cannot be recovered later — if you lose it, revoke the key and create another.
+        </p>
+        <div class="key-row">
+          <code class="key-value">{{ shown.key }}</code>
+          <button type="button" class="btn" (click)="copyKey()">
+            {{ copied() ? 'Copied' : 'Copy' }}
+          </button>
+          <button type="button" class="btn primary" (click)="dismissKey()">I have copied it</button>
+        </div>
+      </div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openCreate()">New key</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (formState(); as state) {
+      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
+        <h2>
+          {{
+            state.mode === 'create'
+              ? 'New key'
+              : 'Edit ' + state.key.name + ' (' + state.key.prefix + ')'
+          }}
+        </h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="key-name">Name</label>
+            <input id="key-name" type="text" formControlName="name" placeholder="laptop" />
+            @if (showError('name')) {
+              <p class="field-error" role="alert">{{ fieldError('name') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="key-expires">Expires at</label>
+            <input id="key-expires" type="datetime-local" formControlName="expires_at" />
+            @if (state.mode === 'edit') {
+              <p class="note">Leave unchanged to keep the current expiry; it cannot be cleared.</p>
+            }
+          </div>
+          <div class="field">
+            <label for="key-rpm">Requests per minute</label>
+            <input
+              id="key-rpm"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="rate_limit_rpm"
+              placeholder="server default"
+            />
+            @if (showError('rate_limit_rpm')) {
+              <p class="field-error" role="alert">{{ fieldError('rate_limit_rpm') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="key-tpm">Tokens per minute</label>
+            <input
+              id="key-tpm"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="rate_limit_tpm"
+              placeholder="server default"
+            />
+            @if (showError('rate_limit_tpm')) {
+              <p class="field-error" role="alert">{{ fieldError('rate_limit_tpm') }}</p>
+            }
+          </div>
+        </div>
+        <p class="note">
+          Over-limit requests are refused with <code>429 rate_limited</code> and a
+          <code>Retry-After</code> header. Expiry and rate limits cannot be cleared once set —
+          revoke the key instead.
+        </p>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Save' }}
+          </button>
+          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && keys().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (keys().length === 0) {
+      <div class="card">
+        <h2>No keys yet</h2>
+        <p class="empty-note">Create a key to use the gateway from an application.</p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Prefix</th>
+            <th scope="col">Created</th>
+            <th scope="col">Last used</th>
+            <th scope="col">Limits</th>
+            <th scope="col">Expires</th>
+            <th scope="col">Status</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (key of keys(); track key.id) {
+            <tr>
+              <td>{{ key.name }}</td>
+              <td>
+                <code>{{ key.prefix }}</code>
+              </td>
+              <td>{{ formatTime(key.created_at) }}</td>
+              <td>{{ formatTime(key.last_used_at) }}</td>
+              <td>
+                {{ key.rate_limit_rpm ?? 'default' }} rpm ·
+                {{ key.rate_limit_tpm ?? 'default' }} tpm
+              </td>
+              <td>{{ formatTime(key.expires_at) }}</td>
+              <td>
+                @if (key.revoked_at !== null) {
+                  <span class="badge error">revoked</span>
+                } @else if (isExpired(key)) {
+                  <span class="badge warn">expired</span>
+                } @else {
+                  <span class="badge ok">active</span>
+                }
+              </td>
+              <td class="actions">
+                <button type="button" class="btn" (click)="openEdit(key)">Edit</button>
+                @if (key.revoked_at === null) {
+                  <app-delete-confirm
+                    label="Revoke"
+                    confirmLabel="Confirm revoke"
+                    [pending]="revokingId() === key.id"
+                    (confirmed)="revoke(key)"
+                  />
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>

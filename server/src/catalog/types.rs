@@ -565,7 +565,8 @@ impl std::fmt::Debug for OfferingPatch {
 
 /// Manual price override (`PUT`, source becomes `manual` and is never
 /// overwritten by a sync). Missing components are stored as NULL — unknown is
-/// unknown, never 0.
+/// unknown, never 0. At least one price field must be set: an all-NULL body
+/// is rejected with `400` instead of storing an all-NULL price row.
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct PriceInput {
     pub input_per_m: Option<f64>,

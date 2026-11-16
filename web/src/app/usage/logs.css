@@ -1,0 +1,39 @@
+.state {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+}
+
+.state h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.state.error {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.state-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.more {
+  margin-top: 1rem;
+}
+
+.col-time {
+  white-space: nowrap;
+}
+
+/* 402/429 rows are money events: the request never reached a provider. */
+.logs-table tbody tr.money-event {
+  background: #fff8ec;
+}
+
+.logs-table tbody tr.money-event:hover {
+  background: #fff0d6;
+}

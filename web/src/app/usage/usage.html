@@ -1,0 +1,165 @@
+<div class="usage">
+  <header class="page-head">
+    <h1>Usage</h1>
+    <p class="hint">
+      Metered requests and spend. Unpriced requests (no price for the offering) are counted, never
+      silently added as $0.00. Refused requests (402/429/403 before forwarding) are counted but cost
+      nothing.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">This report is restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      @if (isAdmin()) {
+        <div class="field">
+          <label for="usage-scope">Report</label>
+          <select id="usage-scope" [value]="scope()" (change)="onScopeChange($event)">
+            <option value="me">My usage</option>
+            <option value="all">All users</option>
+            @for (user of users(); track user.id) {
+              <option [value]="user.id">{{ user.email }}</option>
+            }
+          </select>
+        </div>
+        @if (scope() !== 'me') {
+          <div class="field">
+            <label for="usage-group">Group by</label>
+            <select id="usage-group" [value]="groupBy()" (change)="onGroupByChange($event)">
+              @for (option of groupByOptions; track option) {
+                <option [value]="option">{{ option }}</option>
+              }
+            </select>
+          </div>
+        }
+      }
+      <div class="field">
+        <label for="usage-from">From</label>
+        <input id="usage-from" type="date" [value]="from()" (input)="onFromChange($event)" />
+      </div>
+      <div class="field">
+        <label for="usage-to">To</label>
+        <input id="usage-to" type="date" [value]="to()" (input)="onToChange($event)" />
+      </div>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">
+        {{ loading() ? 'Loading…' : 'Apply' }}
+      </button>
+    </div>
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (totals(); as totals) {
+      <div class="card totals-card">
+        <div class="totals-grid">
+          <div class="total">
+            <span class="total-label">Requests</span>
+            <span class="total-value">{{ totals.requests }}</span>
+          </div>
+          <div class="total">
+            <span class="total-label">Input tokens</span>
+            <span class="total-value">{{ formatTokens(totals.input_tokens) }}</span>
+          </div>
+          <div class="total">
+            <span class="total-label">Output tokens</span>
+            <span class="total-value">{{ formatTokens(totals.output_tokens) }}</span>
+          </div>
+          <div class="total">
+            <span class="total-label">Cost</span>
+            <span class="total-value">{{ formatUsd(totals.cost_usd) }}</span>
+          </div>
+        </div>
+        <p class="pricing-line">
+          <span class="badge ok">{{ totals.priced_requests }} priced</span>
+          @if (totals.refused_requests > 0) {
+            <span class="badge warn">{{ totals.refused_requests }} refused</span>
+          }
+          @if (totals.partial_requests > 0) {
+            <span class="badge warn">{{ totals.partial_requests }} partial</span>
+          }
+          @if (totals.unpriced_requests > 0) {
+            <span class="badge error">{{ totals.unpriced_requests }} unpriced</span>
+          }
+          @if (
+            totals.refused_requests === 0 &&
+            totals.partial_requests === 0 &&
+            totals.unpriced_requests === 0
+          ) {
+            <span class="badge">{{
+              totals.priced_requests === 0 ? 'no requests yet' : 'all priced'
+            }}</span>
+          }
+        </p>
+      </div>
+
+      @if (rows().length === 0) {
+        <div class="card">
+          <h2>No usage in this range</h2>
+          <p class="empty-note">Widen the date range or send a request through the gateway.</p>
+        </div>
+      } @else {
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th scope="col">{{ keyHeader() }}</th>
+              <th scope="col">Requests</th>
+              <th scope="col">Input tokens</th>
+              <th scope="col">Output tokens</th>
+              <th scope="col">Cost</th>
+              <th scope="col">Refused</th>
+              <th scope="col">Unpriced</th>
+              <th scope="col">Partial</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of rows(); track row.key) {
+              <tr>
+                <td>
+                  <code>{{ row.key }}</code>
+                </td>
+                <td>{{ row.totals.requests }}</td>
+                <td>{{ formatTokens(row.totals.input_tokens) }}</td>
+                <td>{{ formatTokens(row.totals.output_tokens) }}</td>
+                <td>{{ formatUsd(row.totals.cost_usd) }}</td>
+                <td>
+                  @if (row.totals.refused_requests > 0) {
+                    <span class="badge warn">{{ row.totals.refused_requests }}</span>
+                  } @else {
+                    0
+                  }
+                </td>
+                <td>
+                  @if (row.totals.unpriced_requests > 0) {
+                    <span class="badge error">{{ row.totals.unpriced_requests }}</span>
+                  } @else {
+                    0
+                  }
+                </td>
+                <td>
+                  @if (row.totals.partial_requests > 0) {
+                    <span class="badge warn">{{ row.totals.partial_requests }}</span>
+                  } @else {
+                    0
+                  }
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      }
+    } @else {
+      <p class="empty-note">Loading…</p>
+    }
+  }
+</div>

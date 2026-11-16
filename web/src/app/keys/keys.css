@@ -1,0 +1,33 @@
+.form-card,
+.key-card {
+  margin-bottom: 1rem;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions .btn {
+  margin-right: 0.35rem;
+}
+
+.key-warn {
+  color: #7a4900;
+  font-size: 0.9rem;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.key-row .key-value {
+  flex: 1 1 20rem;
+  overflow-wrap: anywhere;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #eef0f4;
+}

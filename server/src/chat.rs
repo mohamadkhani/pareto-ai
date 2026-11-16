@@ -1819,7 +1819,10 @@ fn resolve_usage(settlement: &Settlement) -> (Option<Usage>, bool) {
 /// ("unpriced", never a silent 0) and a used component without price
 /// contributes 0 and flags the row `priced = 0`. The reservation marks itself
 /// `settled` (booking the actuals into the period the request started in) or
-/// `released` when the request consumed nothing.
+/// `released` when the request consumed nothing. A request that consumed
+/// nothing (a pre-send refusal) is booked with `refused = 1` and cost 0.0:
+/// reports count it in `refused_requests`, never in `priced_requests`
+/// (migration 0006).
 async fn settle(state: &AppState, settlement: &Settlement) {
     let (usage, tokens_estimated) = resolve_usage(settlement);
     let occurred_at = catalog::now_ts();
@@ -1864,8 +1867,8 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         "INSERT INTO usage_events \
          (request_id, user_id, api_key_id, offering_id, model_id, input_tokens, output_tokens, \
           cache_read_tokens, cache_write_tokens, reasoning_tokens, tokens_estimated, cost_usd, \
-          priced, started_at, latency_ms, ttft_ms, status, error_class, occurred_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          priced, refused, started_at, latency_ms, ttft_ms, status, error_class, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.user_id)
@@ -1880,6 +1883,11 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     .bind(i64::from(tokens_estimated))
     .bind(cost.cost_usd)
     .bind(i64::from(cost.priced))
+    // Refusal marker (migration 0006): `resolve_usage` books no usage
+    // exactly when nothing was sent upstream — a pre-send refusal (402
+    // budget, 429 token cap, 403 access, ...) that consumed nothing and was
+    // never priced. Reports give it its own counter.
+    .bind(i64::from(usage.is_none()))
     .bind(&settlement.meta.started_at)
     .bind(latency_ms)
     .bind(settlement.ttft_ms)
@@ -1946,6 +1954,7 @@ async fn settle(state: &AppState, settlement: &Settlement) {
                 .unwrap_or(0),
             cost_usd: cost.cost_usd,
             priced: cost.priced,
+            refused: usage.is_none(),
         },
     )
     .await;
@@ -4683,6 +4692,129 @@ mod tests {
                 .expect("usage row");
         assert_eq!(cost, None, "unpriced rows stay NULL");
         assert_eq!(priced, 0);
+    }
+
+    /// A pre-send refusal settles a `refused = 1` row and the reports count
+    /// it in `refused_requests`, never in `priced_requests` (M4 UI-alignment
+    /// finding 1) — through `settle()` and through a full rollup rebuild.
+    #[tokio::test]
+    async fn refused_requests_get_their_own_counter_through_settle_and_rebuild() {
+        /// The counter split one report must show, however it was derived.
+        async fn assert_counters(pool: &sqlx::SqlitePool) {
+            let (requests, refused, priced, unpriced, partial): (i64, i64, i64, i64, i64) =
+                sqlx::query_as(
+                    "SELECT SUM(requests), SUM(refused_requests), SUM(priced_requests), \
+                            SUM(unpriced_requests), SUM(partial_requests) FROM usage_daily",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("counters");
+            assert_eq!(requests, 2, "requests counts every row");
+            assert_eq!(refused, 1, "the refusal has its own counter");
+            assert_eq!(priced, 1, "only the billable request was priced");
+            assert_eq!(unpriced, 0);
+            assert_eq!(partial, 0);
+        }
+
+        let stub = Stub::spawn(vec![completion(usage_json(11, 7))]).await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.5),
+                output_per_m: Some(10.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+
+        // One billable request...
+        let ok = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
+
+        // ...and one refused before anything is sent: a non-admin key with no
+        // grants may not use the only offering (403 access_denied).
+        let denied_user = s
+            .app
+            .create_user("denied@example.test", Role::User, true)
+            .await;
+        let created = crate::api_keys::create_key(
+            &s.app.state.pool,
+            &actor,
+            &denied_user,
+            &crate::api_keys::ApiKeyInput {
+                name: "denied".to_string(),
+                expires_at: None,
+                scopes: None,
+                rate_limit_rpm: None,
+                rate_limit_tpm: None,
+            },
+        )
+        .await
+        .expect("key");
+        let bearer = |key: &str, body: serde_json::Value| {
+            axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request")
+        };
+        let refused = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "access_denied");
+
+        // The refusal's ledger row booked nothing: NULL tokens, cost 0.0,
+        // and the `refused` marker the rollup rebuild derives from.
+        let rows = usage_rows(&s.app).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].status, Some(403));
+        assert!(rows[1].input_tokens.is_none() && rows[1].output_tokens.is_none());
+        assert_eq!(rows[1].cost_usd, Some(0.0), "a refusal costs exactly 0");
+        let refused_marker: i64 =
+            sqlx::query_scalar("SELECT refused FROM usage_events WHERE status = 403")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("refused marker");
+        assert_eq!(refused_marker, 1);
+
+        // The incremental settlement books the split...
+        assert_counters(&s.app.state.pool).await;
+
+        // ...and the rebuild derives the same split from `usage_events`.
+        crate::reports::rebuild_rollups(&s.app.state.pool, s.app.state.config.tz)
+            .await
+            .expect("rebuild");
+        assert_counters(&s.app.state.pool).await;
     }
 
     /// A `402`-refused request must not burn its key's TPM quota (review

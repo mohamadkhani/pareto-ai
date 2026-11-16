@@ -1,0 +1,177 @@
+<div class="grants">
+  <header class="page-head">
+    <h1>Access grants</h1>
+    <p class="hint">
+      Who may use which models, offerings, and credentials. A <code>deny</code> beats an
+      <code>allow</code>; a <code>user</code> role without any grant is denied, an admin is allowed
+      by default. A request through an API key needs grants for both the key and its owner — grant
+      the account and the key.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">Access grants are restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openForm()">New grant</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (showForm()) {
+      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
+        <h2>New grant</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="grant-subject-type">Subject kind</label>
+            <select
+              id="grant-subject-type"
+              formControlName="subject_type"
+              (change)="onSubjectTypeChange()"
+            >
+              <option value="user">user</option>
+              <option value="api_key">api key</option>
+            </select>
+          </div>
+          @if (form.controls.subject_type.value === 'api_key') {
+            <div class="field">
+              <label for="grant-key-owner">Key owner</label>
+              <select
+                id="grant-key-owner"
+                formControlName="key_owner_id"
+                (change)="onKeyOwnerChange()"
+              >
+                <option value="">Choose an account…</option>
+                @for (user of users(); track user.id) {
+                  <option [value]="user.id">{{ user.email }}</option>
+                }
+              </select>
+            </div>
+          }
+          <div class="field">
+            <label for="grant-subject">
+              {{ form.controls.subject_type.value === 'user' ? 'Account' : 'API key' }}
+            </label>
+            <select id="grant-subject" formControlName="subject_id">
+              <option value="">
+                {{
+                  form.controls.subject_type.value === 'user'
+                    ? 'Choose an account…'
+                    : 'Choose an API key…'
+                }}
+              </option>
+              @for (option of subjectOptions(); track option.id) {
+                <option [value]="option.id">{{ option.label }}</option>
+              }
+            </select>
+            @if (showError('subject_id')) {
+              <p class="field-error" role="alert">{{ fieldError('subject_id') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="grant-resource-type">Resource kind</label>
+            <select
+              id="grant-resource-type"
+              formControlName="resource_type"
+              (change)="onResourceTypeChange()"
+            >
+              <option value="model">model</option>
+              <option value="offering">offering</option>
+              <option value="credential">credential</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="grant-resource">Resource</label>
+            <select id="grant-resource" formControlName="resource_id">
+              <option value="">Choose a resource…</option>
+              @for (option of resourceOptions(); track option.id) {
+                <option [value]="option.id">{{ option.label }}</option>
+              }
+            </select>
+            @if (showError('resource_id')) {
+              <p class="field-error" role="alert">{{ fieldError('resource_id') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="grant-mode">Mode</label>
+            <select id="grant-mode" formControlName="mode">
+              <option value="allow">allow</option>
+              <option value="deny">deny</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Create grant' }}
+          </button>
+          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && grants().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (grants().length === 0) {
+      <div class="card">
+        <h2>No grants yet</h2>
+        <p class="empty-note">
+          Without a grant, a non-admin account is denied every model, offering, and credential.
+        </p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Subject</th>
+            <th scope="col">Resource</th>
+            <th scope="col">Mode</th>
+            <th scope="col">Created</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (grant of grants(); track grant.id) {
+            <tr>
+              <td>
+                {{ subjectLabel(grant) }}
+                <span class="badge">{{ grant.subject_type }}</span>
+              </td>
+              <td>
+                {{ resourceLabel(grant) }}
+                <span class="badge">{{ grant.resource_type }}</span>
+              </td>
+              <td>
+                <span
+                  class="badge"
+                  [class.ok]="grant.mode === 'allow'"
+                  [class.error]="grant.mode === 'deny'"
+                >
+                  {{ grant.mode }}
+                </span>
+              </td>
+              <td>{{ formatTime(grant.created_at) }}</td>
+              <td class="actions">
+                <app-delete-confirm
+                  [pending]="deletingId() === grant.id"
+                  (confirmed)="remove(grant)"
+                />
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>

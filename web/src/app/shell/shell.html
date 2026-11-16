@@ -6,8 +6,14 @@
       <a routerLink="/models" routerLinkActive="active">Models</a>
       <a routerLink="/offerings" routerLinkActive="active">Offerings</a>
       <a routerLink="/sync" routerLinkActive="active">Price sync</a>
+      <a routerLink="/users" routerLinkActive="active">Users</a>
+      <a routerLink="/grants" routerLinkActive="active">Grants</a>
       <a routerLink="/audit" routerLinkActive="active">Audit log</a>
+      <a routerLink="/logs" routerLinkActive="active">Request logs</a>
     }
+    <a routerLink="/keys" routerLinkActive="active">API keys</a>
+    <a routerLink="/limits" routerLinkActive="active">Limits</a>
+    <a routerLink="/usage" routerLinkActive="active">Usage</a>
   </nav>
   @if (auth.user(); as user) {
     <div class="user">

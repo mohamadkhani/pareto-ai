@@ -1,0 +1,27 @@
+.form-card {
+  margin-bottom: 1rem;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions .btn {
+  margin-right: 0.35rem;
+}
+
+/* Admin accounts stand out from plain users. */
+.badge.role-admin {
+  background: #e3ecfb;
+  color: #24479f;
+}
+
+.warn-note {
+  margin: 0 0 0.75rem;
+  color: #7a4900;
+  background: #fff4e5;
+  border: 1px solid #b26a00;
+  border-radius: 8px;
+  padding: 0.65rem 0.9rem;
+  font-size: 0.9rem;
+}

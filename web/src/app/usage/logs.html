@@ -1,0 +1,106 @@
+<div class="logs">
+  <header class="page-head">
+    <h1>Request logs</h1>
+    <p class="hint">
+      Metadata and settled usage for every request, newest first — never request or response bodies.
+      Status <code>402</code> and <code>429</code> are money events: the request was refused before
+      forwarding.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="state">
+      <h2>Forbidden</h2>
+      <p>The request log is restricted to administrators.</p>
+    </div>
+  } @else if (loadError()) {
+    <div class="state error" role="alert">
+      <p>{{ loadError() }}</p>
+      <button type="button" class="btn" (click)="reload()">Try again</button>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      <div class="field">
+        <label for="logs-user">User</label>
+        <select id="logs-user" [value]="userFilter()" (change)="onUserFilterChange($event)">
+          <option value="">All users</option>
+          @for (user of users(); track user.id) {
+            <option [value]="user.id">{{ user.email }}</option>
+          }
+        </select>
+      </div>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    <table class="data-table logs-table">
+      <thead>
+        <tr>
+          <th scope="col">Time</th>
+          <th scope="col">User</th>
+          <th scope="col">Model</th>
+          <th scope="col">Offering</th>
+          <th scope="col">Status</th>
+          <th scope="col">Cost</th>
+          <th scope="col">Tokens</th>
+          <th scope="col">Latency</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (entry of entries(); track entry.request_id) {
+          <tr [class.money-event]="isMoneyEvent(entry)">
+            <td class="col-time">{{ formatTime(entry.occurred_at) }}</td>
+            <td>{{ userName(entry.user_id) }}</td>
+            <td>
+              @if (entry.requested_model) {
+                <code>{{ entry.requested_model }}</code>
+              } @else {
+                —
+              }
+            </td>
+            <td>
+              @if (entry.resolved_offering_id) {
+                <code>{{ entry.resolved_offering_id }}</code>
+              } @else {
+                —
+              }
+            </td>
+            <td>
+              @if (entry.status === 402) {
+                <span class="badge error" title="Refused: budget exceeded">402 budget</span>
+              } @else if (entry.status === 429) {
+                <span class="badge warn" title="Refused: token cap exceeded">429 cap</span>
+              } @else if (entry.status !== null) {
+                <span class="badge" [class.error]="entry.status >= 400">{{ entry.status }}</span>
+              } @else {
+                —
+              }
+            </td>
+            <td>{{ hasUsage(entry) ? formatUsd(entry.cost_usd) : '—' }}</td>
+            <td>{{ tokenText(entry) }}</td>
+            <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+
+    @if (loading()) {
+      <p class="state-note">Loading…</p>
+    } @else if (entries().length === 0) {
+      <div class="state">
+        <h2>No requests yet</h2>
+        <p>Requests through <code>/v1</code> will show up here.</p>
+      </div>
+    } @else if (hasMore()) {
+      <div class="more">
+        <button type="button" class="btn" (click)="loadMore()" [disabled]="loadingMore()">
+          {{ loadingMore() ? 'Loading…' : 'Load more' }}
+        </button>
+      </div>
+    }
+  }
+</div>

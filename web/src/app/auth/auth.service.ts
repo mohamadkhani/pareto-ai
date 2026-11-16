@@ -7,6 +7,8 @@ export interface User {
   email: string;
   display_name: string;
   role: 'admin' | 'user';
+  /** Forced rotation is pending: the UI must block everything else. */
+  must_change_password: boolean;
 }
 
 /** What `POST /api/auth/login` and `GET /api/auth/me` return. */
@@ -36,15 +38,17 @@ export class AuthService {
   /**
    * Restores the session from `GET /api/auth/me`. Concurrent calls share one
    * request; a failed restore resolves to "not signed in" and never throws.
+   * `force` re-reads the server state even when a session is already cached
+   * (used after a password change to pick up `must_change_password`).
    */
-  loadMe(): Promise<boolean> {
+  loadMe(force = false): Promise<boolean> {
     if (this.restoreInFlight !== null) {
       return this.restoreInFlight;
     }
-    if (this.status() === 'authenticated') {
+    if (!force && this.status() === 'authenticated') {
       return Promise.resolve(true);
     }
-    if (this.status() === 'anonymous') {
+    if (!force && this.status() === 'anonymous') {
       return Promise.resolve(false);
     }
     this.status.set('loading');
@@ -79,6 +83,20 @@ export class AuthService {
     this.user.set(session.user);
     this.csrfToken.set(session.csrf_token);
     this.status.set('authenticated');
+  }
+
+  /**
+   * Changes the caller's own password (`POST /api/auth/change-password`),
+   * clearing the forced-rotation flag server-side. Throws `ApiError`
+   * (`invalid_credentials` when the current password is wrong, `bad_request`
+   * for a too-short new password) on failure.
+   */
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await requestNoContent('/api/auth/change-password', {
+      method: 'POST',
+      body: { current_password: currentPassword, new_password: newPassword },
+      csrfToken: this.csrfToken(),
+    });
   }
 
   /**
