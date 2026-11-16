@@ -32,7 +32,34 @@ pub enum PasswordError {
 
 /// Hashes `password` with a fresh 16-byte random salt and [`PBKDF2_ITERATIONS`].
 pub fn hash_password(password: &str) -> Result<String, PasswordError> {
-    hash_password_with_iterations(password, PBKDF2_ITERATIONS)
+    hash_password_with_iterations(password, current_iterations())
+}
+
+/// The iteration count [`hash_password`] uses: always [`PBKDF2_ITERATIONS`]
+/// in production. Test binaries may lower it per thread (tests hash through
+/// the same code paths but must not pay 600k derivations per call).
+fn current_iterations() -> u32 {
+    #[cfg(test)]
+    {
+        TEST_ITERATIONS.with(|value| value.get())
+    }
+    #[cfg(not(test))]
+    {
+        PBKDF2_ITERATIONS
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ITERATIONS: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(PBKDF2_ITERATIONS) };
+}
+
+/// Lowers [`hash_password`]'s iteration count on the calling test thread.
+/// Test-only: the production binary never compiles this.
+#[cfg(test)]
+pub fn set_test_iterations(iterations: u32) {
+    TEST_ITERATIONS.with(|value| value.set(iterations));
 }
 
 /// Hashes with an explicit iteration count. The count is encoded in the output,

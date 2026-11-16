@@ -30,7 +30,18 @@ Claims here are dated; code facts cite commits.
 | 2026-11-16 | **M2 closed and committed** | chief-of-staff | `79dc371 feat(catalog): providers, encrypted credentials, models, prices, sync` (127 tracked files; verified `scripts/check.sh` + encryption wiring myself first) |
 | 2026-11-16 | M3 backend (chat data plane) | sub-agent `ses_e1e36e9acffeN9GenOzjUnZ3g7` | done: 167 tests (38 new), `scripts/check.sh` green. Bounded-channel streaming, `CancelOnDrop` cancellation (<1s upstream close, stub-proven), pre-byte-only failover, one ledger pair per request (no double-spend), `chars/4` estimation flagged, `/v1` CSRF-exempt |
 | 2026-11-16 | review of M3 (deep: ledger, cancellation, timeouts, failover, SSE) | sub-agent `ses_e1daa1888ffe4lvj2W1IWmiMLQ` | verdict **needs changes**: 1 blocker (client `x-request-id` as ledger PK → duplicate id rolls back both rows, a billing-evasion hole), 3 major (estimation counts JSON scaffolding 10-40x over; unbounded SSE line buffer; estimation booked for never-sent attempts), 6 minors, 7 nits. Core design (cancellation, failover boundary, single-tx settlement, budgets) verified sound. Full text: [`docs/reviews/2026-11-16-m3-deep-review.md`](../reviews/2026-11-16-m3-deep-review.md) |
-| 2026-11-16 | close M3 findings (B1 ledger key, M1-M3, m1-m6, nits) | sub-agent `ses_e1d98cb32ffeJ9szGN82oFGVax` | running |
+| 2026-11-16 | close M3 findings (B1 ledger key, M1-M3, m1-m6, nits) | sub-agent `ses_e1d98cb32ffeJ9szGN82oFGVax` | done: 181 backend tests (16 new). Server-generated ledger key (`client_request_id` echo preserved, `UNIQUE` on `usage_events.request_id`), content-only token estimation, 1 MiB SSE line cap, `sent`-flag estimation, budget-raced sends, terminal oversized-buffer class |
+| 2026-11-16 | **M3 closed and committed** | chief-of-staff | `9efd776 feat(chat): streaming chat data plane with usage ledger` (138 tracked files; verified `just check` + ledger wiring myself first) |
+| 2026-11-16 | M4 backend (keys, grants, budgets, reservations, reports, user mgmt) | sub-agent `ses_e1d6f1e0bffeuZz1kPjqgXTAXA` | done: 230 backend tests (49 new), `just check` green. Write-lock-first reservation transaction (barrier-tested), cost from chosen offering prices in `settle`, grant matrix (deny-beats-allow × user∩key), keys shown once + SHA-256 + RPM/TPM buckets, forced rotation, idempotent rollups. 6 schema deviations documented in `0005` header |
+| 2026-11-16 | review of M4 (money + access, adversarial) | sub-agent `ses_e1d1bf708ffeHtbRrDrnIha9en` | verdict **needs changes**: 1 blocker (released reservation → actuals never booked; TTL 10min vs total-timeout 600s race, exploitable with larger timeouts), 3 major (period straddle dodges day caps at default config; unvalidated upstream usage can credit budgets; subset-token double-billing — spec defect → D22), 6 minors (incl. admin reset doesn't revoke keys → D23), 4 nits. Authz and key security verified correct. Full text: [`docs/reviews/2026-11-16-m4-money-access.md`](../reviews/2026-11-16-m4-money-access.md) |
+| 2026-11-16 | close M4 findings (B1, M1-M3→D22, m1-m6→D23, nits) | sub-agent `ses_e1d09b1f3ffeT2UbPbaazFRjnF` | running |
+
+**M4 follow-ups** (from the implementer's report, to keep): token caps are
+pre-checked only for the reservation's model (a failover to another model can
+overspend a cap by one request); `scopes_json` stored but unenforced (spec
+leaves scopes undefined); no admin "reset usage" action; pre-existing dev DBs
+need recreating for the rotation flag; `last_used_at`/`last_seen_at` are
+per-request writes (batch if profiling shows it).
 
 **M3 contract notes for future UI work** (from the M3 report): mid-stream
 failures keep HTTP **200** and surface as an in-band `data: {"error":...}` SSE

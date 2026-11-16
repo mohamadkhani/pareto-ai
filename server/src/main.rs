@@ -1,5 +1,7 @@
 //! pareto-ai gateway — entry point.
 
+mod access;
+mod api_keys;
 mod auth;
 mod bootstrap;
 mod catalog;
@@ -8,10 +10,12 @@ mod config;
 mod db;
 mod error;
 mod ip;
+mod money;
 mod openapi;
 mod password;
 mod pricing;
 mod probe;
+mod reports;
 mod request_id;
 mod routes;
 mod secrets;
@@ -20,6 +24,7 @@ mod static_files;
 #[cfg(test)]
 mod test_support;
 mod upstream;
+mod users;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -44,6 +49,8 @@ pub struct AppState {
     pub started: Instant,
     /// In-memory login failure tracking, shared by all requests.
     pub login_limiter: Arc<auth::LoginRateLimiter>,
+    /// Per-key RPM/TPM token buckets for the data plane (M4).
+    pub key_limiter: Arc<api_keys::KeyRateLimiter>,
 }
 
 #[tokio::main]
@@ -56,6 +63,23 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Arc::new(Config::from_env().context("reading configuration")?);
+
+    // Operator commands run without serving (no master key needed: rollups
+    // hold no secrets). `gateway rebuild-rollups` re-derives `usage_daily`
+    // from `usage_events` and exits.
+    if std::env::args().nth(1).as_deref() == Some("rebuild-rollups") {
+        let pool = db::open(&config.database_path())
+            .await
+            .context("starting database")?;
+        let stats = reports::rebuild_rollups(&pool, config.tz)
+            .await
+            .context("rebuilding usage rollups")?;
+        println!(
+            "rebuilt usage_daily: {} rows from {} usage_events",
+            stats.rows, stats.events
+        );
+        return Ok(());
+    }
     // Credential encryption is required from milestone 2 on: without the key
     // no credential can be stored safely, so the gateway refuses to start.
     let secrets = Arc::new(require_master_key(config.master_key.as_ref())?);
@@ -85,7 +109,14 @@ async fn main() -> Result<()> {
         upstream,
         started: Instant::now(),
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),
+        key_limiter: Arc::new(api_keys::KeyRateLimiter::new()),
     };
+
+    // Background upkeep (M4): stale reservations must not lock budgets, and
+    // the usage rollups are rebuilt periodically on top of the incremental
+    // settlement updates.
+    money::spawn_reconciler(state.pool.clone(), state.config.timeout_total);
+    reports::spawn_rollup_job(state.pool.clone(), state.config.tz);
 
     let app = request_id::stack(
         Router::new()

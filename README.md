@@ -70,7 +70,7 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | `GATEWAY_LISTEN` | `127.0.0.1:8081` | Bind address |
 | `GATEWAY_DATA_DIR` | `./data` | Database directory |
 | `GATEWAY_MASTER_KEY` | **required** | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). Startup fails without it. Generate: `openssl rand -base64 32 \| tr '+/' '-_'` |
-| `GATEWAY_TIMEZONE` | `UTC` | Timezone for budget periods |
+| `GATEWAY_TIMEZONE` | `UTC` | IANA timezone (e.g. `Asia/Tehran`) for budget-period boundaries and usage-rollup days. Startup fails on an unknown zone. |
 | `GATEWAY_MAX_BODY_BYTES` | `4194304` (4 MiB) | Largest `POST /v1/chat/completions` request body |
 | `GATEWAY_TIMEOUT_CONNECT_MS` | `10000` | Upstream TCP connect timeout |
 | `GATEWAY_TIMEOUT_FIRST_BYTE_MS` | `30000` | Budget from upstream request start to the first response byte |

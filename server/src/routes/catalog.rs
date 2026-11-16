@@ -418,13 +418,34 @@ pub async fn override_price(
 )]
 pub async fn v1_models(
     State(state): State<AppState>,
-    RequireAdmin(_admin): RequireAdmin,
+    crate::auth::DataPlaneAuth(caller): crate::auth::DataPlaneAuth,
     headers: HeaderMap,
 ) -> Result<Json<V1ModelList>, ApiError> {
     let rid = error::request_id(&headers);
-    let data = catalog::list_v1_models(&state.pool)
+    let entries = catalog::list_v1_models(&state.pool)
         .await
-        .map_err(|e| e.into_api_error(rid))?;
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    // Access control (decision D9): the listing shows only the models the
+    // caller may use through at least one enabled offering. Credentials are
+    // not evaluated here — the chat pipeline checks them per request.
+    let api_key_id = caller.api_key.as_ref().map(|key| key.key_id.as_str());
+    let grants = crate::access::Grants::load(&state.pool, &caller.user_id, api_key_id)
+        .await
+        .map_err(|e| ApiError::internal("loading grants", e).with_request_id(rid.clone()))?;
+    let data = entries
+        .into_iter()
+        .filter(|entry| {
+            grants.allows(
+                caller.role,
+                &caller.user_id,
+                api_key_id,
+                &entry.model_id,
+                &entry.offering_id,
+                None,
+            )
+        })
+        .map(|entry| entry.model)
+        .collect();
     Ok(Json(V1ModelList { data }))
 }
 

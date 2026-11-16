@@ -35,6 +35,9 @@ impl TestApp {
     /// Like [`TestApp::new`], with the config adjusted first (tests use this
     /// to shorten timeout budgets).
     pub async fn with_config(mutate: impl FnOnce(&mut Config)) -> Self {
+        // Test hashing is cheap hashing; production always uses the full
+        // PBKDF2 count (see `password::current_iterations`).
+        password::set_test_iterations(TEST_HASH_ITERATIONS);
         let dir = std::env::temp_dir().join(format!("gateway-routes-{}", uuid::Uuid::new_v4()));
         let pool = db::open(&dir.join("gateway.db"))
             .await
@@ -44,6 +47,7 @@ impl TestApp {
             data_dir: dir.clone(),
             master_key: Some(MasterKey::from_bytes([7u8; 32])),
             timezone: "UTC".to_string(),
+            tz: chrono_tz::Tz::UTC,
             insecure_cookies: true,
             trusted_proxies: Vec::new(),
             max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
@@ -64,6 +68,7 @@ impl TestApp {
             ),
             started: Instant::now(),
             login_limiter: Arc::new(LoginRateLimiter::new()),
+            key_limiter: Arc::new(crate::api_keys::KeyRateLimiter::new()),
         };
         Self { state, dir }
     }

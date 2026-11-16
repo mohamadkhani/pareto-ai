@@ -1463,6 +1463,8 @@ pub async fn apply_sync_price(
 /// A joined row of one enabled offering with its model and price.
 #[derive(Debug, sqlx::FromRow)]
 struct V1Row {
+    model_id: String,
+    offering_id: String,
     upstream_model_id: String,
     context_override: Option<i64>,
     max_output_override: Option<i64>,
@@ -1481,13 +1483,23 @@ struct V1Row {
     currency: Option<String>,
 }
 
+/// One advertised model along with the row ids access control evaluates
+/// ([`crate::access`]): the route filters entries and answers the inner
+/// [`V1Model`].
+#[derive(Debug)]
+pub struct V1ModelEntry {
+    pub model: V1Model,
+    pub model_id: String,
+    pub offering_id: String,
+}
+
 /// The enabled offerings as advertised by `GET /v1/models`: one entry per
 /// enabled offering of an enabled provider, with effective (override-aware)
 /// limits and the offering's price row. Unknown prices stay null.
-pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1Model>, CatalogError> {
+pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1ModelEntry>, CatalogError> {
     let rows = sqlx::query_as::<_, V1Row>(
-        "SELECT o.upstream_model_id, o.context_override, o.max_output_override, \
-                m.canonical_name, m.modalities_input, m.modalities_output, \
+        "SELECT o.model_id, o.id AS offering_id, o.upstream_model_id, o.context_override, \
+                o.max_output_override, m.canonical_name, m.modalities_input, m.modalities_output, \
                 m.context_length, m.max_output_tokens, m.capabilities_json, \
                 p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m, \
                 p.reasoning_per_m, p.request_fee, p.currency \
@@ -1503,32 +1515,39 @@ pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1Model>, Cat
 
     Ok(rows
         .iter()
-        .map(|row| {
-            let price = row.currency.as_deref().map(|currency| V1Price {
-                input_per_m: row.input_per_m,
-                output_per_m: row.output_per_m,
-                cache_read_per_m: row.cache_read_per_m,
-                cache_write_per_m: row.cache_write_per_m,
-                reasoning_per_m: row.reasoning_per_m,
-                request_fee: row.request_fee,
-                currency: currency.to_string(),
-            });
-            V1Model {
-                id: row.upstream_model_id.clone(),
-                name: types::display_name(row.capabilities_json.as_deref())
-                    .unwrap_or_else(|| row.canonical_name.clone()),
-                context_length: row.context_override.or(row.context_length),
-                max_output_tokens: row.max_output_override.or(row.max_output_tokens),
-                modalities: V1Modalities {
-                    input: types::parse_modalities(row.modalities_input.as_deref())
-                        .unwrap_or_default(),
-                    output: types::parse_modalities(row.modalities_output.as_deref())
-                        .unwrap_or_default(),
-                },
-                price,
-            }
+        .map(|row| V1ModelEntry {
+            model_id: row.model_id.clone(),
+            offering_id: row.offering_id.clone(),
+            model: build_v1_model(row),
         })
         .collect())
+}
+
+fn build_v1_model(row: &V1Row) -> V1Model {
+    {
+        let price = row.currency.as_deref().map(|currency| V1Price {
+            input_per_m: row.input_per_m,
+            output_per_m: row.output_per_m,
+            cache_read_per_m: row.cache_read_per_m,
+            cache_write_per_m: row.cache_write_per_m,
+            reasoning_per_m: row.reasoning_per_m,
+            request_fee: row.request_fee,
+            currency: currency.to_string(),
+        });
+        V1Model {
+            id: row.upstream_model_id.clone(),
+            name: types::display_name(row.capabilities_json.as_deref())
+                .unwrap_or_else(|| row.canonical_name.clone()),
+            context_length: row.context_override.or(row.context_length),
+            max_output_tokens: row.max_output_override.or(row.max_output_tokens),
+            modalities: V1Modalities {
+                input: types::parse_modalities(row.modalities_input.as_deref()).unwrap_or_default(),
+                output: types::parse_modalities(row.modalities_output.as_deref())
+                    .unwrap_or_default(),
+            },
+            price,
+        }
+    }
 }
 
 #[cfg(test)]

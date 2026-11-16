@@ -82,12 +82,13 @@ usage_daily(day TEXT NOT NULL, user_id TEXT NOT NULL, offering_id TEXT NOT NULL,
 
 ### Money (D7, D8)
 
-- Cost per request: sum of `input_tokens*input_per_m + output_tokens*output_per_m
-  + cache_read*cache_read_per_m + cache_write*cache_write_per_m +
-  reasoning*reasoning_per_m` divided by 1_000_000, plus `request_fee`; missing
-  component prices contribute 0 and the row is flagged `priced=0` in the
-  report. Unknown price (`NULL`) → `cost_usd = NULL` and the request is
-  reported as "unpriced" (never silently 0).
+- Cost per request: `input`, `output`, `cache_read`, `cache_write`, `reasoning`
+  tokens are billed **subset-aware** (D22): `(input - cache_read) * input_per_m
+  + cache_read * cache_read_per_m + (output - reasoning) * output_per_m +
+  reasoning * reasoning_per_m`, divided by 1_000_000, plus `request_fee`;
+  every term clamped at zero. Missing component prices contribute 0 and the row
+  is flagged `priced=0` in the report. Unknown price (`NULL`) → `cost_usd = NULL`
+  and the request is reported as "unpriced" (never silently 0).
 - **Hard stop**: before forwarding, open a `reservations` row in one
   transaction with the estimate (input estimate from chars/4 + `max_tokens`);
   reject with `402 budget_exceeded` or `429 token_cap_exceeded` when

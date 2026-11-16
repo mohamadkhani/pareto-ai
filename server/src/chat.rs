@@ -9,7 +9,11 @@
 //! * **Resolve**: enabled offerings of enabled providers matching the
 //!   requested model (`upstream_model_id` or `canonical_name`), in a fixed
 //!   deterministic order (creation order, id tiebreak); scoring arrives in
-//!   M5. Credentials in cooldown are demoted to the end of the order.
+//!   M5. Credentials in cooldown are demoted to the end of the order. Access
+//!   grants (M4, decision D9) then filter the candidates: every subject (the
+//!   user, and the key when present) must allow the model, the offering, and
+//!   the credential. Before forwarding, the request's estimate is reserved
+//!   against the user's budgets and token caps (decision D7).
 //! * **Failover**: only before the first byte reaches the client — before the
 //!   first upstream chunk is forwarded for streams, before the response is
 //!   returned for buffered calls. `400`/`401`/`403` never fail over; `429`
@@ -21,9 +25,10 @@
 //!   estimated `chars/4` from **content text only** (`choices[].message.content`
 //!   / `delta.content`, plus `reasoning`; input from the message text) and
 //!   `tokens_estimated` is set — never from JSON scaffolding or raw bytes, and
-//!   only when a request was actually sent upstream (review M1/M3).
-//!   `cost_usd` stays NULL in M3: price-aware costing is part of M4's budget
-//!   settlement (D7).
+//!   only when a request was actually sent upstream (review M1/M3). The same
+//!   transaction prices the request (M4, decisions D7/D10), settles its
+//!   reservation into the budgets and token caps of the period it started in,
+//!   and books the `usage_daily` rollup.
 //!
 //! Cancellation: the response body (or the awaiting handler for buffered
 //! calls) holds a guard; when the client disconnects the guard signals the
@@ -48,7 +53,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::AppState;
+use crate::access;
 use crate::catalog;
+use crate::money;
+use crate::reports;
 use crate::upstream::sse::{self, SseInspector, Usage};
 use crate::upstream::{
     Budget, FailureClass, TimeoutKind, UpstreamCall, UpstreamError, UpstreamStream,
@@ -70,8 +78,15 @@ pub struct RequestMeta {
     /// The client's optional `x-request-id` echo, preserved in
     /// `request_logs.client_request_id` and never used as a key (review B1).
     pub client_request_id: Option<String>,
-    /// The authenticated caller (admin session until M4 API keys).
+    /// The authenticated caller: an API key's owner or an admin session.
     pub user_id: String,
+    /// The caller's role (access defaults, decision D9).
+    pub role: crate::auth::Role,
+    /// The API key behind the request, `None` for session callers (M4).
+    pub api_key: Option<crate::api_keys::KeyContext>,
+    /// Wall-clock request start: the period a request settles into (D7) and
+    /// the rollup day key.
+    pub started_at: String,
     pub method: String,
     pub path: String,
 }
@@ -150,6 +165,29 @@ struct WireRequest {
     stream: bool,
     max_tokens: Option<i64>,
     extra: serde_json::Map<String, Value>,
+}
+
+/// Output estimate for a request that does not set `max_tokens` (the M4
+/// reservation formula needs one): bounded by the offering's output limit.
+const DEFAULT_OUTPUT_ESTIMATE: i64 = 4096;
+
+/// The reservation estimate, in tokens: message text over four (the content
+/// estimator, review M1) plus the output budget — the request's clamped
+/// `max_tokens`, or [`DEFAULT_OUTPUT_ESTIMATE`] clamped to the offering's
+/// limit when the request sets none.
+fn estimate_tokens(
+    input_chars: usize,
+    max_tokens: Option<i64>,
+    offering_max_output: Option<i64>,
+) -> (i64, i64) {
+    let estimated_input = (input_chars / 4) as i64;
+    let estimated_output = match max_tokens {
+        Some(max) => max.max(0),
+        None => offering_max_output
+            .unwrap_or(DEFAULT_OUTPUT_ESTIMATE)
+            .clamp(0, DEFAULT_OUTPUT_ESTIMATE),
+    };
+    (estimated_input, estimated_output)
 }
 
 /// Message-text characters of the request: the `content` of each message
@@ -317,6 +355,8 @@ struct CredentialRow {
     secret_cipher: String,
     headers_json: Option<String>,
     cooldown_until: Option<String>,
+    balance_usd: Option<f64>,
+    balance_low_threshold: Option<f64>,
 }
 
 /// The provider credential to use: the first one not in cooldown (id order),
@@ -327,7 +367,8 @@ async fn pick_credential(
     now: &str,
 ) -> Result<Option<Credential>, ChatFailure> {
     let rows = sqlx::query_as::<_, CredentialRow>(
-        "SELECT id, secret_cipher, headers_json, cooldown_until \
+        "SELECT id, secret_cipher, headers_json, cooldown_until, balance_usd, \
+                balance_low_threshold \
          FROM provider_credentials WHERE provider_id = ? ORDER BY id",
     )
     .bind(provider_id)
@@ -338,11 +379,14 @@ async fn pick_credential(
         ChatFailure::internal()
     })?;
 
-    let to_credential = |row: &CredentialRow, cooled: bool| Credential {
-        id: row.id.clone(),
-        secret_cipher: row.secret_cipher.clone(),
-        headers_json: row.headers_json.clone(),
-        cooled,
+    let to_credential = |row: &CredentialRow, cooled: bool| {
+        warn_low_balance(row);
+        Credential {
+            id: row.id.clone(),
+            secret_cipher: row.secret_cipher.clone(),
+            headers_json: row.headers_json.clone(),
+            cooled,
+        }
     };
     let cooled = |row: &CredentialRow| {
         row.cooldown_until
@@ -354,6 +398,22 @@ async fn pick_credential(
         Some(row) => Some(to_credential(row, false)),
         None => rows.first().map(|row| to_credential(row, true)),
     })
+}
+
+/// The manual credential balance is **advisory** in v1 (decision D8): a
+/// balance below its low threshold is warned about here, in the logs, and
+/// never gates a request. A real balance sync later turns this into a gate.
+fn warn_low_balance(row: &CredentialRow) {
+    if let (Some(balance), Some(threshold)) = (row.balance_usd, row.balance_low_threshold)
+        && balance < threshold
+    {
+        tracing::warn!(
+            credential_id = %row.id,
+            balance_usd = balance,
+            low_threshold = threshold,
+            "credential balance is below its low threshold (advisory only)"
+        );
+    }
 }
 
 /// Records a cooldown on the credential after an upstream 401/403/402/429.
@@ -512,12 +572,57 @@ pub async fn execute(
     };
     let input_chars = message_text_chars(&parsed.messages);
 
-    let candidates = resolve_candidates(&state.pool, &parsed.model, &catalog::now_ts()).await?;
+    let mut candidates = resolve_candidates(&state.pool, &parsed.model, &catalog::now_ts()).await?;
     if candidates.is_empty() {
         let failure = ChatFailure::new(
             StatusCode::NOT_FOUND,
             "model_not_found",
             format!("no eligible offering serves model {:?}", parsed.model),
+        );
+        settle(
+            state,
+            &Settlement::rejected_with_decision(
+                meta,
+                started,
+                bytes_in,
+                &failure,
+                Decision::default(),
+                &parsed.model,
+            ),
+        )
+        .await;
+        return Err(failure);
+    }
+
+    // Access control (decision D9): a candidate survives only when every
+    // subject (the user, and the key when present) allows its model, its
+    // offering, and its credential. Admins are allowed by default; a request
+    // whose candidates are all denied is a 403, never a 404.
+    let api_key_id = meta.api_key.as_ref().map(|key| key.key_id.as_str());
+    let grants = access::Grants::load(&state.pool, &meta.user_id, api_key_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "loading grants failed");
+            ChatFailure::internal()
+        })?;
+    candidates.retain(|candidate| {
+        grants.allows(
+            meta.role,
+            &meta.user_id,
+            api_key_id,
+            &candidate.model_id,
+            &candidate.offering_id,
+            candidate
+                .credential
+                .as_ref()
+                .map(|credential| credential.id.as_str()),
+        )
+    });
+    if candidates.is_empty() {
+        let failure = ChatFailure::new(
+            StatusCode::FORBIDDEN,
+            "access_denied",
+            "the caller may not use the model, offering, or credential behind this request",
         );
         settle(
             state,
@@ -541,10 +646,21 @@ pub async fn execute(
         ..Decision::default()
     };
     let mut attempts: Vec<Attempt> = Vec::new();
+    // Price rows of the attempts in order: the reservation estimate is
+    // priced on the first *priced* candidate (review m4).
+    let mut attempt_prices: Vec<Option<catalog::PriceRow>> = Vec::new();
+    let mut first_output_estimate: Option<Option<i64>> = None;
     let mut context_rejected = false;
     for candidate in candidates {
-        let price = match catalog::get_price(&state.pool, &candidate.offering_id).await {
-            Ok(Some(row)) => Some(json!({
+        let price_row = match catalog::get_price(&state.pool, &candidate.offering_id).await {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::error!(error = %e, "reading price failed");
+                None
+            }
+        };
+        let price = price_row.as_ref().map(|row| {
+            json!({
                 "input_per_m": row.input_per_m,
                 "output_per_m": row.output_per_m,
                 "cache_read_per_m": row.cache_read_per_m,
@@ -552,13 +668,8 @@ pub async fn execute(
                 "reasoning_per_m": row.reasoning_per_m,
                 "request_fee": row.request_fee,
                 "currency": row.currency,
-            })),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::error!(error = %e, "reading price failed");
-                None
-            }
-        };
+            })
+        });
         decision.candidates.push(CandidateRecord {
             id: candidate.offering_id.clone(),
             provider: candidate.provider_name.clone(),
@@ -598,6 +709,14 @@ pub async fn execute(
             parsed.stream,
             max_tokens,
         );
+        if attempts.is_empty() {
+            // The output estimate (M4's `max_tokens` term; see
+            // `estimate_tokens`) comes from the first attempt's clamped
+            // output budget; the USD estimate is priced later on the first
+            // *priced* candidate (review m4).
+            first_output_estimate = Some(max_tokens);
+        }
+        attempt_prices.push(price_row);
         attempts.push(Attempt {
             decision_idx,
             candidate,
@@ -619,6 +738,107 @@ pub async fn execute(
             ),
         };
         decision.reason = decision_reason(&decision);
+        settle(
+            state,
+            &Settlement::rejected_with_decision(
+                meta,
+                started,
+                bytes_in,
+                &failure,
+                decision,
+                &parsed.model,
+            ),
+        )
+        .await;
+        return Err(failure);
+    }
+
+    // The hard money stop (M4, decisions D7/D9): the reservation opens in
+    // one write-first transaction *before* anything is forwarded. Only after
+    // the budget/cap checks pass is the key's TPM bucket charged (review m6):
+    // a `402`/`429`-refused request must not burn rate-limit quota, and a
+    // later TPM refusal releases the reservation through its rejection
+    // settlement. Either refusal settles its ledger rows like any rejection.
+    let first = &attempts[0].candidate;
+    let (estimated_input, estimated_output) = estimate_tokens(
+        input_chars,
+        first_output_estimate.flatten(),
+        first.max_output_tokens,
+    );
+    // The reservation's USD estimate is priced on the first *priced*
+    // candidate (review m4) — an unpriced first candidate must not reserve
+    // 0 USD against a priced fallback. Documented residual (see `money`):
+    // with no priced candidate at all the reservation holds 0 USD and the
+    // request is metered by token caps only, and the output estimate is
+    // capped at 4096 tokens when the request sets no `max_tokens`, so an
+    // overshooting output can exceed the reserved USD — settlement books the
+    // true actual either way.
+    let estimate_usage = Usage {
+        input_tokens: Some(estimated_input),
+        output_tokens: Some(estimated_output),
+        ..Usage::default()
+    };
+    let estimated_usd = attempt_prices
+        .iter()
+        .find_map(|price| money::compute_cost(price.as_ref(), Some(&estimate_usage)).cost_usd)
+        .unwrap_or(0.0);
+    let reservation = money::ReservationInput {
+        request_id: meta.request_id.clone(),
+        user_id: meta.user_id.clone(),
+        api_key_id: meta.api_key.as_ref().map(|key| key.key_id.clone()),
+        offering_id: first.offering_id.clone(),
+        model_id: first.model_id.clone(),
+        estimated_tokens: estimated_input.saturating_add(estimated_output),
+        estimated_usd,
+    };
+    if let Err(denied) = money::open_reservation(&state.pool, state.config.tz, &reservation).await {
+        let failure = match &denied {
+            money::ReservationDenied::Budget { period } => ChatFailure::new(
+                StatusCode::PAYMENT_REQUIRED,
+                "budget_exceeded",
+                format!("the {period} spend limit is exhausted"),
+            ),
+            money::ReservationDenied::TokenCap { period, model_id } => ChatFailure::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "token_cap_exceeded",
+                format!("the {period} token limit for model {model_id} is exhausted"),
+            ),
+            money::ReservationDenied::Db(e) => {
+                tracing::error!(error = %e, "opening the reservation failed");
+                ChatFailure::internal()
+            }
+        };
+        settle(
+            state,
+            &Settlement::rejected_with_decision(
+                meta,
+                started,
+                bytes_in,
+                &failure,
+                decision,
+                &parsed.model,
+            ),
+        )
+        .await;
+        return Err(failure);
+    }
+    // The TPM bucket is charged with the same estimate the reservation
+    // booked (review m6: after the budget/cap checks). A refusal answers
+    // `429` and its settlement releases the reservation above.
+    if let Some(key) = &meta.api_key
+        && let Err(wait) = state.key_limiter.charge_tpm(
+            &key.key_id,
+            key.rate_limit_tpm,
+            estimated_input.saturating_add(estimated_output),
+            Instant::now(),
+        )
+    {
+        let failure = ChatFailure {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: "the API key's token rate limit is exhausted".to_string(),
+            retry_after: Some(wait.as_secs().max(1)),
+        };
         settle(
             state,
             &Settlement::rejected_with_decision(
@@ -1588,15 +1808,45 @@ fn resolve_usage(settlement: &Settlement) -> (Option<Usage>, bool) {
     }
 }
 
-/// Writes the `usage_events` + `request_logs` pair in one transaction. Exactly
-/// one pair per request (a failover never double-spends). Accounting failures
-/// are logged, never surfaced: the response must not depend on the ledger.
+/// Writes the `usage_events` + `request_logs` pair, settles the request's
+/// reservation (budgets and token caps, decision D7), and books the `usage_daily`
+/// rollup — all in one transaction. Exactly one pair per request (a failover
+/// never double-spends). Accounting failures are logged, never surfaced: the
+/// response must not depend on the ledger.
+///
+/// The cost (M4) is priced from the *chosen* offering's `prices` row against
+/// the settled usage (decision D10): an unknown price leaves `cost_usd` NULL
+/// ("unpriced", never a silent 0) and a used component without price
+/// contributes 0 and flags the row `priced = 0`. The reservation marks itself
+/// `settled` (booking the actuals into the period the request started in) or
+/// `released` when the request consumed nothing.
 async fn settle(state: &AppState, settlement: &Settlement) {
     let (usage, tokens_estimated) = resolve_usage(settlement);
-    let usage = usage.unwrap_or_default();
     let occurred_at = catalog::now_ts();
     let decision_json = settlement.decision.to_json().to_string();
     let latency_ms = settlement.started.elapsed().as_millis() as i64;
+    let api_key_id = settlement
+        .meta
+        .api_key
+        .as_ref()
+        .map(|key| key.key_id.clone());
+
+    let price = match &settlement.offering_id {
+        Some(offering_id) => match catalog::get_price(&state.pool, offering_id).await {
+            Ok(price) => price,
+            Err(e) => {
+                tracing::error!(error = %e, "reading the settled price failed");
+                None
+            }
+        },
+        None => None,
+    };
+    let cost = money::compute_cost(price.as_ref(), usage.as_ref());
+    let tokens = usage.as_ref().map(money::total_tokens).unwrap_or(0);
+    let started_at = chrono::DateTime::parse_from_rfc3339(&settlement.meta.started_at)
+        .map(|value| value.to_utc())
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let day = money::day_key(state.config.tz, started_at);
 
     let mut tx = match state.pool.begin().await {
         Ok(tx) => tx,
@@ -1614,19 +1864,23 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         "INSERT INTO usage_events \
          (request_id, user_id, api_key_id, offering_id, model_id, input_tokens, output_tokens, \
           cache_read_tokens, cache_write_tokens, reasoning_tokens, tokens_estimated, cost_usd, \
-          latency_ms, ttft_ms, status, error_class, occurred_at) \
-         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+          priced, started_at, latency_ms, ttft_ms, status, error_class, occurred_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.user_id)
+    .bind(&api_key_id)
     .bind(&settlement.offering_id)
     .bind(&settlement.model_id)
-    .bind(usage.input_tokens)
-    .bind(usage.output_tokens)
-    .bind(usage.cache_read_tokens)
-    .bind(usage.cache_write_tokens)
-    .bind(usage.reasoning_tokens)
+    .bind(usage.as_ref().and_then(|usage| usage.input_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.output_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.cache_read_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.cache_write_tokens))
+    .bind(usage.as_ref().and_then(|usage| usage.reasoning_tokens))
     .bind(i64::from(tokens_estimated))
+    .bind(cost.cost_usd)
+    .bind(i64::from(cost.priced))
+    .bind(&settlement.meta.started_at)
     .bind(latency_ms)
     .bind(settlement.ttft_ms)
     .bind(settlement.status)
@@ -1640,7 +1894,7 @@ async fn settle(state: &AppState, settlement: &Settlement) {
          (request_id, client_request_id, occurred_at, method, path, requested_model, \
           resolved_offering_id, decision_json, status, error_class, bytes_in, bytes_out, user_id, \
           api_key_id, has_request_body) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.client_request_id)
@@ -1655,13 +1909,50 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     .bind(settlement.bytes_in as i64)
     .bind(settlement.bytes_out as i64)
     .bind(&settlement.meta.user_id)
+    .bind(&api_key_id)
     .bind(i64::from(settlement.has_request_body))
     .execute(&mut *tx)
     .await;
 
-    let outcome = match (usage_result, log_result) {
-        (Ok(_), Ok(_)) => tx.commit().await.map(|_| ()),
-        (Err(e), _) | (_, Err(e)) => Err(e),
+    // The reservation, budgets, and token caps settle with the ledger row.
+    let reserve_result = money::settle_reservation(
+        &mut tx,
+        state.config.tz,
+        &money::SettleInput {
+            request_id: settlement.meta.request_id.clone(),
+            user_id: settlement.meta.user_id.clone(),
+            model_id: settlement.model_id.clone(),
+            started_at,
+            billable: usage.is_some(),
+            cost_usd: cost.cost_usd,
+            tokens,
+        },
+    )
+    .await;
+
+    let rollup_result = reports::record_usage(
+        &mut tx,
+        &reports::UsageRow {
+            day: &day,
+            user_id: &settlement.meta.user_id,
+            offering_id: settlement.offering_id.as_deref().unwrap_or(""),
+            input_tokens: usage
+                .as_ref()
+                .and_then(|usage| usage.input_tokens)
+                .unwrap_or(0),
+            output_tokens: usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens)
+                .unwrap_or(0),
+            cost_usd: cost.cost_usd,
+            priced: cost.priced,
+        },
+    )
+    .await;
+
+    let outcome = match (usage_result, log_result, reserve_result, rollup_result) {
+        (Ok(_), Ok(_), Ok(_), Ok(_)) => tx.commit().await.map(|_| ()),
+        (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => Err(e),
     };
     if let Err(e) = outcome {
         tracing::error!(
@@ -1684,7 +1975,9 @@ mod tests {
 
     use super::*;
     use crate::auth::Role;
-    use crate::catalog::{self, Actor, CredentialInput, ModelInput, OfferingInput, ProviderInput};
+    use crate::catalog::{
+        self, Actor, CredentialInput, ModelInput, OfferingInput, PriceInput, ProviderInput,
+    };
     use crate::config::Config;
     use crate::test_support::{TestApp, api_request, body_text, login, send, send_streaming};
     use crate::upstream::stub::{Scenario, Stub};
@@ -3720,6 +4013,9 @@ mod tests {
             request_id: "req-1".to_string(),
             client_request_id: Some("echo-1".to_string()),
             user_id: "user-1".to_string(),
+            role: crate::auth::Role::Admin,
+            api_key: None,
+            started_at: "2026-11-16T10:00:00.000Z".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
         };
@@ -3771,5 +4067,1048 @@ mod tests {
         let (usage, estimated) = resolve_usage(&exact);
         assert!(!estimated);
         assert_eq!(usage.expect("usage").input_tokens, Some(7));
+    }
+
+    // -----------------------------------------------------------------------
+    // M4: money, keys, and access on the data plane
+    // -----------------------------------------------------------------------
+
+    /// A non-streaming completion carrying `usage`, for the money tests.
+    fn completion(usage: serde_json::Value) -> Scenario {
+        Scenario::Json {
+            body: json!({
+                "id": "cmpl-1",
+                "object": "chat.completion",
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+                "usage": usage,
+            })
+            .to_string(),
+        }
+    }
+
+    /// One priced, budget-capped scenario: `used + open + estimate > limit`
+    /// rejects the second request with `402 budget_exceeded` and the report
+    /// shows the spend of the first.
+    #[tokio::test]
+    async fn budget_exhaustion_returns_402_and_the_report_shows_the_spend() {
+        let stub = Stub::spawn(vec![completion(usage_json(11, 7))]).await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.5),
+                output_per_m: Some(10.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+        // The reservation estimate of one request is 42 output tokens at
+        // 10/M = 0.00042 USD; the actual settles at 11*2.5/M + 7*10/M.
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            crate::money::Period::Total,
+            0.0005,
+        )
+        .await
+        .expect("budget");
+
+        let body = chat_body("m", false);
+        let first = send(s.app.router(), chat_request(&s.cookie, body.clone())).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+
+        let second = send(s.app.router(), chat_request(&s.cookie, body)).await;
+        assert_eq!(
+            second.status,
+            StatusCode::PAYMENT_REQUIRED,
+            "{}",
+            second.body
+        );
+        assert_eq!(second.body["error"]["code"], "budget_exceeded");
+
+        // The ledger books the actual cost of the successful request only.
+        let usage = usage_rows(&s.app).await;
+        assert_eq!(usage.len(), 2);
+        let actual = 11.0 * 2.5 / 1_000_000.0 + 7.0 * 10.0 / 1_000_000.0;
+        assert!((usage[0].cost_usd.expect("priced cost") - actual).abs() < 1e-12);
+        assert_eq!(usage[1].cost_usd, Some(0.0), "a 402 consumes nothing");
+        assert_eq!(usage[1].status, Some(402));
+
+        let (used,): (f64,) = sqlx::query_as("SELECT used_usd FROM budgets WHERE user_id = ?")
+            .bind(&s.uid)
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("budget row");
+        assert!(
+            (used - actual).abs() < 1e-12,
+            "used_usd books the actual: {used}"
+        );
+
+        // And the report shows the spend (acceptance curl sequence).
+        let report = send(
+            s.app.router(),
+            api_request(Method::GET, "/api/usage/me", None, Some(&s.cookie), None),
+        )
+        .await;
+        assert_eq!(report.status, StatusCode::OK, "{}", report.body);
+        assert_eq!(report.body["totals"]["requests"], 2);
+        assert!((report.body["totals"]["cost_usd"].as_f64().expect("cost") - actual).abs() < 1e-12);
+    }
+
+    /// Per-model token caps stop the second request with `429
+    /// token_cap_exceeded`.
+    #[tokio::test]
+    async fn token_cap_exhaustion_returns_429() {
+        let stub = Stub::spawn(vec![completion(usage_json(11, 7))]).await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        // One request reserves 42 tokens and settles 18; the cap fits one
+        // request but not two.
+        crate::money::set_token_cap(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            &model_id,
+            crate::money::Period::Total,
+            50,
+        )
+        .await
+        .expect("cap");
+
+        let body = chat_body("m", false);
+        let first = send(s.app.router(), chat_request(&s.cookie, body.clone())).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+
+        let second = send(s.app.router(), chat_request(&s.cookie, body)).await;
+        assert_eq!(
+            second.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            second.body
+        );
+        assert_eq!(second.body["error"]["code"], "token_cap_exceeded");
+
+        let (used,): (i64,) =
+            sqlx::query_as("SELECT used_tokens FROM token_caps WHERE user_id = ?")
+                .bind(&s.uid)
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("cap row");
+        assert_eq!(used, 18);
+    }
+
+    /// A request that never reached the upstream releases its reservation and
+    /// books nothing: no permanent lockout.
+    #[tokio::test]
+    async fn failed_requests_release_the_reservation() {
+        let stub = Stub::spawn(vec![Scenario::Status {
+            code: 401,
+            headers: vec![],
+            body: "{}".to_string(),
+        }])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        // The budget fits exactly one reservation: a leaked one would lock
+        // the account out for good.
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            crate::money::Period::Total,
+            0.001,
+        )
+        .await
+        .expect("budget");
+
+        let failed = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(failed.status, StatusCode::BAD_GATEWAY, "{}", failed.body);
+
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM reservations")
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("reservation row");
+        assert_eq!(
+            status, "released",
+            "nothing was consumed: the estimate frees"
+        );
+        let (used,): (f64,) = sqlx::query_as("SELECT used_usd FROM budgets WHERE user_id = ?")
+            .bind(&s.uid)
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("budget row");
+        assert_eq!(used, 0.0);
+
+        // The headroom is available for the next request.
+        let retry = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(
+            retry.status,
+            StatusCode::BAD_GATEWAY,
+            "still failing upstream"
+        );
+        let open: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reservations WHERE status = 'open'")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("count");
+        assert_eq!(open, 0, "no reservation outlives its request");
+    }
+
+    /// An API key authenticates `/v1`, is booked into the ledger, and its
+    /// per-key RPM/TPM buckets answer `429` with `Retry-After`.
+    #[tokio::test]
+    async fn api_key_requests_book_the_key_and_rate_limits_trip() {
+        let stub = Stub::spawn(vec![
+            completion(usage_json(11, 7)),
+            completion(usage_json(11, 7)),
+        ])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let owner = s
+            .app
+            .create_user("owner@example.test", Role::User, true)
+            .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        // A one-request-per-minute key for its owner, with the user and key
+        // both granted the model.
+        let created = crate::api_keys::create_key(
+            &s.app.state.pool,
+            &actor,
+            &owner,
+            &crate::api_keys::ApiKeyInput {
+                name: "sdk".to_string(),
+                expires_at: None,
+                scopes: None,
+                rate_limit_rpm: Some(1),
+                rate_limit_tpm: Some(100_000),
+            },
+        )
+        .await
+        .expect("key");
+        for subject_type in ["user", "api_key"] {
+            let subject_id = match subject_type {
+                "user" => owner.clone(),
+                _ => created.view.id.clone(),
+            };
+            crate::access::create_grant(
+                &s.app.state.pool,
+                &actor,
+                &crate::access::GrantInput {
+                    subject_type: subject_type.to_string(),
+                    subject_id,
+                    resource_type: "model".to_string(),
+                    resource_id: model_id.clone(),
+                    mode: "allow".to_string(),
+                },
+            )
+            .await
+            .expect("grant");
+        }
+
+        let bearer = |key: &str, body: serde_json::Value| {
+            axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request")
+        };
+
+        let first = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+
+        // The ledger knows which key spent the tokens.
+        let (api_key_id,): (Option<String>,) =
+            sqlx::query_as("SELECT api_key_id FROM usage_events ORDER BY id LIMIT 1")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("usage row");
+        assert_eq!(api_key_id.as_deref(), Some(created.view.id.as_str()));
+        let last_used: Option<String> =
+            sqlx::query_scalar("SELECT last_used_at FROM api_keys WHERE id = ?")
+                .bind(&created.view.id)
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("key row");
+        assert!(last_used.is_some(), "last_used_at is stamped on use");
+
+        // The second request within the minute trips the RPM bucket.
+        let second = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(
+            second.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            second.body
+        );
+        assert_eq!(second.body["error"]["code"], "rate_limited");
+        assert!(
+            second.headers.get(header::RETRY_AFTER).is_some(),
+            "the 429 carries Retry-After"
+        );
+
+        // A TPM limit smaller than one request's estimate refuses outright.
+        let chatty = crate::api_keys::create_key(
+            &s.app.state.pool,
+            &actor,
+            &owner,
+            &crate::api_keys::ApiKeyInput {
+                name: "chatty".to_string(),
+                expires_at: None,
+                scopes: None,
+                rate_limit_rpm: Some(100),
+                rate_limit_tpm: Some(5),
+            },
+        )
+        .await
+        .expect("key");
+        crate::access::create_grant(
+            &s.app.state.pool,
+            &actor,
+            &crate::access::GrantInput {
+                subject_type: "api_key".to_string(),
+                subject_id: chatty.view.id.clone(),
+                resource_type: "model".to_string(),
+                resource_id: model_id.clone(),
+                mode: "allow".to_string(),
+            },
+        )
+        .await
+        .expect("grant");
+        let over = send(s.app.router(), bearer(&chatty.key, chat_body("m", false))).await;
+        assert_eq!(over.status, StatusCode::TOO_MANY_REQUESTS, "{}", over.body);
+        assert_eq!(over.body["error"]["code"], "rate_limited");
+    }
+
+    /// The grant matrix on the data plane: default deny for users, allow on
+    /// both subjects to pass, deny beats allow.
+    #[tokio::test]
+    async fn grants_gate_the_data_plane_with_deny_precedence() {
+        let stub = Stub::spawn(vec![
+            completion(usage_json(11, 7)),
+            completion(usage_json(11, 7)),
+        ])
+        .await;
+        let s = seeded().await;
+        let (provider_id, credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let owner = s
+            .app
+            .create_user("owner@example.test", Role::User, true)
+            .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        let created = crate::api_keys::create_key(
+            &s.app.state.pool,
+            &actor,
+            &owner,
+            &crate::api_keys::ApiKeyInput {
+                name: "sdk".to_string(),
+                expires_at: None,
+                scopes: None,
+                rate_limit_rpm: None,
+                rate_limit_tpm: None,
+            },
+        )
+        .await
+        .expect("key");
+
+        let bearer = |key: &str, body: serde_json::Value| {
+            axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request")
+        };
+        let listing = |key: &str| {
+            axum::http::Request::builder()
+                .method(Method::GET)
+                .uri("/v1/models")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::empty())
+                .expect("request")
+        };
+
+        // No grants at all: denied, and the listing is empty.
+        let denied = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+        assert_eq!(denied.body["error"]["code"], "access_denied");
+        let empty = send(s.app.router(), listing(&created.key)).await;
+        assert_eq!(empty.status, StatusCode::OK);
+        assert_eq!(empty.body["data"].as_array().expect("data").len(), 0);
+
+        // Grants on both subjects (the intersection) let the request through.
+        for (subject_type, subject_id) in [
+            ("user", owner.clone()),
+            ("api_key", created.view.id.clone()),
+        ] {
+            crate::access::create_grant(
+                &s.app.state.pool,
+                &actor,
+                &crate::access::GrantInput {
+                    subject_type: subject_type.to_string(),
+                    subject_id,
+                    resource_type: "model".to_string(),
+                    resource_id: model_id.clone(),
+                    mode: "allow".to_string(),
+                },
+            )
+            .await
+            .expect("grant");
+        }
+        let allowed = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+        let visible = send(s.app.router(), listing(&created.key)).await;
+        assert_eq!(visible.body["data"].as_array().expect("data").len(), 1);
+
+        // A deny on the credential beats the model allow.
+        crate::access::create_grant(
+            &s.app.state.pool,
+            &actor,
+            &crate::access::GrantInput {
+                subject_type: "api_key".to_string(),
+                subject_id: created.view.id.clone(),
+                resource_type: "credential".to_string(),
+                resource_id: credential_id.clone(),
+                mode: "deny".to_string(),
+            },
+        )
+        .await
+        .expect("deny grant");
+        let blocked = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(blocked.status, StatusCode::FORBIDDEN, "{}", blocked.body);
+        assert_eq!(blocked.body["error"]["code"], "access_denied");
+    }
+
+    /// The reservation is settled with the cost of the *chosen* offering and
+    /// partial prices flag the row `priced = 0` instead of pretending 0.
+    #[tokio::test]
+    async fn settlement_costs_the_chosen_offering_and_flags_partial_prices() {
+        let stub = Stub::spawn(vec![
+            completion(usage_json(1_000_000, 1_000_000)),
+            completion(usage_json(1_000_000, 1_000_000)),
+        ])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        // Only the input price is known: output contributes 0 and the row is
+        // flagged incomplete (`priced = 0`).
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.0),
+                output_per_m: None,
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+
+        let (cost, priced): (Option<f64>, i64) =
+            sqlx::query_as("SELECT cost_usd, priced FROM usage_events")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("usage row");
+        assert_eq!(
+            cost,
+            Some(2.0),
+            "1M input at 2/M; unpriced output contributes 0"
+        );
+        assert_eq!(priced, 0, "a used component without price is flagged");
+
+        // With no price row at all the cost stays NULL: unpriced, never 0.
+        let unpriced_app = seeded().await;
+        let (provider_id, _credential_id) = provider_with_credential(
+            &unpriced_app.app,
+            &unpriced_app.uid,
+            "p2",
+            &stub.base_url,
+            None,
+        )
+        .await;
+        let model_id = model(&unpriced_app.app, &unpriced_app.uid, "m2", None, Some(128)).await;
+        offering(
+            &unpriced_app.app,
+            &unpriced_app.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let response = send(
+            unpriced_app.app.router(),
+            chat_request(&unpriced_app.cookie, chat_body("m2", false)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        let (cost, priced): (Option<f64>, i64) =
+            sqlx::query_as("SELECT cost_usd, priced FROM usage_events")
+                .fetch_one(&unpriced_app.app.state.pool)
+                .await
+                .expect("usage row");
+        assert_eq!(cost, None, "unpriced rows stay NULL");
+        assert_eq!(priced, 0);
+    }
+
+    /// A `402`-refused request must not burn its key's TPM quota (review
+    /// m6): the budget/cap checks run before the rate-limit charge, so the
+    /// next request keeps its full token budget.
+    #[tokio::test]
+    async fn budget_rejection_does_not_burn_tpm_quota() {
+        let stub = Stub::spawn(vec![
+            completion(usage_json(11, 7)),
+            completion(usage_json(11, 7)),
+        ])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.5),
+                output_per_m: Some(10.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+        let owner = s
+            .app
+            .create_user("owner@example.test", Role::User, true)
+            .await;
+        // 50 TPM fits exactly one 42-token request: if the 402'd request
+        // burned quota, the retry below would answer `429 rate_limited`.
+        let created = crate::api_keys::create_key(
+            &s.app.state.pool,
+            &actor,
+            &owner,
+            &crate::api_keys::ApiKeyInput {
+                name: "sdk".to_string(),
+                expires_at: None,
+                scopes: None,
+                rate_limit_rpm: Some(100),
+                rate_limit_tpm: Some(50),
+            },
+        )
+        .await
+        .expect("key");
+        for subject_type in ["user", "api_key"] {
+            let subject_id = match subject_type {
+                "user" => owner.clone(),
+                _ => created.view.id.clone(),
+            };
+            crate::access::create_grant(
+                &s.app.state.pool,
+                &actor,
+                &crate::access::GrantInput {
+                    subject_type: subject_type.to_string(),
+                    subject_id,
+                    resource_type: "model".to_string(),
+                    resource_id: model_id.clone(),
+                    mode: "allow".to_string(),
+                },
+            )
+            .await
+            .expect("grant");
+        }
+        let bearer = |key: &str, body: serde_json::Value| {
+            axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/v1/chat/completions")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::from(body.to_string()))
+                .expect("request")
+        };
+
+        // One request reserves 0.00042 USD (42 output tokens at 10/M); this
+        // budget fits none.
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &owner,
+            crate::money::Period::Total,
+            0.0001,
+        )
+        .await
+        .expect("budget");
+
+        let refused = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::PAYMENT_REQUIRED,
+            "{}",
+            refused.body
+        );
+        assert_eq!(refused.body["error"]["code"], "budget_exceeded");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reservations")
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("reservations");
+        assert_eq!(rows, 0, "the denial leaves no reservation behind");
+
+        // With headroom again the next request must fit its 42-token TPM
+        // charge — the 402'd request burned nothing.
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &owner,
+            crate::money::Period::Total,
+            1.0,
+        )
+        .await
+        .expect("budget");
+        let retry = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(
+            retry.status,
+            StatusCode::OK,
+            "the budget rejection must not burn TPM quota: {}",
+            retry.body
+        );
+
+        // A TPM refusal (now charged only after the money gate) still opens
+        // and then releases its reservation through the rejection settlement.
+        let over = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(over.status, StatusCode::TOO_MANY_REQUESTS, "{}", over.body);
+        assert_eq!(over.body["error"]["code"], "rate_limited");
+        let (released, settled): (i64, i64) = sqlx::query_as(
+            "SELECT SUM(status = 'released'), SUM(status = 'settled') FROM reservations",
+        )
+        .fetch_one(&s.app.state.pool)
+        .await
+        .expect("reservations");
+        assert_eq!(released, 1, "the TPM refusal releases its reservation");
+        assert_eq!(settled, 1, "the successful request settled its own");
+    }
+
+    /// Hostile upstream usage can never credit the ledger (review M2):
+    /// negative counts book 0 and absurd `i64::MAX` counts debit without
+    /// overflowing — `used_usd`/`used_tokens` stay non-negative and finite.
+    #[tokio::test]
+    async fn hostile_upstream_usage_never_credits_the_ledger() {
+        let negative = json!({
+            "prompt_tokens": -5000000,
+            "completion_tokens": -1,
+            "prompt_tokens_details": {"cached_tokens": -3, "cache_creation_tokens": -4},
+            "completion_tokens_details": {"reasoning_tokens": -9},
+        });
+        let extreme = json!({
+            "prompt_tokens": i64::MAX,
+            "completion_tokens": i64::MAX,
+            "completion_tokens_details": {"reasoning_tokens": i64::MAX},
+        });
+        let stub = Stub::spawn(vec![completion(negative), completion(extreme)]).await;
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.5),
+                output_per_m: Some(10.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            crate::money::Period::Total,
+            1.0,
+        )
+        .await
+        .expect("budget");
+        crate::money::set_token_cap(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            &model_id,
+            crate::money::Period::Total,
+            10_000,
+        )
+        .await
+        .expect("cap");
+
+        let first = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        // Negative counts clamp to 0: the row is priced at 0 and the budget
+        // is not credited.
+        let zeroed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_events WHERE cost_usd = 0.0 AND input_tokens = 0",
+        )
+        .fetch_one(&s.app.state.pool)
+        .await
+        .expect("usage row");
+        assert_eq!(zeroed, 1, "clamped counts book 0, never a credit");
+        let used: f64 = sqlx::query_scalar("SELECT used_usd FROM budgets WHERE user_id = ?")
+            .bind(&s.uid)
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("budget row");
+        assert_eq!(used, 0.0, "negative usage cannot raise remaining budget");
+
+        let second = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", false)),
+        )
+        .await;
+        assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+        let (used, tokens_used): (f64, i64) =
+            sqlx::query_as("SELECT used_usd, used_tokens FROM budgets JOIN token_caps USING (user_id) WHERE budgets.user_id = ?")
+                .bind(&s.uid)
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("money rows");
+        assert!(
+            used > 0.0 && used.is_finite(),
+            "absurd counts debit without overflow: {used}"
+        );
+        assert!(tokens_used >= 0, "saturating sums stay non-negative");
+    }
+
+    /// Period straddling end-to-end (review M1): a slow request that started
+    /// at 23:59 settles after the tiny 00:00:01 request opened the new day —
+    /// its cost lands in the 23:59 day bucket (budget *and* rollup), and the
+    /// new day's bucket is unaffected by it.
+    #[tokio::test]
+    async fn period_straddling_requests_book_into_their_start_buckets() {
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", "https://up.example/v1", None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(2.5),
+                output_per_m: Some(10.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+        crate::money::set_budget(
+            &s.app.state.pool,
+            &actor,
+            s.app.state.config.tz,
+            &s.uid,
+            crate::money::Period::Day,
+            5.0,
+        )
+        .await
+        .expect("budget");
+
+        // Both requests reserved while their buckets were current.
+        for request_id in ["slow", "tiny"] {
+            crate::money::open_reservation(
+                &s.app.state.pool,
+                s.app.state.config.tz,
+                &crate::money::ReservationInput {
+                    request_id: request_id.to_string(),
+                    user_id: s.uid.clone(),
+                    api_key_id: None,
+                    offering_id: offering_id.clone(),
+                    model_id: model_id.clone(),
+                    estimated_tokens: 10,
+                    estimated_usd: 0.1,
+                },
+            )
+            .await
+            .expect("reserve");
+        }
+
+        let settlement = |request_id: &str, started_at: &str, input_tokens: i64| Settlement {
+            meta: RequestMeta {
+                request_id: request_id.to_string(),
+                client_request_id: None,
+                user_id: s.uid.clone(),
+                role: Role::Admin,
+                api_key: None,
+                started_at: started_at.to_string(),
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            },
+            requested_model: Some("m".to_string()),
+            decision: Decision::default(),
+            offering_id: Some(offering_id.clone()),
+            model_id: Some(model_id.clone()),
+            usage: Some(Usage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(0),
+                ..Usage::default()
+            }),
+            output_chars: 0,
+            input_chars: 4,
+            sent: true,
+            status: 200,
+            error_class: None,
+            started: Instant::now(),
+            ttft_ms: None,
+            bytes_out: 0,
+            bytes_in: 0,
+            has_request_body: true,
+        };
+
+        // The tiny request settles first (at 00:00:02) and opens the new
+        // day; the slow one (started 23:59) settles after midnight.
+        settle(
+            &s.app.state,
+            &settlement("tiny", "2020-01-06T00:00:01.000Z", 40_000),
+        )
+        .await;
+        settle(
+            &s.app.state,
+            &settlement("slow", "2020-01-05T23:59:00.000Z", 1_600_000),
+        )
+        .await;
+
+        // The budget charges each cost to the bucket derived from started_at.
+        let buckets: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT period_start, used_usd FROM budgets \
+             WHERE user_id = ? AND period = 'day' ORDER BY period_start",
+        )
+        .bind(&s.uid)
+        .fetch_all(&s.app.state.pool)
+        .await
+        .expect("bucket rows");
+        let find = |bucket: &str| {
+            buckets
+                .iter()
+                .find(|(start, _)| start == bucket)
+                .map(|(_, used)| *used)
+        };
+        assert_eq!(
+            find("2020-01-05T00:00:00.000Z"),
+            Some(4.0),
+            "the big cost is charged to the day of 23:59"
+        );
+        assert_eq!(
+            find("2020-01-06T00:00:00.000Z"),
+            Some(0.1),
+            "the new day keeps only the tiny request"
+        );
+
+        // And the rollup day keys follow started_at, end to end through the
+        // settlement's report write.
+        let days: Vec<(String, f64)> =
+            sqlx::query_as("SELECT day, cost_usd FROM usage_daily WHERE user_id = ? ORDER BY day")
+                .bind(&s.uid)
+                .fetch_all(&s.app.state.pool)
+                .await
+                .expect("rollup rows");
+        assert_eq!(
+            days,
+            [
+                ("2020-01-05".to_string(), 4.0),
+                ("2020-01-06".to_string(), 0.1)
+            ]
+        );
     }
 }

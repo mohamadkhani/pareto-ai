@@ -74,6 +74,12 @@ cap on a single user's share of a credential's remaining credit.
 **Consequence:** one employee cannot drain the shared pool; both gates are
 checked at reservation time.
 
+**Access-matrix note (2026-11-16, review nit):** `grants` are evaluated as
+"allow-by-any, deny-by-any" across the model/offering/credential rows matching
+the request; the subject verdict is `deny` if any matching row denies, `allow`
+if any allows, else the owner-role default (admin allow, user deny). Effective
+access = user verdict AND key verdict.
+
 ### D10. Only OpenRouter has a built-in price sync
 
 **Decision:** OpenRouter syncs price and catalog through its public API. Any
@@ -207,6 +213,38 @@ npm and was corrected. Also recorded in
 
 **Consequence:** `scripts/check.sh`/`scripts/build.sh` are thin `exec just ...`
 wrappers kept only for in-flight callers and will be removed.
+
+### D22. Subset-aware pricing for OpenAI-style usage
+
+**Decision:** in OpenAI-compatible `usage` payloads, `reasoning_tokens` is a
+subset of `completion_tokens` and `cache_read_tokens` a subset of
+`prompt_tokens`. Cost therefore bills the **non-overlapping** parts:
+
+```
+(input - cache_read) * input_per_m  +  cache_read * cache_read_per_m
+(output - reasoning) * output_per_m +  reasoning * reasoning_per_m
+```
+
+clamped at zero per component; missing price components contribute 0 and flag
+the row `priced=0` as before.
+
+**Why:** review M3 finding (2026-11-16,
+[../reviews/2026-11-16-m4-money-access.md](../reviews/2026-11-16-m4-money-access.md)):
+the spec's five-term sum double-billed overlapping tokens and falsely flagged
+rows when `reasoning_per_m` was NULL.
+
+**Consequence:** `m4-access-money.md`'s cost formula is amended; providers that
+report components **separately** (e.g. Anthropic cache creation) need a
+normalization step when their wire format is supported (M-later).
+
+### D23. Admin password reset revokes API keys
+
+**Decision:** a user changing their own password keeps their API keys; an
+**admin password reset** revokes all of that user's API keys and sessions.
+
+**Why:** review M5 finding (2026-11-16): forced rotation existed only for
+sessions, so an account rotated for suspected compromise kept full `/v1`
+access through old keys.
 
 ## Open questions
 

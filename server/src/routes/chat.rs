@@ -1,8 +1,9 @@
 //! `POST /v1/chat/completions`: the OpenAI-compatible chat data plane (M3).
 //!
-//! The handler is thin: it authenticates (admin session until M4 API keys),
-//! enforces the body-size limit, and hands the bytes to [`crate::chat`], which
-//! validates, resolves an offering, forwards, streams, and settles usage.
+//! The handler is thin: it authenticates (an API-key bearer token or an
+//! admin session, M4), enforces the body-size limit, and hands the bytes to
+//! [`crate::chat`], which validates, resolves an offering, enforces access
+//! and spend limits, forwards, streams, and settles usage.
 //!
 //! `/v1` is **exempt from the CSRF guard**: OpenAI-SDK clients never send
 //! `X-CSRF-Token`, and the guard stays on cookie-authenticated `/api/*`.
@@ -33,7 +34,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::auth::RequireAdmin;
+use crate::auth::DataPlaneAuth;
 use crate::chat;
 use crate::error::{self, ApiError, ErrorBody};
 
@@ -73,8 +74,10 @@ pub struct ChatUsage {
     pub total_tokens: Option<i64>,
 }
 
-/// Handles one chat completion. Admin session required (M4 adds API keys);
-/// CSRF-exempt like the rest of `/v1`.
+/// Handles one chat completion. Auth: `Authorization: Bearer pk_live_...`
+/// (any account, subject to the key's grants and rate limits) or an admin
+/// session (M3 behaviour kept for the dashboard); CSRF-exempt like the rest
+/// of `/v1`.
 ///
 /// Failover note: the candidate order is resolved once per request, before
 /// the first attempt; a cooldown recorded while attempt 1 is failing (an
@@ -95,17 +98,18 @@ pub struct ChatUsage {
             (ChatCompletionResponse = "application/json")
          )),
         (status = 400, description = "invalid_request or context_length_exceeded", body = ErrorBody),
-        (status = 401, description = "not authenticated", body = ErrorBody),
-        (status = 403, description = "not an admin", body = ErrorBody),
+        (status = 401, description = "unauthorized, invalid_api_key, api_key_revoked, or api_key_expired", body = ErrorBody),
+        (status = 402, description = "budget_exceeded: the spend cap refused the request before forwarding", body = ErrorBody),
+        (status = 403, description = "forbidden (non-admin session), access_denied (grants), or password_change_required", body = ErrorBody),
         (status = 404, description = "model_not_found", body = ErrorBody),
-        (status = 429, description = "upstream_rate_limited", body = ErrorBody),
+        (status = 429, description = "rate_limited (per-key RPM/TPM, Retry-After), token_cap_exceeded, or upstream_rate_limited", body = ErrorBody),
         (status = 502, description = "upstream_auth, upstream_quota, upstream_error, or upstream_stream_failed", body = ErrorBody),
         (status = 504, description = "upstream_timeout", body = ErrorBody)
     )
 )]
 pub async fn chat_completions(
     State(state): State<AppState>,
-    RequireAdmin(admin): RequireAdmin,
+    DataPlaneAuth(caller): DataPlaneAuth,
     req: Request,
 ) -> Result<Response, ApiError> {
     // The ledger key is server-generated (the middleware's stamp or a fresh
@@ -115,7 +119,10 @@ pub async fn chat_completions(
     let meta = chat::RequestMeta {
         request_id: rid.clone().unwrap_or_default(),
         client_request_id: client_rid,
-        user_id: admin.user_id,
+        user_id: caller.user_id,
+        role: caller.role,
+        api_key: caller.api_key,
+        started_at: crate::catalog::now_ts(),
         method: "POST".to_string(),
         path: "/v1/chat/completions".to_string(),
     };

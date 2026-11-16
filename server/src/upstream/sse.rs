@@ -24,7 +24,9 @@
 use serde_json::Value;
 
 /// Token counts as reported by an OpenAI-compatible `usage` object. Fields the
-/// upstream omits stay `None` and are stored as NULL — never as 0.
+/// upstream omits stay `None` and are stored as NULL — never as 0. A negative
+/// count is garbage from a broken upstream and is clamped to `0` at parse
+/// time (review M2) so no downstream arithmetic can ever *credit* a budget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: Option<i64>,
@@ -34,18 +36,28 @@ pub struct Usage {
     pub reasoning_tokens: Option<i64>,
 }
 
+/// One non-negative token count from the `usage` object: missing or negative
+/// values become `Some(0)` / `None` — never a negative (review M2).
+fn non_negative_int(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .map(|count| count.max(0))
+}
+
 /// Extracts `usage` from a chunk object or a non-streaming response body.
-/// `None` when the object carries no (or a null) `usage`.
+/// `None` when the object carries no (or a null) `usage`. Every component is
+/// clamped to be non-negative (review M2): `prompt_tokens: -5000000` books 0,
+/// never a credit.
 pub fn usage_from_json(value: &serde_json::Value) -> Option<Usage> {
     let usage = value.get("usage")?;
     if !usage.is_object() {
         return None;
     }
-    let int = |key: &str| usage.get(key).and_then(serde_json::Value::as_i64);
+    let int = |key: &str| non_negative_int(usage, key);
     let details_int = |section: &str, keys: &[&str]| {
         let details = usage.get(section)?;
-        keys.iter()
-            .find_map(|key| details.get(*key).and_then(serde_json::Value::as_i64))
+        keys.iter().find_map(|key| non_negative_int(details, key))
     };
     Some(Usage {
         input_tokens: int("prompt_tokens"),
@@ -269,6 +281,41 @@ mod tests {
              \"prompt_tokens_details\":{\"cache_creation_input_tokens\":9}}}\n\n",
         );
         assert_eq!(openrouter.usage.unwrap().cache_write_tokens, Some(9));
+    }
+
+    #[test]
+    fn hostile_usage_counts_are_clamped_never_negative() {
+        // A lying upstream: negative counts and i64 extremes. The parse clamps
+        // to 0 so no downstream arithmetic can credit a budget or overflow
+        // (review M2).
+        let mut hostile = SseInspector::new();
+        hostile.push(
+            b"data: {\"usage\":{\"prompt_tokens\":-5000000,\"completion_tokens\":-1,\
+             \"prompt_tokens_details\":{\"cached_tokens\":-3,\"cache_creation_tokens\":-4},\
+             \"completion_tokens_details\":{\"reasoning_tokens\":-9223372036854775808}}}\n\n",
+        );
+        assert_eq!(
+            hostile.usage,
+            Some(Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                cache_read_tokens: Some(0),
+                cache_write_tokens: Some(0),
+                reasoning_tokens: Some(0),
+            }),
+            "negative counts book 0, never a credit"
+        );
+
+        // Absurd but non-negative extremes parse without wrapping.
+        let mut extreme = SseInspector::new();
+        extreme.push(
+            b"data: {\"usage\":{\"prompt_tokens\":9223372036854775807,\
+             \"completion_tokens\":9223372036854775807,\
+             \"completion_tokens_details\":{\"reasoning_tokens\":9223372036854775807}}}\n\n",
+        );
+        let usage = extreme.usage.expect("usage");
+        assert_eq!(usage.input_tokens, Some(i64::MAX));
+        assert_eq!(usage.reasoning_tokens, Some(i64::MAX));
     }
 
     #[test]

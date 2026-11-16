@@ -10,18 +10,24 @@
 //! methods must carry the session's CSRF token in `X-CSRF-Token`, except for
 //! login, which is mounted outside the guard because the caller has no
 //! session yet. `/v1/*` is exempt from the guard: OpenAI-SDK clients never
-//! send `X-CSRF-Token`, and the data plane authenticates with the session
-//! (bearer tokens in M4), not with cookies a browser would attach
-//! automatically.
+//! send `X-CSRF-Token`, and the data plane authenticates with bearer API
+//! keys (or the admin session), not with cookies a browser would attach
+//! automatically. Everything except the rotation flow also goes through
+//! [`rotation_guard`]: an account flagged `must_change_password` must change
+//! its password first (review finding 7).
 
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod catalog;
 pub(crate) mod chat;
+pub(crate) mod grants;
 pub(crate) mod health;
+pub(crate) mod money;
 pub(crate) mod openapi;
 pub(crate) mod providers;
 pub(crate) mod sync;
+pub(crate) mod usage;
+pub(crate) mod users;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -66,7 +72,42 @@ fn api_surface(state: AppState) -> Router<AppState> {
     let csrf_protected = Router::new()
         .route("/auth/logout", axum::routing::post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route(
+            "/auth/change-password",
+            axum::routing::post(auth::change_password),
+        )
         .route("/audit", get(audit::list))
+        // Users, API keys, and their budgets (M4).
+        .route("/users", get(users::list_users).post(users::create_user))
+        .route("/users/{id}", axum::routing::patch(users::update_user))
+        .route(
+            "/users/{id}/keys",
+            get(users::list_keys).post(users::create_key),
+        )
+        .route(
+            "/keys/{id}",
+            axum::routing::patch(users::update_key).delete(users::revoke_key),
+        )
+        .route("/users/{id}/budgets", get(money::list_budgets))
+        .route(
+            "/users/{id}/budgets/{period}",
+            axum::routing::put(money::set_budget).delete(money::clear_budget),
+        )
+        .route("/users/{id}/token-caps", get(money::list_token_caps))
+        .route(
+            "/users/{id}/token-caps/{model_id}/{period}",
+            axum::routing::put(money::set_token_cap).delete(money::clear_token_cap),
+        )
+        // Access grants (M4).
+        .route(
+            "/grants",
+            get(grants::list_grants).post(grants::create_grant),
+        )
+        .route("/grants/{id}", axum::routing::delete(grants::delete_grant))
+        // Reports and the request-log viewer (M4).
+        .route("/usage/me", get(usage::usage_me))
+        .route("/usage", get(usage::usage_admin))
+        .route("/logs", get(usage::logs))
         // Providers and credentials.
         .route("/providers", get(providers::list).post(providers::create))
         .route(
@@ -115,6 +156,12 @@ fn api_surface(state: AppState) -> Router<AppState> {
         // OpenRouter sync.
         .route("/sync/openrouter", axum::routing::post(sync::trigger))
         .route("/sync/openrouter/status", get(sync::status))
+        // Forced password rotation (review finding 7): a flagged account may
+        // only reach the rotation flow (`me`, `logout`, `change-password`).
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rotation_guard,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             csrf_guard,
@@ -139,6 +186,55 @@ fn v1_surface(_state: AppState) -> Router<AppState> {
         )
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
+}
+
+/// `403` unless the caller is the target user or an admin (M4: keys and
+/// budgets are self-or-admin).
+pub(crate) fn ensure_self_or_admin(
+    user: &crate::auth::AuthUser,
+    target_user_id: &str,
+    rid: &Option<String>,
+) -> Result<(), ApiError> {
+    match user.role.is_admin() || user.user_id == target_user_id {
+        true => Ok(()),
+        false => Err(ApiError::forbidden().with_request_id(rid.clone())),
+    }
+}
+
+/// The `/api` paths a forced-rotation account may still reach, in the full
+/// and the nested (prefix-stripped) form.
+const ROTATION_EXEMPT: [&str; 6] = [
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/auth/change-password",
+    "/auth/me",
+    "/auth/logout",
+    "/auth/change-password",
+];
+
+/// Rejects every `/api` request of an account flagged `must_change_password`
+/// with `403 password_change_required`, except the rotation flow itself
+/// (review finding 7). Requests without a session cookie pass through: the
+/// handlers answer those with `401`.
+async fn rotation_guard(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let path = req.uri().path();
+    if ROTATION_EXEMPT.contains(&path) {
+        return Ok(next.run(req).await);
+    }
+    let rid = error::request_id(req.headers());
+    if let Some(token) = crate::auth::session_cookie_value(req.headers()) {
+        let flagged = crate::auth::session_must_change_password(&state.pool, &token)
+            .await
+            .map_err(|e| ApiError::internal("resolving session", e).with_request_id(rid.clone()))?;
+        if flagged {
+            return Err(crate::auth::password_change_required(rid));
+        }
+    }
+    Ok(next.run(req).await)
 }
 
 /// Uniform body extractor rejection: generic message, detail only logged.

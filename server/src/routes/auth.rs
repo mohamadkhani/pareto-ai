@@ -38,6 +38,9 @@ pub struct UserSummary {
     pub display_name: String,
     /// `admin` or `user`.
     pub role: String,
+    /// Forced password rotation is pending: the UI must send the account to
+    /// `POST /api/auth/change-password` before any other screen works.
+    pub must_change_password: bool,
 }
 
 impl UserSummary {
@@ -47,6 +50,7 @@ impl UserSummary {
             email: user.email.clone(),
             display_name: user.display_name.clone(),
             role: user.role.as_str().to_string(),
+            must_change_password: user.must_change_password,
         }
     }
 
@@ -56,6 +60,7 @@ impl UserSummary {
             email: user.email.clone(),
             display_name: user.display_name.clone(),
             role: user.role.as_str().to_string(),
+            must_change_password: user.must_change_password,
         }
     }
 }
@@ -237,6 +242,49 @@ pub async fn me(user: AuthUser) -> Json<MeResponse> {
         user: UserSummary::from_auth_user(&user),
         csrf_token: user.csrf_token,
     })
+}
+
+/// Changes the caller's own password (M4), audited as `auth.password_change`.
+///
+/// The current password is required; on success `must_change_password`
+/// clears and the account's other sessions are deleted (the calling session
+/// survives). Forced rotation (review finding 7) is the same call — the
+/// account is simply flagged until it succeeds.
+#[utoipa::path(
+    post,
+    path = "/api/auth/change-password",
+    tag = "auth",
+    request_body = crate::users::PasswordChange,
+    responses(
+        (status = 204, description = "password changed; other sessions deleted"),
+        (status = 400, description = "invalid request body or too-short password", body = ErrorBody),
+        (status = 401, description = "not authenticated or wrong current password", body = ErrorBody),
+        (status = 403, description = "missing or invalid CSRF token", body = ErrorBody)
+    )
+)]
+pub async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ip: ClientIp,
+    headers: HeaderMap,
+    body: Result<Json<crate::users::PasswordChange>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let rid = error::request_id(&headers);
+    let Json(change) = body.map_err(|e| {
+        tracing::debug!(error = %e, "password change body rejected");
+        ApiError::bad_request("invalid request body").with_request_id(rid.clone())
+    })?;
+    crate::users::change_password(
+        &state.pool,
+        &user.user_id,
+        &user.session_id,
+        &change.current_password,
+        &change.new_password,
+        &ip.0,
+    )
+    .await
+    .map_err(|e| e.into_api_error(rid))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Writes one `auth.login_failed` audit row; audit trouble is logged, never
@@ -734,5 +782,140 @@ mod tests {
             "two disabled-account attempts plus three wrong passwords must lock the pair out"
         );
         assert_eq!(locked.body["error"]["code"], "login_locked");
+    }
+
+    #[tokio::test]
+    async fn forced_password_rotation_blocks_other_endpoints_until_changed() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (admin_cookie, admin_csrf) = test_support::login(&router, "admin@example.com").await;
+
+        // The admin creates an account: it starts flagged (review finding 7).
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "rot@example.com",
+                    "display_name": "Rotate Me",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                Some(&admin_cookie),
+                Some(&admin_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        // The flagged account signs in and sees the flag.
+        let login = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/login",
+                Some(serde_json::json!({
+                    "email": "rot@example.com",
+                    "password": "temporary-password-1",
+                })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(login.status, StatusCode::OK, "{}", login.body);
+        let cookie = test_support::session_cookie_from(&login.headers);
+        let csrf = login.body["csrf_token"].as_str().expect("csrf").to_string();
+        let me = send(
+            router.clone(),
+            api_request(Method::GET, "/api/auth/me", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(me.status, StatusCode::OK);
+        assert_eq!(me.body["user"]["must_change_password"], true);
+
+        // Everything else is blocked with one clear code.
+        for (method, uri) in [
+            (Method::GET, "/api/models"),
+            (Method::GET, "/api/audit"),
+            (Method::GET, "/api/usage/me"),
+            (Method::POST, "/v1/chat/completions"),
+        ] {
+            let response = send(
+                router.clone(),
+                api_request(method.clone(), uri, None, Some(&cookie), None),
+            )
+            .await;
+            assert_eq!(
+                response.body["error"]["code"], "password_change_required",
+                "{uri}: {}",
+                response.body
+            );
+        }
+
+        // Logout works during rotation (exempt) but change-password is what
+        // clears the flag.
+        let changed = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/change-password",
+                Some(serde_json::json!({
+                    "current_password": "temporary-password-1",
+                    "new_password": "permanent-password-1",
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
+
+        // After the change the account works and the flag is gone.
+        let me = send(
+            router.clone(),
+            api_request(Method::GET, "/api/auth/me", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(me.body["user"]["must_change_password"], false);
+        let usage = send(
+            router.clone(),
+            api_request(Method::GET, "/api/usage/me", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(usage.status, StatusCode::OK, "usage: {}", usage.body);
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_the_wrong_current_password() {
+        let app = TestApp::new().await;
+        app.create_user("user@example.com", Role::User, true).await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "user@example.com").await;
+
+        let wrong = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/change-password",
+                Some(serde_json::json!({
+                    "current_password": "not-the-password",
+                    "new_password": "brand-new-password-1",
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong.body["error"]["code"], "invalid_credentials");
+
+        // The password is unchanged: the old one still signs in.
+        let (cookie, csrf) = test_support::login(&router, "user@example.com").await;
+        assert!(!cookie.is_empty());
+        assert!(!csrf.is_empty());
     }
 }

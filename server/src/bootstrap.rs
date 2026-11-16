@@ -64,8 +64,8 @@ pub async fn ensure_admin_with(
         password::hash_password(&admin_password).context("hashing the bootstrap admin password")?;
 
     sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash, role, is_active) \
-         VALUES (?, ?, ?, ?, 'admin', 1)",
+        "INSERT INTO users (id, email, display_name, password_hash, role, is_active, must_change_password) \
+         VALUES (?, ?, ?, ?, 'admin', 1, 1)",
     )
     .bind(&user_id)
     .bind(&email)
@@ -122,6 +122,15 @@ mod tests {
         assert_eq!(email, "boss@example.com");
         assert_eq!(role, "admin");
         assert_eq!(active, 1);
+
+        let must_change: i64 = sqlx::query_scalar("SELECT must_change_password FROM users")
+            .fetch_one(&pool)
+            .await
+            .expect("flag");
+        assert_eq!(
+            must_change, 1,
+            "the bootstrap admin must rotate its password"
+        );
 
         let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log ORDER BY id")
             .fetch_all(&pool)

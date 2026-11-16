@@ -35,8 +35,11 @@ pub struct Config {
     /// AEAD key for credential encryption at rest, as 32 bytes.
     /// Startup fails when this is absent (see [`crate::secrets`]).
     pub master_key: Option<MasterKey>,
-    /// IANA timezone used for budget periods (day/week/month boundaries).
+    /// IANA timezone used for budget periods (day/week/month boundaries),
+    /// as written by `GATEWAY_TIMEZONE`.
     pub timezone: String,
+    /// [`Self::timezone`] parsed for use; startup fails on an unknown zone.
+    pub tz: chrono_tz::Tz,
     /// When true, session cookies are sent without `Secure` so the gateway can
     /// be used over plain HTTP during development (`GATEWAY_INSECURE_COOKIES=1`).
     pub insecure_cookies: bool,
@@ -69,6 +72,11 @@ pub enum ConfigError {
     Listen(String),
     #[error("GATEWAY_TRUSTED_PROXY entry is not a valid CIDR: {0}")]
     TrustedProxy(String),
+    #[error(
+        "GATEWAY_TIMEZONE is not a known IANA timezone: {0} \
+         (use a zone name like UTC, Europe/Berlin, or Asia/Tehran)"
+    )]
+    Timezone(String),
     #[error("{name} is not a positive integer: {value}")]
     Number { name: &'static str, value: String },
     #[error("cannot determine the current directory: {0}")]
@@ -96,11 +104,15 @@ impl Config {
             None => env::current_dir()?.join("data"),
         };
 
+        let timezone = env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
+        let tz = parse_timezone(&timezone)?;
+
         Ok(Self {
             listen,
             data_dir,
             master_key: parse_master_key(env::var("GATEWAY_MASTER_KEY").ok().as_deref())?,
-            timezone: env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string()),
+            timezone,
+            tz,
             insecure_cookies: env::var("GATEWAY_INSECURE_COOKIES").as_deref() == Ok("1"),
             trusted_proxies: match env::var("GATEWAY_TRUSTED_PROXY") {
                 Ok(raw) => parse_trusted_proxies(&raw)?,
@@ -122,6 +134,15 @@ impl Config {
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("gateway.db")
     }
+}
+
+/// Parses `GATEWAY_TIMEZONE` into an IANA timezone (default `UTC`). Failure
+/// mode: [`ConfigError::Timezone`] naming the offending value.
+fn parse_timezone(raw: &str) -> Result<chrono_tz::Tz, ConfigError> {
+    use std::str::FromStr;
+    let trimmed = raw.trim();
+    let name = if trimmed.is_empty() { "UTC" } else { trimmed };
+    chrono_tz::Tz::from_str(name).map_err(|_| ConfigError::Timezone(name.to_string()))
 }
 
 /// Parses `GATEWAY_TRUSTED_PROXY`: comma-separated IPv4/IPv6 CIDRs, where a

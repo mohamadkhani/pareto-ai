@@ -99,6 +99,10 @@ pub struct AuthUser {
     pub role: Role,
     pub session_id: String,
     pub csrf_token: String,
+    /// Forced password rotation is pending (review finding 7): the caller may
+    /// only reach `/api/auth/change-password` (and logout and `me`) until it
+    /// happens.
+    pub must_change_password: bool,
 }
 
 /// A session as resolved from the database, joined with its user.
@@ -110,6 +114,7 @@ pub struct SessionUser {
     pub display_name: String,
     pub role: Role,
     pub csrf_token: String,
+    pub must_change_password: bool,
 }
 
 /// A user row as needed for credential checks.
@@ -121,6 +126,7 @@ pub struct UserRecord {
     pub password_hash: String,
     pub role: Role,
     pub is_active: bool,
+    pub must_change_password: bool,
 }
 
 /// A freshly created session. `token` is the raw cookie value and is never
@@ -208,7 +214,7 @@ pub async fn load_session(
 ) -> Result<Option<SessionUser>, AuthError> {
     let row = sqlx::query(
         "SELECT s.id AS session_id, s.user_id, s.csrf_token, s.expires_at, \
-                u.email, u.display_name, u.role, u.is_active \
+                u.email, u.display_name, u.role, u.is_active, u.must_change_password \
          FROM sessions s JOIN users u ON u.id = s.user_id \
          WHERE s.token_hash = ?",
     )
@@ -229,6 +235,7 @@ pub async fn load_session(
     let display_name: String = row.try_get("display_name")?;
     let role_raw: String = row.try_get("role")?;
     let is_active: i64 = row.try_get("is_active")?;
+    let must_change_password: i64 = row.try_get("must_change_password")?;
 
     let role = Role::parse(&role_raw).ok_or_else(|| AuthError::UnknownRole(role_raw))?;
 
@@ -257,7 +264,25 @@ pub async fn load_session(
         display_name,
         role,
         csrf_token,
+        must_change_password: must_change_password == 1,
     }))
+}
+
+/// Whether the session's account is flagged for forced password rotation
+/// (review finding 7). Cheap single lookup used by the `/api` rotation guard.
+/// Failure mode: [`AuthError::Db`].
+pub async fn session_must_change_password(
+    pool: &sqlx::SqlitePool,
+    token: &str,
+) -> Result<bool, AuthError> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT u.must_change_password FROM sessions s JOIN users u ON u.id = s.user_id \
+         WHERE s.token_hash = ?",
+    )
+    .bind(hash_token(token))
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(flag,)| flag == 1).unwrap_or(false))
 }
 
 /// Looks up a user by email (case-insensitive through the column collation).
@@ -266,7 +291,8 @@ pub async fn find_user_by_email(
     email: &str,
 ) -> Result<Option<UserRecord>, AuthError> {
     let row = sqlx::query(
-        "SELECT id, email, display_name, password_hash, role, is_active FROM users WHERE email = ?",
+        "SELECT id, email, display_name, password_hash, role, is_active, must_change_password \
+         FROM users WHERE email = ?",
     )
     .bind(email)
     .fetch_optional(pool)
@@ -287,6 +313,7 @@ pub async fn find_user_by_email(
         password_hash: row.try_get("password_hash")?,
         role,
         is_active: row.try_get::<i64, _>("is_active")? == 1,
+        must_change_password: row.try_get::<i64, _>("must_change_password")? == 1,
     }))
 }
 
@@ -522,6 +549,7 @@ impl FromRequestParts<AppState> for AuthUser {
             role: session.role,
             session_id: session.session_id,
             csrf_token: session.csrf_token,
+            must_change_password: session.must_change_password,
         })
     }
 }
@@ -543,6 +571,113 @@ impl FromRequestParts<AppState> for RequireAdmin {
         }
         Ok(Self(user))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Data-plane authentication (`/v1/*`)
+// ---------------------------------------------------------------------------
+
+/// The authenticated caller of a `/v1/*` request (M4).
+///
+/// Two credential kinds are accepted:
+///
+/// * `Authorization: Bearer pk_live_...` — an API key: any active account,
+///   subject to the key's revocation/expiry and its RPM bucket (the TPM
+///   bucket is charged once the request's token estimate is known). Forced
+///   password rotation does not block keys: the key is an independent
+///   credential and only the *password* is suspect.
+/// * the session cookie — an **admin** dashboard session (kept working from
+///   M3); the account's forced rotation blocks it like every other session
+///   route.
+#[derive(Debug, Clone)]
+pub struct DataPlaneCaller {
+    pub user_id: String,
+    pub role: Role,
+    /// The key behind the request, `None` for session callers.
+    pub api_key: Option<crate::api_keys::KeyContext>,
+}
+
+pub struct DataPlaneAuth(pub DataPlaneCaller);
+
+impl FromRequestParts<AppState> for DataPlaneAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let rid = request_id(&parts.headers);
+
+        if let Some(presented) = bearer_token(&parts.headers) {
+            let key = crate::api_keys::authenticate(&state.pool, &presented)
+                .await
+                .map_err(|e| e.into_api_error(rid.clone()))?;
+            // RPM is charged per request at authentication; TPM waits for
+            // the token estimate inside the chat pipeline.
+            if let Err(wait) = state.key_limiter.charge_rpm(
+                &key.key_id,
+                key.rate_limit_rpm,
+                std::time::Instant::now(),
+            ) {
+                return Err(ApiError::custom(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "the API key's request rate limit is exhausted",
+                )
+                .with_retry_after(wait.as_secs())
+                .with_request_id(rid));
+            }
+            return Ok(Self(DataPlaneCaller {
+                user_id: key.user_id.clone(),
+                role: key.role,
+                api_key: Some(key),
+            }));
+        }
+
+        let token = session_cookie_value(&parts.headers)
+            .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
+        let session = load_session(&state.pool, &token)
+            .await
+            .map_err(|e| ApiError::internal("resolving session", e).with_request_id(rid.clone()))?
+            .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
+        // Forced rotation comes first: "change it before anything else".
+        // Otherwise the dashboard keeps its M3 behaviour: only admin sessions
+        // use `/v1` directly; everyone else authenticates with an API key.
+        if session.must_change_password {
+            return Err(password_change_required(rid));
+        }
+        if !session.role.is_admin() {
+            return Err(ApiError::forbidden().with_request_id(rid));
+        }
+        Ok(Self(DataPlaneCaller {
+            user_id: session.user_id,
+            role: session.role,
+            api_key: None,
+        }))
+    }
+}
+
+/// The `403 password_change_required` error: the account must rotate its
+/// password before anything else works (review finding 7).
+pub fn password_change_required(rid: Option<String>) -> ApiError {
+    ApiError::custom(
+        axum::http::StatusCode::FORBIDDEN,
+        "password_change_required",
+        "the account must change its password before using the API",
+    )
+    .with_request_id(rid)
+}
+
+/// The `Authorization: Bearer <token>` value, when present.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
