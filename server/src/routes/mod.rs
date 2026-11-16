@@ -140,10 +140,12 @@ fn api_surface(state: AppState) -> Router<AppState> {
             "/combos/{id}",
             axum::routing::put(routing::update_combo).delete(routing::delete_combo),
         )
+        .route("/benchmarks", get(routing::list_benchmarks))
         .route(
             "/benchmarks/import",
             axum::routing::post(routing::import_benchmarks),
         )
+        .route("/quality-overrides", get(routing::list_quality_overrides))
         .route(
             "/models/{id}/quality-override",
             axum::routing::put(routing::set_quality_override)

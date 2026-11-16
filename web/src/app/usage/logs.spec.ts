@@ -69,6 +69,16 @@ function selectInto(root: HTMLElement, selector: string, value: string): void {
   select.dispatchEvent(new Event('change'));
 }
 
+function buttonByText(scope: ParentNode, text: string): HTMLButtonElement {
+  const button = Array.from(scope.querySelectorAll('button')).find(
+    (candidate) => candidate.textContent?.trim() === text,
+  );
+  if (button === undefined) {
+    throw new Error(`no button labelled ${text}`);
+  }
+  return button;
+}
+
 describe('Logs', () => {
   let fetchMock: FetchMock;
 
@@ -167,5 +177,80 @@ describe('Logs', () => {
 
     const url = new URL(fetchMock.requests[2].url, 'https://example.test');
     expect(url.searchParams.get('user')).toBe('u1');
+  });
+
+  it('opens the why-this-model panel with the recorded decision', async () => {
+    const decision = {
+      candidates: [
+        {
+          id: 'off1',
+          provider: 'openrouter',
+          model: 'openai/gpt-5',
+          upstream_model_id: 'openai/gpt-5',
+          price: null,
+          credential_id: 'c1',
+          outcome: 'chosen',
+          error_class: null,
+          status: 200,
+          score: {
+            price: 0.8,
+            speed: 0.5,
+            quality: 0.9,
+            reliability: 0.7,
+            penalties: 0,
+            total: -0.125,
+            imputed: ['speed'],
+            shrunk: [],
+          },
+          explanation: 'chosen: served the request',
+        },
+      ],
+      chosen_offering_id: 'off1',
+      reason: 'off1 served the request',
+      routing: {
+        strategy: 'weighted',
+        combo: 'shared-fast',
+        weights: { price: 0.25, speed: 0.3, quality: 0.3, reliability: 0.15 },
+        preset: 'balanced',
+        rr_cursor: null,
+      },
+    };
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [entry(0, { decision_json: JSON.stringify(decision) })],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Why this model').click();
+    fixture.detectChanges();
+
+    expect(root.querySelector('app-decision-panel')).not.toBeNull();
+    expect(root.textContent).toContain('combo:shared-fast');
+    expect(root.textContent).toContain('-0.125');
+    expect(root.querySelector('tr.chosen')).not.toBeNull();
+
+    buttonByText(root, 'Hide').click();
+    fixture.detectChanges();
+    expect(root.querySelector('app-decision-panel')).toBeNull();
+  });
+
+  it('falls back gracefully for an unreadable decision record', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [entry(0, { decision_json: 'not a decision' })],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Why this model').click();
+    fixture.detectChanges();
+
+    expect(root.querySelector('app-decision-panel')).toBeNull();
+    expect(root.textContent).toContain('no readable routing decision');
   });
 });

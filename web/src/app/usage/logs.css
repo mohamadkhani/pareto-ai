@@ -37,3 +37,13 @@
 .logs-table tbody tr.money-event:hover {
   background: #fff0d6;
 }
+
+.actions {
+  white-space: nowrap;
+}
+
+/* The expanded "why this model" panel spans the whole row. */
+.logs-table tbody tr.decision-row td {
+  background: var(--bg);
+  padding: 0.85rem 1rem;
+}

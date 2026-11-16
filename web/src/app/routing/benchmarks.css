@@ -1,0 +1,70 @@
+.card {
+  margin-bottom: 1rem;
+}
+
+.note {
+  margin: 0 0 0.85rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.field textarea {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  resize: vertical;
+}
+
+.file-btn input[type='file'] {
+  display: none;
+}
+
+.counters {
+  display: flex;
+  gap: 1.5rem;
+  margin: 0.75rem 0 0;
+}
+
+.counters div {
+  display: flex;
+  flex-direction: column;
+}
+
+.counters dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.counters dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.num {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
+.score-input {
+  width: 7rem;
+}
+
+.row-error td {
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 0.82rem;
+  padding: 0.35rem 0.65rem;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions .btn {
+  margin-right: 0.35rem;
+}

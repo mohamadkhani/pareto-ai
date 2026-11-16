@@ -21,7 +21,7 @@ with fallback, per-user budgets, and admin oversight.
 | M2 providers, credentials, catalog | **Done** (backend + admin UI; security review + alignment pass closed; 129 backend tests, 81 UI tests) | 2026-11-16 |
 | M3 chat data plane | **Done** (deep review closed; 181 backend tests) | 2026-11-16 |
 | M4 users, keys, money | **Done** (backend + UI + alignment; 245 backend tests, 144 UI tests) | 2026-11-16 |
-| M5 routing | Backend implemented; deep review running | 2026-11-16 |
+| M5 routing | Backend **Done** (deep review closed; 314 backend tests) — UI in progress | 2026-11-16 |
 
 Environment note: crates.io is unreachable from this network, so dependency
 commands run with `--offline` against the local cargo cache; `npm` works

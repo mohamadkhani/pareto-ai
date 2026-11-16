@@ -88,7 +88,7 @@ export class AuthService {
   /**
    * Changes the caller's own password (`POST /api/auth/change-password`),
    * clearing the forced-rotation flag server-side. Throws `ApiError`
-   * (`invalid_credentials` when the current password is wrong, `bad_request`
+   * (`invalid_credentials` when the current password is wrong, `invalid_request`
    * for a too-short new password) on failure.
    */
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {

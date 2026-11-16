@@ -17,6 +17,10 @@
 //! * **Quality for routing** = override > latest benchmark (wide CIs shrunk
 //!   toward the leaderboard mean, [`crate::routing::shrink`]) > model default
 //!   (neutral 0.5, imputed).
+//!
+//! The module also serves the two admin listings the UI needs
+//! (`GET /api/benchmarks`, `GET /api/quality-overrides`): [`list_scores`] and
+//! [`list_overrides`], both newest first.
 
 use std::collections::HashMap;
 
@@ -28,19 +32,20 @@ use crate::routing::{self, QualityScore};
 /// The source recorded for fixture/live LMArena imports.
 pub const DEFAULT_SOURCE: &str = "lmarena";
 
-/// Import failures. Failure mode: nothing is written unless the whole import
-/// transaction commits.
+/// Benchmark storage failures (imports, override writes, and the admin
+/// listings). Failure mode: a failed write commits nothing — the transaction
+/// rolls back and nothing is half-imported; a failed read returns nothing.
 #[derive(Debug, thiserror::Error)]
-pub enum ImportError {
+pub enum BenchmarkError {
     #[error("leaderboard document is malformed: {0}")]
     Malformed(String),
-    #[error("benchmark import failed: {0}")]
+    #[error("benchmark storage failed: {0}")]
     Db(#[from] sqlx::Error),
     #[error("benchmark audit failed: {0}")]
     Audit(#[from] catalog::CatalogError),
 }
 
-impl ImportError {
+impl BenchmarkError {
     /// The uniform API error for this failure.
     pub fn into_api_error(self, rid: Option<String>) -> crate::error::ApiError {
         match self {
@@ -81,35 +86,35 @@ pub struct Leaderboard {
 }
 
 /// Parses and validates a leaderboard document. Failure mode:
-/// [`ImportError::Malformed`] naming the offending field.
-pub fn parse_leaderboard(raw: &str) -> Result<Leaderboard, ImportError> {
+/// [`BenchmarkError::Malformed`] naming the offending field.
+pub fn parse_leaderboard(raw: &str) -> Result<Leaderboard, BenchmarkError> {
     let board: Leaderboard = serde_json::from_str(raw)
-        .map_err(|e| ImportError::Malformed(format!("invalid JSON: {e}")))?;
+        .map_err(|e| BenchmarkError::Malformed(format!("invalid JSON: {e}")))?;
     if board.entries.is_empty() {
-        return Err(ImportError::Malformed(
+        return Err(BenchmarkError::Malformed(
             "entries must not be empty".to_string(),
         ));
     }
     for entry in &board.entries {
         if entry.model.trim().is_empty() {
-            return Err(ImportError::Malformed(
+            return Err(BenchmarkError::Malformed(
                 "entry model must not be empty".to_string(),
             ));
         }
         if !entry.score.is_finite() {
-            return Err(ImportError::Malformed(format!(
+            return Err(BenchmarkError::Malformed(format!(
                 "entry {} score must be finite",
                 entry.model
             )));
         }
         if entry.ci.is_some_and(|ci| !ci.is_finite() || ci < 0.0) {
-            return Err(ImportError::Malformed(format!(
+            return Err(BenchmarkError::Malformed(format!(
                 "entry {} ci must be a non-negative number",
                 entry.model
             )));
         }
         if entry.category != "text" && entry.category != "code" {
-            return Err(ImportError::Malformed(format!(
+            return Err(BenchmarkError::Malformed(format!(
                 "entry {} category must be text or code, got {:?}",
                 entry.model, entry.category
             )));
@@ -131,12 +136,12 @@ pub struct ImportOutcome {
 /// Imports a leaderboard document into `benchmarks`, upserting one row per
 /// `(model_id, source, category)` and recording one `sync.benchmarks` audit
 /// row. `model_quality_overrides` is never written here. Failure mode:
-/// [`ImportError`] — the transaction rolls back, nothing is half-imported.
+/// [`BenchmarkError`] — the transaction rolls back, nothing is half-imported.
 pub async fn run_import(
     pool: &SqlitePool,
     actor: &Actor<'_>,
     raw: &str,
-) -> Result<ImportOutcome, ImportError> {
+) -> Result<ImportOutcome, BenchmarkError> {
     let board = parse_leaderboard(raw)?;
     let source = board
         .source
@@ -250,9 +255,9 @@ pub const OVERRIDE_SCALE_MARGIN: f64 = 500.0;
 /// when benchmarks have been imported, the score must sit within
 /// [`OVERRIDE_SCALE_MARGIN`] of the imported range. Without benchmarks there
 /// is no scale to check against (`MIN`/`MAX` are NULL). Failure mode:
-/// [`ImportError::Malformed`] naming the offending value and the expected
+/// [`BenchmarkError::Malformed`] naming the offending value and the expected
 /// range.
-async fn validate_override_scale(pool: &SqlitePool, score: f64) -> Result<(), ImportError> {
+async fn validate_override_scale(pool: &SqlitePool, score: f64) -> Result<(), BenchmarkError> {
     let range: (Option<f64>, Option<f64>) =
         sqlx::query_as("SELECT MIN(score), MAX(score) FROM benchmarks")
             .fetch_one(pool)
@@ -261,7 +266,7 @@ async fn validate_override_scale(pool: &SqlitePool, score: f64) -> Result<(), Im
         return Ok(());
     };
     if score < min - OVERRIDE_SCALE_MARGIN || score > max + OVERRIDE_SCALE_MARGIN {
-        return Err(ImportError::Malformed(format!(
+        return Err(BenchmarkError::Malformed(format!(
             "override score {score} looks like a different scale: imported benchmark scores \
              range from {min} to {max} (Elo-like); expected a value within \
              {OVERRIDE_SCALE_MARGIN:.0} points of that range"
@@ -274,15 +279,15 @@ async fn validate_override_scale(pool: &SqlitePool, score: f64) -> Result<(), Im
 /// `quality.override`). A later import never overwrites it. On the one
 /// Elo-like quality scale (decision D25), a value far outside the imported
 /// benchmark range is a likely scale error and is rejected with the range in
-/// the message. Failure mode: [`ImportError`].
+/// the message. Failure mode: [`BenchmarkError`].
 pub async fn set_override(
     pool: &SqlitePool,
     actor: &Actor<'_>,
     model_id: &str,
     score: f64,
-) -> Result<(), ImportError> {
+) -> Result<(), BenchmarkError> {
     if !score.is_finite() {
-        return Err(ImportError::Malformed(
+        return Err(BenchmarkError::Malformed(
             "override score must be finite".to_string(),
         ));
     }
@@ -314,12 +319,12 @@ pub async fn set_override(
 }
 
 /// Removes a model's quality override (audited). Returns whether one existed.
-/// Failure mode: [`ImportError`].
+/// Failure mode: [`BenchmarkError`].
 pub async fn clear_override(
     pool: &SqlitePool,
     actor: &Actor<'_>,
     model_id: &str,
-) -> Result<bool, ImportError> {
+) -> Result<bool, BenchmarkError> {
     let mut tx = pool.begin().await?;
     let result = sqlx::query("DELETE FROM model_quality_overrides WHERE model_id = ?")
         .bind(model_id)
@@ -338,6 +343,79 @@ pub async fn clear_override(
     Ok(result.rows_affected() > 0)
 }
 
+/// One imported benchmark score joined with its model's name, as listed by
+/// [`list_scores`] (`GET /api/benchmarks`).
+#[derive(Debug, serde::Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct BenchmarkScoreRow {
+    pub id: String,
+    pub model_id: String,
+    /// The catalog model's `canonical_name`. Falls back to the raw `model_id`
+    /// when the model row is gone — unreachable in practice (the foreign key
+    /// cascades benchmark rows away with their model), but the fallback keeps
+    /// the row visible instead of hiding imported data.
+    pub model_name: String,
+    /// Where the score came from (the importer records [`DEFAULT_SOURCE`]).
+    pub source: String,
+    /// `text` or `code`.
+    pub category: String,
+    /// On the source's native Elo-like scale (decision D25).
+    pub score: f64,
+    /// CI half-width of `score`, in the source's own units, when published.
+    pub ci: Option<f64>,
+    pub rank: Option<i64>,
+    pub source_url: Option<String>,
+    /// When the source document was fetched (RFC-3339 UTC).
+    pub fetched_at: String,
+}
+
+/// One stored quality override joined with its model's name, as listed by
+/// [`list_overrides`] (`GET /api/quality-overrides`).
+#[derive(Debug, serde::Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct QualityOverrideRow {
+    pub model_id: String,
+    /// See [`BenchmarkScoreRow::model_name`].
+    pub model_name: String,
+    /// On the imported benchmark's Elo-like scale (decision D25).
+    pub score: f64,
+    /// The user id of the operator who last set the override; `NULL` once
+    /// that account is deleted (`ON DELETE SET NULL`).
+    pub updated_by: Option<String>,
+    /// When the override was last set (RFC-3339 UTC).
+    pub updated_at: String,
+}
+
+/// Every imported benchmark score with its model's name, newest first
+/// (`fetched_at` descending; ties — rows of one imported document — break
+/// deterministically on `model_id`, then `category`). Failure mode:
+/// [`BenchmarkError::Db`].
+pub async fn list_scores(pool: &SqlitePool) -> Result<Vec<BenchmarkScoreRow>, BenchmarkError> {
+    let rows = sqlx::query_as::<_, BenchmarkScoreRow>(
+        "SELECT b.id, b.model_id, \
+                COALESCE(m.canonical_name, b.model_id) AS model_name, \
+                b.source, b.category, b.score, b.ci, b.rank, b.source_url, b.fetched_at \
+         FROM benchmarks b LEFT JOIN models m ON m.id = b.model_id \
+         ORDER BY b.fetched_at DESC, b.model_id, b.category",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Every stored quality override with its model's name, newest first
+/// (`updated_at` descending; ties break on `model_id`). Failure mode:
+/// [`BenchmarkError::Db`].
+pub async fn list_overrides(pool: &SqlitePool) -> Result<Vec<QualityOverrideRow>, BenchmarkError> {
+    let rows = sqlx::query_as::<_, QualityOverrideRow>(
+        "SELECT o.model_id, COALESCE(m.canonical_name, o.model_id) AS model_name, \
+                o.score, o.updated_by, o.updated_at \
+         FROM model_quality_overrides o LEFT JOIN models m ON m.id = o.model_id \
+         ORDER BY o.updated_at DESC, o.model_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// The resolved routing quality of the given models: override > latest
 /// benchmark (wide CIs shrunk toward the leaderboard mean of its
 /// `(source, category)`) > neutral model default (0.5, imputed). Every
@@ -345,11 +423,11 @@ pub async fn clear_override(
 /// `(source, category)`: generic quality prefers category `text` over `code`
 /// (review nit — the alphabetical tie-break used to prefer `code`), then the
 /// category name keeps the pick deterministic within one document. Failure
-/// mode: [`ImportError`].
+/// mode: [`BenchmarkError`].
 pub async fn quality_for_models(
     pool: &SqlitePool,
     model_ids: &[String],
-) -> Result<HashMap<String, QualityScore>, ImportError> {
+) -> Result<HashMap<String, QualityScore>, BenchmarkError> {
     let mut quality: HashMap<String, QualityScore> = HashMap::new();
     if model_ids.is_empty() {
         return Ok(quality);
@@ -736,5 +814,105 @@ mod tests {
         assert_eq!(missing.score, 0.5);
         assert!(missing.imputed);
         assert_eq!(missing.source, routing::QualitySource::ModelDefault);
+    }
+
+    #[tokio::test]
+    async fn the_lists_return_what_the_write_paths_stored_newest_first() {
+        let s = seeded().await;
+        assert!(
+            list_scores(&s.app.state.pool)
+                .await
+                .expect("scores")
+                .is_empty(),
+            "nothing imported yet"
+        );
+        assert!(
+            list_overrides(&s.app.state.pool)
+                .await
+                .expect("overrides")
+                .is_empty(),
+            "no override set yet"
+        );
+
+        run_import(&s.app.state.pool, &actor(&s.uid), FIXTURE)
+            .await
+            .expect("import");
+        set_override(
+            &s.app.state.pool,
+            &actor(&s.uid),
+            &s.models["claude-sonnet-4.5"],
+            1450.0,
+        )
+        .await
+        .expect("override");
+
+        // A second document with a later fetch time must list first.
+        let later = r#"{
+            "source": "alt",
+            "fetched_at": "2026-11-12T00:00:00.000Z",
+            "entries": [{"model": "gpt-4o", "score": 1410.0, "category": "text"}]
+        }"#;
+        run_import(&s.app.state.pool, &actor(&s.uid), later)
+            .await
+            .expect("second import");
+
+        let scores = list_scores(&s.app.state.pool).await.expect("scores");
+        assert_eq!(scores.len(), 7);
+        assert_eq!(scores[0].source, "alt", "the newer document lists first");
+        assert_eq!(scores[0].model_name, "gpt-4o");
+        assert_eq!(scores[0].fetched_at, "2026-11-12T00:00:00.000Z");
+        assert!(scores[1..].iter().all(|row| row.source == "lmarena"));
+        let gemini = scores
+            .iter()
+            .find(|row| row.model_name == "gemini-2.5-pro" && row.category == "text")
+            .expect("gemini text row");
+        assert_eq!(gemini.model_id, s.models["gemini-2.5-pro"]);
+        assert_eq!(gemini.score, 1432.5);
+        assert_eq!(gemini.ci, Some(45.0));
+        assert_eq!(gemini.rank, Some(1));
+        assert_eq!(
+            gemini.source_url.as_deref(),
+            Some("https://lmarena.ai/leaderboard")
+        );
+
+        let overrides = list_overrides(&s.app.state.pool).await.expect("overrides");
+        assert_eq!(overrides.len(), 1);
+        let claude = &overrides[0];
+        assert_eq!(claude.model_id, s.models["claude-sonnet-4.5"]);
+        assert_eq!(claude.model_name, "claude-sonnet-4.5");
+        assert_eq!(claude.score, 1450.0);
+        assert_eq!(claude.updated_by.as_deref(), Some(s.uid.as_str()));
+        assert!(!claude.updated_at.is_empty());
+
+        // Newest first by `updated_at`: pin both rows' timestamps and check
+        // the later one lists first.
+        set_override(
+            &s.app.state.pool,
+            &actor(&s.uid),
+            &s.models["gpt-4o"],
+            1300.0,
+        )
+        .await
+        .expect("second override");
+        for (model_id, at) in [
+            (
+                s.models["claude-sonnet-4.5"].as_str(),
+                "2026-01-01T00:00:00.000Z",
+            ),
+            (s.models["gpt-4o"].as_str(), "2026-01-02T00:00:00.000Z"),
+        ] {
+            sqlx::query("UPDATE model_quality_overrides SET updated_at = ? WHERE model_id = ?")
+                .bind(at)
+                .bind(model_id)
+                .execute(&s.app.state.pool)
+                .await
+                .expect("pin updated_at");
+        }
+        let overrides = list_overrides(&s.app.state.pool).await.expect("overrides");
+        let names: Vec<&str> = overrides
+            .iter()
+            .map(|row| row.model_name.as_str())
+            .collect();
+        assert_eq!(names, ["gpt-4o", "claude-sonnet-4.5"], "newest first");
     }
 }

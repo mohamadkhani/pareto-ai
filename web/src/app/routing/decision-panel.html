@@ -1,0 +1,112 @@
+<div class="decision">
+  <p class="reason">{{ decision().reason }}</p>
+
+  <dl class="routing">
+    <dt>Strategy</dt>
+    <dd>
+      <span class="badge">{{ decision().routing.strategy }}</span>
+    </dd>
+    @if (decision().routing.combo; as combo) {
+      <dt>Combo</dt>
+      <dd>
+        <code>combo:{{ combo }}</code>
+      </dd>
+    }
+    @if (decision().routing.preset; as preset) {
+      <dt>Preset</dt>
+      <dd>
+        <span class="badge">{{ preset }}</span>
+      </dd>
+    }
+    @if (decision().routing.weights; as weights) {
+      <dt>Weights</dt>
+      <dd class="weights">
+        price {{ formatScore(weights.price) }} · speed {{ formatScore(weights.speed) }} · quality
+        {{ formatScore(weights.quality) }} · reliability {{ formatScore(weights.reliability) }}
+      </dd>
+    }
+    @if (decision().routing.rr_cursor !== null) {
+      <dt>Rotation</dt>
+      <dd>round-robin cursor {{ decision().routing.rr_cursor }}</dd>
+    }
+  </dl>
+
+  @if (decision().candidates.length === 0) {
+    <p class="empty">No candidates were recorded for this request.</p>
+  } @else {
+    <table class="data-table score-table">
+      <thead>
+        <tr>
+          <th scope="col">Candidate</th>
+          <th scope="col">Outcome</th>
+          <th scope="col">Price</th>
+          <th scope="col">Speed</th>
+          <th scope="col">Quality</th>
+          <th scope="col">Reliability</th>
+          <th scope="col">Penalties</th>
+          <th scope="col">Total</th>
+          <th scope="col">Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (candidate of decision().candidates; track candidate.id) {
+          <tr [class.chosen]="isChosen(candidate)">
+            <td class="candidate">
+              <code>{{ candidate.id }}</code>
+              <span class="sub">{{ candidate.provider }} · {{ candidate.model }}</span>
+            </td>
+            <td>
+              <span class="badge {{ outcomeClass(candidate) }}">{{ outcomeLabel(candidate) }}</span>
+            </td>
+            @if (candidate.score; as score) {
+              <td class="num">
+                {{ formatScore(score.price) }}
+                @if (marker(score, 'price'); as mark) {
+                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
+                }
+              </td>
+              <td class="num">
+                {{ formatScore(score.speed) }}
+                @if (marker(score, 'speed'); as mark) {
+                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
+                }
+              </td>
+              <td class="num">
+                {{ formatScore(score.quality) }}
+                @if (marker(score, 'quality'); as mark) {
+                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
+                }
+              </td>
+              <td class="num">
+                {{ formatScore(score.reliability) }}
+                @if (marker(score, 'reliability'); as mark) {
+                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
+                }
+              </td>
+              <td class="num">{{ formatScore(score.penalties) }}</td>
+              <td class="num total" [class.negative]="score.total < 0">
+                {{ formatScore(score.total) }}
+              </td>
+            } @else {
+              <td
+                colspan="6"
+                class="unscored"
+                title="Excluded or unscored strategies carry no breakdown."
+              >
+                not scored
+              </td>
+            }
+            <td class="why">{{ candidate.explanation }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+    <p class="legend">
+      <sup class="marker" [attr.title]="markerHelp('imputed')">imp</sup>
+      imputed at the neutral 0.5 (no data) ·
+      <sup class="marker" [attr.title]="markerHelp('shrunk')">shr</sup>
+      shrunk toward 0.5 (fewer than 10 samples) · total is not clamped to [0, 1] and can be
+      negative.
+    </p>
+  }
+</div>

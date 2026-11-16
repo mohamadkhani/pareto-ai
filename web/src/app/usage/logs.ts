@@ -2,6 +2,8 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { AuthService } from '../auth/auth.service';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime, formatUsd } from '../catalog/format';
+import { DecisionPanel } from '../routing/decision-panel';
+import { parseDecision } from '../routing/routing.types';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { UsageService } from './usage.service';
@@ -12,6 +14,7 @@ const PAGE_SIZE = 50;
 /** The request log: metadata and settled usage, never bodies. Admin only. */
 @Component({
   selector: 'app-logs',
+  imports: [DecisionPanel],
   templateUrl: './logs.html',
   styleUrl: './logs.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -32,6 +35,20 @@ export class Logs {
   /** The server's `next_cursor`; null once paging has ended. */
   private readonly nextCursor = signal<LogCursor | null>(null);
   protected readonly hasMore = computed(() => this.nextCursor() !== null);
+
+  /** The entry whose "why this model" panel is open. */
+  protected readonly expandedId = signal<string | null>(null);
+  private readonly entryById = computed(
+    () => new Map(this.entries().map((entry) => [entry.request_id, entry])),
+  );
+  /** The parsed `decision_json` of the expanded entry; null when unreadable. */
+  protected readonly expandedDecision = computed(() => {
+    const id = this.expandedId();
+    if (id === null) {
+      return null;
+    }
+    return parseDecision(this.entryById().get(id)?.decision_json ?? null);
+  });
 
   protected readonly formatTime = formatTime;
   protected readonly formatUsd = formatUsd;
@@ -106,6 +123,11 @@ export class Logs {
   /** 402 and 429 are money events: the request was refused before forwarding. */
   protected isMoneyEvent(entry: RequestLogEntry): boolean {
     return entry.status === 402 || entry.status === 429;
+  }
+
+  /** Opens/closes the "why this model" panel of one entry. */
+  protected toggleDecision(entry: RequestLogEntry): void {
+    this.expandedId.set(this.expandedId() === entry.request_id ? null : entry.request_id);
   }
 
   /** True when settled usage exists for the entry. */

@@ -1,0 +1,65 @@
+.form-card {
+  margin-bottom: 1rem;
+}
+
+.note {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.weights,
+.members {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.weights h3,
+.members h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.member-list {
+  margin: 0 0 0.75rem;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.member-row .order {
+  min-width: 1.5rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.member-row .label {
+  flex: 1;
+  font-size: 0.85rem;
+}
+
+.member-row .weight input {
+  width: 5rem;
+}
+
+.add-member {
+  max-width: 32rem;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions .btn {
+  margin-right: 0.35rem;
+}

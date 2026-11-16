@@ -1,7 +1,9 @@
 import { Routes } from '@angular/router';
 import { Audit } from './audit/audit';
 import { authGuard, loginGuard } from './auth/auth.guard';
+import { Benchmarks } from './routing/benchmarks';
 import { ChangePassword } from './change-password/change-password';
+import { Combos } from './routing/combos';
 import { Grants } from './grants/grants';
 import { Keys } from './keys/keys';
 import { Limits } from './money/limits';
@@ -30,6 +32,8 @@ export const routes: Routes = [
       { path: 'models', component: Models },
       { path: 'offerings', component: Offerings },
       { path: 'sync', component: Sync },
+      { path: 'combos', component: Combos },
+      { path: 'benchmarks', component: Benchmarks },
       { path: 'audit', component: Audit },
       { path: 'users', component: Users },
       { path: 'grants', component: Grants },

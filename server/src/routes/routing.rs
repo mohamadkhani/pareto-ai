@@ -5,7 +5,11 @@
 //! [`crate::benchmarks`], map the result. Every mutation is audited by the
 //! service in the same transaction as the change (`combo.create`,
 //! `combo.update`, `combo.delete`, `sync.benchmarks`, `quality.override`,
-//! `quality.override_clear`). The data plane stays untouched: a combo is
+//! `quality.override_clear`). The two list reads are audited too
+//! (`benchmarks.read`, `quality.override_read`), matching `GET /api/audit`'s
+//! `audit.read`: access to the imported scores and the operator's overrides
+//! is visible in the trail, and an audit failure fails the read rather than
+//! returning unaudited data. The data plane stays untouched: a combo is
 //! addressed as the model id `combo:<name>` in `/v1/chat/completions`, and
 //! the "why this model" explanation rides in `decision_json` (surfaced by
 //! `GET /api/logs`).
@@ -18,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::auth::{ClientIp, RequireAdmin};
-use crate::benchmarks;
+use crate::auth::{self, ClientIp, RequireAdmin};
+use crate::benchmarks::{self, BenchmarkScoreRow, QualityOverrideRow};
 use crate::catalog::Actor;
 use crate::combos::{self, ComboInput, ComboView};
 use crate::error::{self, ApiError, ErrorBody};
@@ -179,6 +183,47 @@ pub async fn delete_combo(
     }
 }
 
+/// Lists every imported benchmark score with its model's name, newest first
+/// (`fetched_at` descending; ties — rows of one imported document — break
+/// deterministically on `model_id`, then `category`; see
+/// [`benchmarks::list_scores`]). Admin only. Reading the list is itself
+/// audited (`benchmarks.read`, like `GET /api/audit`'s `audit.read`), and an
+/// audit failure fails the request rather than returning unaudited data.
+#[utoipa::path(
+    get,
+    path = "/api/benchmarks",
+    tag = "routing",
+    responses(
+        (status = 200, description = "imported benchmark scores, newest first", body = [BenchmarkScoreRow]),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn list_benchmarks(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    ip: ClientIp,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BenchmarkScoreRow>>, ApiError> {
+    let rid = error::request_id(&headers);
+    let rows = benchmarks::list_scores(&state.pool)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    let detail = serde_json::json!({ "rows": rows.len() }).to_string();
+    auth::audit(
+        &state.pool,
+        Some(&admin.user_id),
+        "benchmarks.read",
+        Some("benchmarks"),
+        None,
+        Some(&detail),
+        Some(&ip.0),
+    )
+    .await
+    .map_err(|e| ApiError::internal("auditing the benchmark read", e).with_request_id(rid))?;
+    Ok(Json(rows))
+}
+
 /// Imports one leaderboard document (an LMArena-style JSON body; the recorded
 /// fixture stands in for the live fetch, which is blocked in this
 /// environment). Admin only, audited as `sync.benchmarks`.
@@ -219,6 +264,49 @@ pub async fn import_benchmarks(
         unchanged: outcome.unchanged,
         skipped_unknown_model: outcome.skipped_unknown_model,
     }))
+}
+
+/// Lists every stored quality override with its model's name, newest first
+/// (`updated_at` descending; ties break on `model_id`; see
+/// [`benchmarks::list_overrides`]). Admin only. Reading the list is itself
+/// audited (`quality.override_read`, like `GET /api/audit`'s `audit.read`),
+/// and an audit failure fails the request rather than returning unaudited
+/// data.
+#[utoipa::path(
+    get,
+    path = "/api/quality-overrides",
+    tag = "routing",
+    responses(
+        (status = 200, description = "stored quality overrides, newest first", body = [QualityOverrideRow]),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn list_quality_overrides(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    ip: ClientIp,
+    headers: HeaderMap,
+) -> Result<Json<Vec<QualityOverrideRow>>, ApiError> {
+    let rid = error::request_id(&headers);
+    let rows = benchmarks::list_overrides(&state.pool)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    let detail = serde_json::json!({ "rows": rows.len() }).to_string();
+    auth::audit(
+        &state.pool,
+        Some(&admin.user_id),
+        "quality.override_read",
+        Some("model_quality_overrides"),
+        None,
+        Some(&detail),
+        Some(&ip.0),
+    )
+    .await
+    .map_err(|e| {
+        ApiError::internal("auditing the quality-override read", e).with_request_id(rid)
+    })?;
+    Ok(Json(rows))
 }
 
 /// Sets the operator's quality override for a model (it wins over every
@@ -296,6 +384,8 @@ pub async fn clear_quality_override(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::http::Method;
     use serde_json::json;
 
@@ -303,6 +393,8 @@ mod tests {
     use crate::auth::Role;
     use crate::catalog::{self, ModelInput, ProviderInput};
     use crate::test_support::{TestApp, api_request, login, send};
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/leaderboard.json");
 
     /// Seeds a provider with one offering and returns (offering_id, model_id).
     async fn seeded_offering(app: &TestApp, uid: &str) -> (String, String) {
@@ -354,6 +446,39 @@ mod tests {
         .await
         .expect("offering");
         (offering.id, model.id)
+    }
+
+    /// Creates one catalog model per canonical name (the fixture's models).
+    async fn seed_models(app: &TestApp, uid: &str) -> HashMap<String, String> {
+        let actor = Actor {
+            user_id: uid,
+            ip: "127.0.0.1",
+        };
+        let mut models = HashMap::new();
+        for name in [
+            "gemini-2.5-pro",
+            "claude-sonnet-4.5",
+            "gpt-4o",
+            "deepseek-v3",
+        ] {
+            let model = catalog::create_model(
+                &app.state.pool,
+                &actor,
+                &ModelInput {
+                    canonical_name: name.to_string(),
+                    family: None,
+                    modalities_input: None,
+                    modalities_output: None,
+                    context_length: None,
+                    max_output_tokens: None,
+                    capabilities: None,
+                },
+            )
+            .await
+            .expect("model");
+            models.insert(name.to_string(), model.id);
+        }
+        models
     }
 
     #[tokio::test]
@@ -466,5 +591,155 @@ mod tests {
         )
         .await;
         assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_list_endpoints_are_admin_only() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        app.create_user("user@example.test", Role::User, true).await;
+        let router = app.router();
+
+        for uri in ["/api/benchmarks", "/api/quality-overrides"] {
+            let anonymous = send(
+                router.clone(),
+                api_request(Method::GET, uri, None, None, None),
+            )
+            .await;
+            assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED, "{uri}");
+
+            let (user_cookie, _) = login(&router, "user@example.test").await;
+            let user = send(
+                router.clone(),
+                api_request(Method::GET, uri, None, Some(&user_cookie), None),
+            )
+            .await;
+            assert_eq!(user.status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(user.body["error"]["code"], "forbidden", "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_lists_show_what_the_write_paths_stored() {
+        let app = TestApp::new().await;
+        let uid = app
+            .create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let models = seed_models(&app, &uid).await;
+        let (cookie, csrf) = login(&app.router(), "admin@example.test").await;
+
+        // The write paths: one leaderboard import and one quality override.
+        let imported = send(
+            app.router(),
+            api_request(
+                Method::POST,
+                "/api/benchmarks/import",
+                Some(serde_json::from_str(FIXTURE).expect("fixture is JSON")),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(imported.status, StatusCode::OK, "{}", imported.body);
+        assert_eq!(imported.body["inserted"], 6);
+
+        let claude = &models["claude-sonnet-4.5"];
+        let overridden = send(
+            app.router(),
+            api_request(
+                Method::PUT,
+                &format!("/api/models/{claude}/quality-override"),
+                Some(json!({ "score": 1450.0 })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(overridden.status, StatusCode::OK, "{}", overridden.body);
+
+        // GET /api/benchmarks: a bare array with the exact row shape.
+        let scores = send(
+            app.router(),
+            api_request(Method::GET, "/api/benchmarks", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(scores.status, StatusCode::OK, "{}", scores.body);
+        let rows = scores.body.as_array().expect("bare array");
+        assert_eq!(rows.len(), 6, "the fixture's six entries");
+        for row in rows {
+            assert_eq!(
+                row.as_object().expect("object").len(),
+                10,
+                "exact row shape: {row}"
+            );
+        }
+        let gemini = rows
+            .iter()
+            .find(|row| row["model_name"] == "gemini-2.5-pro" && row["category"] == "text")
+            .expect("gemini text row");
+        assert_eq!(gemini["id"].as_str().expect("id").len(), 36);
+        assert_eq!(gemini["model_id"], models["gemini-2.5-pro"].as_str());
+        assert_eq!(gemini["source"], "lmarena");
+        assert_eq!(gemini["score"], 1432.5);
+        assert_eq!(gemini["ci"], 45.0);
+        assert_eq!(gemini["rank"], 1);
+        assert_eq!(gemini["source_url"], "https://lmarena.ai/leaderboard");
+        assert_eq!(gemini["fetched_at"], "2026-11-10T00:00:00.000Z");
+
+        // GET /api/quality-overrides: a bare array with the exact row shape.
+        let overrides = send(
+            app.router(),
+            api_request(
+                Method::GET,
+                "/api/quality-overrides",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(overrides.status, StatusCode::OK, "{}", overrides.body);
+        let rows = overrides.body.as_array().expect("bare array");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            row.as_object().expect("object").len(),
+            5,
+            "exact row shape: {row}"
+        );
+        assert_eq!(row["model_id"], claude.as_str());
+        assert_eq!(row["model_name"], "claude-sonnet-4.5");
+        assert_eq!(row["score"], 1450.0);
+        assert_eq!(row["updated_by"], uid.as_str());
+        assert!(row["updated_at"].is_string());
+
+        // Reading is audited like GET /api/audit.
+        for action in ["benchmarks.read", "quality.override_read"] {
+            let reads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = ?")
+                .bind(action)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("audit count");
+            assert_eq!(reads, 1, "{action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_lists_are_empty_when_nothing_is_stored() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let (cookie, _) = login(&app.router(), "admin@example.test").await;
+
+        for uri in ["/api/benchmarks", "/api/quality-overrides"] {
+            let response = send(
+                app.router(),
+                api_request(Method::GET, uri, None, Some(&cookie), None),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::OK, "{uri}");
+            assert_eq!(response.body, json!([]), "{uri}");
+        }
     }
 }

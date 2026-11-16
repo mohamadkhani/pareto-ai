@@ -69,7 +69,9 @@ use utoipa::OpenApi;
         crate::routes::routing::create_combo,
         crate::routes::routing::update_combo,
         crate::routes::routing::delete_combo,
+        crate::routes::routing::list_benchmarks,
         crate::routes::routing::import_benchmarks,
+        crate::routes::routing::list_quality_overrides,
         crate::routes::routing::set_quality_override,
         crate::routes::routing::clear_quality_override,
     ),
@@ -136,6 +138,8 @@ use utoipa::OpenApi;
         crate::routes::routing::ImportOutcomeView,
         crate::routes::routing::QualityOverrideInput,
         crate::routes::routing::QualityOverrideView,
+        crate::benchmarks::BenchmarkScoreRow,
+        crate::benchmarks::QualityOverrideRow,
         crate::error::ErrorBody,
         crate::error::ErrorDetail,
     ))
@@ -193,6 +197,8 @@ mod tests {
             "/api/offerings/{id}/price",
             "/api/sync/openrouter",
             "/api/sync/openrouter/status",
+            "/api/benchmarks",
+            "/api/quality-overrides",
             "/v1/models",
             "/v1/chat/completions",
         ] {
