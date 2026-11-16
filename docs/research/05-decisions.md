@@ -196,6 +196,18 @@ supporting explicit clearing needs `Option<Option<T>>` inputs and is a
 follow-up. Silent dropping of `provider_id`/`model_id` on offering PATCH
 becomes an explicit `400` (finding B3).
 
+### D21. pnpm for JavaScript tooling; `just` as the task runner
+
+**Decision:** `web/` is managed with pnpm (lockfile `pnpm-lock.yaml`), and the
+`Justfile` is the single entry point for builds and checks.
+
+**Why:** user preference (2026-11-16) — the Angular scaffold had defaulted to
+npm and was corrected. Also recorded in
+[11-user-preferences.md](11-user-preferences.md).
+
+**Consequence:** `scripts/check.sh`/`scripts/build.sh` are thin `exec just ...`
+wrappers kept only for in-flight callers and will be removed.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

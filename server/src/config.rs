@@ -8,9 +8,23 @@
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::ip::IpCidr;
 use crate::secrets::{self, MasterKey};
+
+/// Largest request body the data plane accepts (`GATEWAY_MAX_BODY_BYTES`).
+pub const DEFAULT_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Upstream connect timeout (`GATEWAY_TIMEOUT_CONNECT_MS`).
+pub const DEFAULT_TIMEOUT_CONNECT: Duration = Duration::from_secs(10);
+/// Time from upstream request start to the first response byte
+/// (`GATEWAY_TIMEOUT_FIRST_BYTE_MS`).
+pub const DEFAULT_TIMEOUT_FIRST_BYTE: Duration = Duration::from_secs(30);
+/// Maximum gap between upstream body chunks (`GATEWAY_TIMEOUT_IDLE_MS`).
+pub const DEFAULT_TIMEOUT_IDLE: Duration = Duration::from_secs(60);
+/// Total budget for one client request including failover attempts
+/// (`GATEWAY_TIMEOUT_TOTAL_MS`).
+pub const DEFAULT_TIMEOUT_TOTAL: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -31,6 +45,20 @@ pub struct Config {
     /// CIDRs like `10.0.0.0/8,127.0.0.1/32`). Empty: the peer address is the
     /// client and those headers are never read.
     pub trusted_proxies: Vec<IpCidr>,
+    /// Largest chat request body accepted, in bytes
+    /// (`GATEWAY_MAX_BODY_BYTES`, default 4 MiB).
+    pub max_body_bytes: usize,
+    /// Upstream TCP connect timeout (`GATEWAY_TIMEOUT_CONNECT_MS`, default 10s).
+    pub timeout_connect: Duration,
+    /// Budget from upstream request start to the first response byte
+    /// (`GATEWAY_TIMEOUT_FIRST_BYTE_MS`, default 30s).
+    pub timeout_first_byte: Duration,
+    /// Maximum gap between upstream body chunks (`GATEWAY_TIMEOUT_IDLE_MS`,
+    /// default 60s).
+    pub timeout_idle: Duration,
+    /// Total budget for one client request, failover attempts included
+    /// (`GATEWAY_TIMEOUT_TOTAL_MS`, default 600s).
+    pub timeout_total: Duration,
     /// Version reported by the health endpoint.
     pub version: String,
 }
@@ -41,6 +69,8 @@ pub enum ConfigError {
     Listen(String),
     #[error("GATEWAY_TRUSTED_PROXY entry is not a valid CIDR: {0}")]
     TrustedProxy(String),
+    #[error("{name} is not a positive integer: {value}")]
+    Number { name: &'static str, value: String },
     #[error("cannot determine the current directory: {0}")]
     CurrentDir(#[from] std::io::Error),
     #[error("{0}")]
@@ -76,6 +106,14 @@ impl Config {
                 Ok(raw) => parse_trusted_proxies(&raw)?,
                 Err(_) => Vec::new(),
             },
+            max_body_bytes: parse_usize("GATEWAY_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES)?,
+            timeout_connect: parse_ms("GATEWAY_TIMEOUT_CONNECT_MS", DEFAULT_TIMEOUT_CONNECT)?,
+            timeout_first_byte: parse_ms(
+                "GATEWAY_TIMEOUT_FIRST_BYTE_MS",
+                DEFAULT_TIMEOUT_FIRST_BYTE,
+            )?,
+            timeout_idle: parse_ms("GATEWAY_TIMEOUT_IDLE_MS", DEFAULT_TIMEOUT_IDLE)?,
+            timeout_total: parse_ms("GATEWAY_TIMEOUT_TOTAL_MS", DEFAULT_TIMEOUT_TOTAL)?,
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
@@ -108,6 +146,49 @@ fn parse_master_key(raw: Option<&str>) -> Result<Option<MasterKey>, ConfigError>
     }
 }
 
+/// Reads a millisecond duration variable (`*_MS`), falling back to `default`
+/// when absent or blank. Zero and non-numeric values are startup errors: a
+/// silent 0 would disable the timeout.
+fn parse_ms(name: &'static str, default: Duration) -> Result<Duration, ConfigError> {
+    Ok(Duration::from_millis(parse_positive(
+        name,
+        env::var(name).ok(),
+        default.as_millis() as u64,
+    )?))
+}
+
+/// Reads an unsigned size variable, falling back to `default` when absent or
+/// blank. Zero and non-numeric values are startup errors.
+fn parse_usize(name: &'static str, default: usize) -> Result<usize, ConfigError> {
+    parse_positive(name, env::var(name).ok(), default as u64).map(|value| value as usize)
+}
+
+/// Parses an unsigned variable value; absent or blank falls back to `default`,
+/// while zero and non-numeric values fail naming the variable.
+fn parse_positive(
+    name: &'static str,
+    raw: Option<String>,
+    default: u64,
+) -> Result<u64, ConfigError> {
+    match raw {
+        None => Ok(default),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(default);
+            }
+            trimmed
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| ConfigError::Number {
+                    name,
+                    value: raw.clone(),
+                })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +218,33 @@ mod tests {
     fn rejects_malformed_trusted_proxy_entries() {
         let err = parse_trusted_proxies("10.0.0.0/8,garbage").expect_err("must fail");
         assert!(err.to_string().contains("garbage"), "{err}");
+    }
+
+    #[test]
+    fn timeout_and_size_variables_parse_or_fail_by_name() {
+        // Absent and blank fall back to the default.
+        assert_eq!(
+            parse_positive("X", None, 600).expect("absent falls back"),
+            600
+        );
+        assert_eq!(
+            parse_positive("X", Some("  ".to_string()), 600).expect("blank falls back"),
+            600
+        );
+        assert_eq!(
+            parse_positive("X", Some("1500".to_string()), 600).expect("number parses"),
+            1500
+        );
+
+        // Zero would silently disable a timeout; it must not be accepted.
+        for bad in ["0", "-5", "1.5", "abc"] {
+            let err = parse_positive("GATEWAY_TIMEOUT_IDLE_MS", Some(bad.to_string()), 600)
+                .expect_err("bad values must fail");
+            assert!(
+                err.to_string().contains("GATEWAY_TIMEOUT_IDLE_MS"),
+                "the error names the variable: {err}"
+            );
+        }
     }
 
     #[test]

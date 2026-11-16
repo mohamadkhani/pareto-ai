@@ -14,6 +14,7 @@ Claims here are dated; code facts cite commits.
 
 | Date | Unit | Who | Outcome |
 | --- | --- | --- | --- |
+| 2026-11-16 | tooling correction (user-driven) | chief-of-staff | `web/` migrated npm → pnpm (81 tests green), `Justfile` added as the single entry point (`just check` gate green), `scripts/*.sh` became `exec just ...` wrappers. D21 recorded; see [11-user-preferences.md](11-user-preferences.md) |
 | 2026-11-15 | M0 + M0.1 | chief-of-staff directly | done, all checks green |
 | 2026-11-16 | M1 backend (auth, sessions, CSRF, rate limit, audit, bootstrap) | sub-agent `ses_e1ef9f91bffe3v8THBfciRsJdo` | done: 38 tests green, clippy clean; deviations: unique-index instead of duplicate index, lockout `429` + `Retry-After`, disabled account `403`, exclusive `before` cursor, new `error.rs` uniform shape |
 | 2026-11-16 | review of M1 backend | sub-agent `ses_e1edd1558ffeOWRmEJWQ4s5QPM` | verdict **needs changes**: 4 major (audit pagination drops rows on timestamp ties; non-UTC cursor mis-normalized; test masked the first; client-IP/proxy trust breaks rate limiting) + 4 minor + 6 nits. Full text: [`docs/reviews/2026-11-16-m1-backend.md`](../reviews/2026-11-16-m1-backend.md) |
@@ -25,7 +26,21 @@ Claims here are dated; code facts cite commits.
 | 2026-11-16 | M2 backend (providers, credentials, catalog, prices, OpenRouter sync) | sub-agent `ses_e1ea9a98affeFm0du9HPssp7i3` | done: 117 tests (54 new), `scripts/check.sh` green. Secret redaction proven by scanning db/-wal/-shm bytes; AES-256-GCM `ring` per D16; fixture-based sync (live OpenRouter blocked). Deviations: `last_tested_at` column, `price_sync_runs` table, `display_name` in `capabilities_json`, extra `GET /api/offerings/{id}/price` |
 | 2026-11-16 | review of M2 backend (security focus) | sub-agent `ses_e1e6ab877ffeNzzzlsrMGagep6` | verdict **needs changes**: 1 major (header values stored plaintext — resolved as D17: encrypt them), 7 minors (D18/D19 resolve two), 10 nits. Crypto core, redaction, audit and sync semantics verified sound. Full text: [`docs/reviews/2026-11-16-m2-backend.md`](../reviews/2026-11-16-m2-backend.md) |
 | 2026-11-16 | M2 alignment pass (UI ↔ live API) | sub-agent `ses_e1e6a6f38ffe6wouwJnOG2X4Sf` | done: 7 of 10 UI assumptions were wrong (bare-array envelopes, header values never on the wire, status/probe shapes, sync outcome shape, no embedded price) — UI fixed and verified against a live gateway; 81 UI tests green. Backend findings B1-B4 (low/info) resolved as D20 + explicit-400 fix |
-| 2026-11-16 | close M2 findings (D17 header encryption, minors 1-4/6-7, nits, B3) | sub-agent `ses_e1e54c76bffeocbI2pwwXJ22Af` | running |
+| 2026-11-16 | close M2 findings (D17 header encryption, minors 1-4/6-7, nits, B3) | sub-agent `ses_e1e54c76bffeocbI2pwwXJ22Af` | done: 129 tests (12 new), `scripts/check.sh` green. Header values sealed in `{"names", "values":"v1:…"}` envelopes (AAD = row id); `UNIQUE(offering_id)` + `ON CONFLICT`; zeroize; run pruning per D19 |
+| 2026-11-16 | **M2 closed and committed** | chief-of-staff | `79dc371 feat(catalog): providers, encrypted credentials, models, prices, sync` (127 tracked files; verified `scripts/check.sh` + encryption wiring myself first) |
+| 2026-11-16 | M3 backend (chat data plane) | sub-agent `ses_e1e36e9acffeN9GenOzjUnZ3g7` | done: 167 tests (38 new), `scripts/check.sh` green. Bounded-channel streaming, `CancelOnDrop` cancellation (<1s upstream close, stub-proven), pre-byte-only failover, one ledger pair per request (no double-spend), `chars/4` estimation flagged, `/v1` CSRF-exempt |
+| 2026-11-16 | review of M3 (deep: ledger, cancellation, timeouts, failover, SSE) | sub-agent `ses_e1daa1888ffe4lvj2W1IWmiMLQ` | running |
+
+**M3 contract notes for future UI work** (from the M3 report): mid-stream
+failures keep HTTP **200** and surface as an in-band `data: {"error":...}` SSE
+event before `[DONE]` — never key failure display off the status code for
+streams; `stream_options.include_usage: true` is injected and `max_tokens` is
+clamped; `/v1` never needs `X-CSRF-Token`; 429 carries `Retry-After` equal to
+the recorded credential cooldown.
+
+A final holistic review of the whole project is planned after M5, instead of a
+separate UI review for M2 (the UI was already exercised by the alignment pass
+against a live backend and has 81 tests).
 | 2026-11-16 | M2 admin UI (providers, credentials, models, offerings, prices, sync) | sub-agent `ses_e1ea9368fffe7MUWHymKpO5a04` | done: 74 UI tests (50 new), build + prettier green. 10 documented assumptions where the spec was silent: [`docs/reviews/2026-11-16-m2-frontend-assumptions.md`](../reviews/2026-11-16-m2-frontend-assumptions.md) — alignment pass must reconcile them with the backend |
 | 2026-11-16 | frontend adopts composite cursor | sub-agent `ses_e1ebf2eedffebuF0hfBmUoXRvO` | done: 24 vitest tests green, build green, prettier clean; server `next_cursor` used verbatim (never derived), short page ends paging |
 | 2026-11-16 | M2 spec | chief-of-staff | [docs/specs/m2-providers-catalog.md](../specs/m2-providers-catalog.md) written (fixture-based OpenRouter sync, `ring` AEAD per D16) |

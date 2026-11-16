@@ -18,8 +18,8 @@ with fallback, per-user budgets, and admin oversight.
 | M0 repository skeleton | **Done** (fmt, clippy `-D warnings`, tests, `/health`, Angular build all pass) | 2026-11-15 |
 | M0.1 embedded UI + OpenAPI | **Done** (single binary serves the Angular build; `/openapi.json`; api-only feature measured at −455 KB) | 2026-11-16 |
 | M1 auth and audit | **Done** (backend + admin UI; two review rounds closed; 63 backend tests, 24 UI tests) | 2026-11-16 |
-| M2 providers, credentials, catalog | Not started | |
-| M3 chat data plane | Not started | |
+| M2 providers, credentials, catalog | **Done** (backend + admin UI; security review + alignment pass closed; 129 backend tests, 81 UI tests) | 2026-11-16 |
+| M3 chat data plane | Implemented; deep review running (ledger, cancellation, timeouts, failover) | 2026-11-16 |
 | M4 users, keys, money | Not started | |
 | M5 routing | Not started | |
 
@@ -50,7 +50,9 @@ pareto-ai/
 
 - Rust: `cargo fmt --check`, `cargo clippy -- -D warnings`, no `unwrap()` in
   request paths, explicit `Result`, typed errors per module.
-- TypeScript: strict mode, ESLint, Prettier, standalone components + signals.
+- TypeScript: pnpm, strict mode, ESLint, Prettier, standalone components +
+  signals.
+- Task runner: `just` (`Justfile`) — `just check` is the gate.
 - Commits: Conventional Commits, e.g. `feat(routing): weighted scoring`.
 - Every decision that changes design is appended to `docs/research/`.
 - Secrets never in code, logs, or `.env` committed to git.

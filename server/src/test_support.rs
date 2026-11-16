@@ -29,22 +29,39 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new() -> Self {
+        Self::with_config(|_| {}).await
+    }
+
+    /// Like [`TestApp::new`], with the config adjusted first (tests use this
+    /// to shorten timeout budgets).
+    pub async fn with_config(mutate: impl FnOnce(&mut Config)) -> Self {
         let dir = std::env::temp_dir().join(format!("gateway-routes-{}", uuid::Uuid::new_v4()));
         let pool = db::open(&dir.join("gateway.db"))
             .await
             .expect("open test database");
+        let mut config = Config {
+            listen: "127.0.0.1:0".parse().expect("static address"),
+            data_dir: dir.clone(),
+            master_key: Some(MasterKey::from_bytes([7u8; 32])),
+            timezone: "UTC".to_string(),
+            insecure_cookies: true,
+            trusted_proxies: Vec::new(),
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+            timeout_connect: crate::config::DEFAULT_TIMEOUT_CONNECT,
+            timeout_first_byte: crate::config::DEFAULT_TIMEOUT_FIRST_BYTE,
+            timeout_idle: crate::config::DEFAULT_TIMEOUT_IDLE,
+            timeout_total: crate::config::DEFAULT_TIMEOUT_TOTAL,
+            version: "test".to_string(),
+        };
+        mutate(&mut config);
         let state = AppState {
-            config: Arc::new(Config {
-                listen: "127.0.0.1:0".parse().expect("static address"),
-                data_dir: dir.clone(),
-                master_key: Some(MasterKey::from_bytes([7u8; 32])),
-                timezone: "UTC".to_string(),
-                insecure_cookies: true,
-                trusted_proxies: Vec::new(),
-                version: "test".to_string(),
-            }),
+            config: Arc::new(config),
             pool,
             secrets: Arc::new(SecretBox::new(MasterKey::from_bytes([7u8; 32]))),
+            upstream: Arc::new(
+                crate::upstream::UpstreamClient::new(std::time::Duration::from_secs(5))
+                    .expect("test upstream client"),
+            ),
             started: Instant::now(),
             login_limiter: Arc::new(LoginRateLimiter::new()),
         };
@@ -116,6 +133,32 @@ pub async fn send(router: Router, request: Request<Body>) -> TestResponse {
         headers,
         body,
     }
+}
+
+/// Like [`send`], but hands back the raw body instead of buffering it:
+/// streaming tests read chunk by chunk and the disconnect test drops it
+/// mid-stream (which is what hyper does when the client hangs up).
+pub async fn send_streaming(
+    router: Router,
+    request: Request<Body>,
+) -> (StatusCode, HeaderMap, Body) {
+    let response = router.oneshot(request).await.expect("router response");
+    (
+        response.status(),
+        response.headers().clone(),
+        response.into_body(),
+    )
+}
+
+/// Drains a response body into one string (SSE or JSON).
+pub async fn body_text(body: Body) -> String {
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut out = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        out.extend_from_slice(&chunk.expect("body chunk"));
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 /// Builds an API request with optional JSON body, session cookie, and CSRF

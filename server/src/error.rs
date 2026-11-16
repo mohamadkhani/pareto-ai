@@ -152,14 +152,28 @@ impl ApiError {
         tracing::error!(error = %error, context, "request failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            "internal",
             "internal error",
         )
+    }
+
+    /// Any taxonomy error the named constructors do not cover, e.g. the
+    /// upstream failure classes of the chat data plane. `code` must be one of
+    /// the documented `error.code` values; `message` must not carry internals
+    /// or secrets.
+    pub fn custom(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(status, code, message)
     }
 
     /// Attaches the request id so the body can be correlated with the logs.
     pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
         self.request_id = request_id;
+        self
+    }
+
+    /// Sets the `Retry-After` header (seconds) on the error response.
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds.max(1));
         self
     }
 }

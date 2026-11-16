@@ -42,6 +42,7 @@ use utoipa::OpenApi;
         crate::routes::catalog::override_price,
         crate::routes::catalog::get_price,
         crate::routes::catalog::v1_models,
+        crate::routes::chat::chat_completions,
         crate::routes::sync::trigger,
         crate::routes::sync::status,
     ),
@@ -76,6 +77,9 @@ use utoipa::OpenApi;
         crate::catalog::V1ModelList,
         crate::catalog::V1Modalities,
         crate::catalog::V1Price,
+        crate::routes::chat::ChatCompletionRequest,
+        crate::routes::chat::ChatCompletionResponse,
+        crate::routes::chat::ChatUsage,
         crate::error::ErrorBody,
         crate::error::ErrorDetail,
     ))
@@ -97,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn api_doc_covers_the_m1_and_m2_surface() {
+    fn api_doc_covers_the_m1_m2_and_m3_surface() {
         let doc = ApiDoc::build("test");
         let paths: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
         for expected in [
@@ -120,8 +124,17 @@ mod tests {
             "/api/sync/openrouter",
             "/api/sync/openrouter/status",
             "/v1/models",
+            "/v1/chat/completions",
         ] {
             assert!(paths.contains(&expected), "missing {expected} in {paths:?}");
         }
+
+        // The SSE body is documented as text/event-stream (M3 deliverable).
+        let json = serde_json::to_value(&doc).expect("document serializes");
+        let ok = &json["paths"]["/v1/chat/completions"]["post"]["responses"]["200"];
+        assert!(
+            ok["content"].get("text/event-stream").is_some(),
+            "SSE content type documented: {ok}"
+        );
     }
 }

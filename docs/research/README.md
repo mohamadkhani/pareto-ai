@@ -24,6 +24,7 @@ re-checked instead of re-litigated. When a fact is not verified, it is marked
 | [08-surrealdb-deep-dive.md](08-surrealdb-deep-dive.md) | SurrealDB: license, storage churn, durability, transactions, verdict |
 | [09-environment.md](09-environment.md) | Dated environment knowledge: network, toolchain, cached crates, build quirks |
 | [10-milestones.md](10-milestones.md) | Orchestration log: runs, review findings, commits |
+| [11-user-preferences.md](11-user-preferences.md) | Dated user preferences: pnpm, Justfile, and their corrections |
 
 Raw review artifacts live in [`../reviews/`](../reviews/) and are cited by the
 milestone log; specs live in [`../specs/`](../specs/).

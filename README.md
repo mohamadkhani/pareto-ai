@@ -12,8 +12,8 @@ resource use, and stability — not feature breadth.
 
 ## Requirements
 
-- Rust 1.99+ (stable)
-- Node 24+ and npm
+- Rust 1.99+ (stable), `just`
+- Node 24+ and `pnpm`
 
 ## Run
 
@@ -33,7 +33,8 @@ Frontend (development):
 
 ```bash
 cd web
-npm start
+pnpm install
+pnpm start
 ```
 
 First run creates `data/gateway.db` (SQLite, WAL) and applies migrations.
@@ -41,16 +42,19 @@ First run creates `data/gateway.db` (SQLite, WAL) and applies migrations.
 ## Production build
 
 ```bash
-scripts/build.sh            # one binary: server/target/release/gateway
+just build             # one binary: server/target/release/gateway
+just build-api         # api-only binary (no embedded UI)
 ```
 
-The Angular build is embedded in the binary, so production is a single
-artifact. Size at the time of writing (release, `lto = "thin"`, `strip`):
+`just build` runs the Angular build first (pnpm) and embeds it in the binary,
+so production is a single artifact. The task runner is `just` (see
+`Justfile`); `just check` is the full quality gate and `just` lists every
+recipe. Size at the time of writing (release, `lto = "thin"`, `strip`):
 
 | Build | Command | Size |
 | --- | --- | --- |
-| with UI embedded | `scripts/build.sh` | 7.1 MB |
-| api-only | `scripts/build.sh --no-default-features` | 6.7 MB |
+| with UI embedded | `just build` | 7.1 MB |
+| api-only | `just build-api` | 6.7 MB |
 
 The UI costs about 455 KB; ship the single binary unless a target really
 cannot spare it.
@@ -67,22 +71,28 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | `GATEWAY_DATA_DIR` | `./data` | Database directory |
 | `GATEWAY_MASTER_KEY` | **required** | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). Startup fails without it. Generate: `openssl rand -base64 32 \| tr '+/' '-_'` |
 | `GATEWAY_TIMEZONE` | `UTC` | Timezone for budget periods |
+| `GATEWAY_MAX_BODY_BYTES` | `4194304` (4 MiB) | Largest `POST /v1/chat/completions` request body |
+| `GATEWAY_TIMEOUT_CONNECT_MS` | `10000` | Upstream TCP connect timeout |
+| `GATEWAY_TIMEOUT_FIRST_BYTE_MS` | `30000` | Budget from upstream request start to the first response byte |
+| `GATEWAY_TIMEOUT_IDLE_MS` | `60000` | Maximum gap between upstream body chunks |
+| `GATEWAY_TIMEOUT_TOTAL_MS` | `600000` | Total budget for one client request, failover attempts included |
 | `RUST_LOG` | `gateway=info` | Log filter |
 
 ## Checks
 
 ```bash
-cd server
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+just check     # Rust gate + api-only build + UI build/tests/formatting
+just verify    # just check, then the production binary
 ```
+
+`just` lists every recipe (`just build`, `just test`, `just dev`, `just dev-ui`,
+`just ui-test`, ...).
 
 ## Network note: crates.io
 
 From this network, `index.crates.io` and `static.crates.io` do not respond
 (re-checked 2026-11-16: still blocked), so cargo cannot fetch dependencies.
-`npm`, `git`, and GitHub are reachable. Two known workarounds:
+`pnpm`, `git`, and GitHub are reachable. Two known workarounds:
 
 1. Build offline from the local cargo cache (what we use now): every command
    that touches dependencies carries `--offline`, for example
@@ -91,8 +101,6 @@ From this network, `index.crates.io` and `static.crates.io` do not respond
 2. If you add a crate that is not in the cache, either reach crates.io from
    another network, or add a sparse mirror in `.cargo/config.toml` and drop
    `--offline`.
-
-`npm` works normally from this network (verified with `npm ping`).
 
 ## Status
 

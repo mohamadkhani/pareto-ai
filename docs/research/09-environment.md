@@ -33,6 +33,15 @@ Living notes about the build environment, dated. Instructions for agents are in
 - Angular CLI is not installed globally; `npx @angular/cli` works (Angular
   22.2.0 scaffolded `web/` on 2026-11-15).
 
+## 2026-11-16 — pnpm and just
+
+- `pnpm 10.27.0` and `just 1.59.0` are installed. Angular scaffolding writes
+  `packageManager: npm@...` into `web/package.json`; pnpm refuses to run until
+  it is changed to `pnpm@...` ("This project is configured to use npm").
+- pnpm 10 blocks dependency build scripts by default (`lmdb`,
+  `msgpackr-extract` prompt for `pnpm approve-builds`); the Angular build and
+  tests pass without approving any.
+
 ## 2026-11-15 — dependency availability in the cache
 
 Present: `axum 0.8.9`, `tokio 1.54.1`, `sqlx 0.8.6`, `utoipa 5.5.0`,

@@ -6,14 +6,18 @@
 //! route_not_found`, `405 method_not_allowed`) while every other path keeps
 //! the embedded UI fallback. `/v1/*` carries the same fallbacks: it is the
 //! OpenAI-compatible data plane (admin session until M4 API keys exist).
-//! Everything under `/api/` and `/v1/` goes through [`csrf_guard`]:
-//! state-changing methods must carry the session's CSRF token in
-//! `X-CSRF-Token`, except for login, which is mounted outside the guard
-//! because the caller has no session yet.
+//! Everything under `/api/` goes through [`csrf_guard`]: state-changing
+//! methods must carry the session's CSRF token in `X-CSRF-Token`, except for
+//! login, which is mounted outside the guard because the caller has no
+//! session yet. `/v1/*` is exempt from the guard: OpenAI-SDK clients never
+//! send `X-CSRF-Token`, and the data plane authenticates with the session
+//! (bearer tokens in M4), not with cookies a browser would attach
+//! automatically.
 
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod catalog;
+pub(crate) mod chat;
 pub(crate) mod health;
 pub(crate) mod openapi;
 pub(crate) mod providers;
@@ -123,12 +127,16 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .method_not_allowed_fallback(method_not_allowed)
 }
 
-/// The OpenAI-compatible data plane as it sees itself, under `/v1`. Only
-/// `GET /v1/models` exists in M2; `/v1/chat/completions` arrives in M3.
-fn v1_surface(state: AppState) -> Router<AppState> {
+/// The OpenAI-compatible data plane as it sees itself, under `/v1`: `GET
+/// /v1/models` (M2) and `POST /v1/chat/completions` (M3). No CSRF guard —
+/// see the module docs.
+fn v1_surface(_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/models", get(catalog::v1_models))
-        .route_layer(axum::middleware::from_fn_with_state(state, csrf_guard))
+        .route(
+            "/chat/completions",
+            axum::routing::post(chat::chat_completions),
+        )
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }

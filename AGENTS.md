@@ -1,7 +1,7 @@
 # Project conventions — pareto-ai
 
 Rules for every agent working in this repository. They are enforced by
-`scripts/check.sh`; a change that does not pass it is not done.
+`just check` (see `Justfile`); a change that does not pass it is not done.
 
 ## Environment (read this first)
 
@@ -11,11 +11,18 @@ Rules for every agent working in this repository. They are enforced by
   `ls ~/.cargo/registry/cache/*/ | grep -E "^<crate>-[0-9]"`. If it is not
   cached and you cannot reach crates.io, do not add it — pick a cached
   alternative and record the choice in `docs/research/`.
-- **npm works.** `npm run build` in `web/`.
+- **npm is not used here; JavaScript tooling is `pnpm`** (user preference —
+  see `docs/research/11-user-preferences.md`). `cd web && pnpm install`,
+  `pnpm run build`, `pnpm test`. If Angular scaffolding ever resets
+  `packageManager` to npm, change it back to `pnpm` in `web/package.json`.
 - Angular output lands in `web/dist/web/browser/` and is embedded into the
   binary (`server/src/static_files.rs`). The build fails without it; use
   `--no-default-features` for an api-only binary.
-- One binary: `scripts/build.sh`. All checks: `scripts/check.sh`.
+- **The task runner is `just`** (see `Justfile`): `just check` is the gate
+  (Rust fmt/clippy/tests + api-only build + UI build/tests/formatting),
+  `just build` produces the single production binary, `just build-api` the
+  api-only one, `just dev`/`just dev-ui` run the two halves. A change that
+  does not pass `just check` is not done.
 - **Never `git commit` or `git push`.** The supervising agent commits at
   milestone boundaries with Conventional Commits.
 

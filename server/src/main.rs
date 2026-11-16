@@ -3,6 +3,7 @@
 mod auth;
 mod bootstrap;
 mod catalog;
+mod chat;
 mod config;
 mod db;
 mod error;
@@ -17,6 +18,7 @@ mod secrets;
 mod static_files;
 #[cfg(test)]
 mod test_support;
+mod upstream;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,6 +39,8 @@ pub struct AppState {
     pub pool: sqlx::SqlitePool,
     /// Credential secret encryption (D16); built from `GATEWAY_MASTER_KEY`.
     pub secrets: Arc<SecretBox>,
+    /// Shared HTTP client for upstream calls (M3): pooled connections.
+    pub upstream: Arc<upstream::UpstreamClient>,
     pub started: Instant,
     /// In-memory login failure tracking, shared by all requests.
     pub login_limiter: Arc<auth::LoginRateLimiter>,
@@ -55,6 +59,10 @@ async fn main() -> Result<()> {
     // Credential encryption is required from milestone 2 on: without the key
     // no credential can be stored safely, so the gateway refuses to start.
     let secrets = Arc::new(require_master_key(config.master_key.as_ref())?);
+    let upstream = Arc::new(
+        upstream::UpstreamClient::new(config.timeout_connect)
+            .context("building the upstream HTTP client")?,
+    );
     if config.trusted_proxies.is_empty() && !config.listen.ip().is_loopback() {
         tracing::warn!(
             "GATEWAY_TRUSTED_PROXY is not set while listening on {} (non-loopback); \
@@ -74,6 +82,7 @@ async fn main() -> Result<()> {
         config,
         pool,
         secrets,
+        upstream,
         started: Instant::now(),
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),
     };
