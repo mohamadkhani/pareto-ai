@@ -1,7 +1,8 @@
 # Research log — fast, stable, cost-aware LLM gateway
 
 Started: 2026-11-15
-Status: discovery / design. No implementation code yet.
+Status: implementation complete for M0–M5 as of 2026-11-16 (`520b60c`..`d864224`);
+this log records the discovery and design behind it and keeps being appended to.
 Target: internal team gateway (admin-managed users, per-user budgets and API keys).
 
 ## Why this log exists
@@ -41,11 +42,9 @@ milestone log; specs live in [`../specs/`](../specs/).
 
 ## Environment note
 
-- The local clone is 3.4 GB and filled `/home` to 100%. `git checkout` did not
-  finish, so the working tree is partial. Source reads for this log were done
-  through the GitHub API against the same commit.
-- These notes live in `/tmp/opencode/research` until disk space is freed; they
-  should be moved into `docs/research/` in the project afterwards.
+- The local OmniRoute clone is 3.4 GB and filled `/home` to 100%. `git checkout`
+  did not finish, so the working tree is partial. Source reads for this log were
+  done through the GitHub API against the same commit.
 
 ## Sources used
 

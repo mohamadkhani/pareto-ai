@@ -1,6 +1,6 @@
 # Spec: M2 — providers, credentials, catalog, prices
 
-Status: ready for implementation (2026-11-16). Owner: chief-of-staff.
+Status: shipped 2026-11-16 — closed by `79dc371`. Owner: chief-of-staff.
 Conventions: [`AGENTS.md`](../../AGENTS.md). Decisions referenced: D2, D4, D8,
 D10, D11, D12, D13, D15, D16 in
 [05-decisions.md](../research/05-decisions.md).
@@ -129,7 +129,8 @@ Errors use the standard shape. `#[utoipa::path]` on every handler.
 
 ## Acceptance
 
-1. `scripts/check.sh` passes (fmt, clippy `-D warnings`, tests, api-only build).
+1. `just check` passes (fmt, clippy `-D warnings`, tests, api-only build;
+   written as `scripts/check.sh` at the time — the rename is D21).
 2. Secrets: the SQLite file contains no plaintext secret; GET responses never
    contain one; decrypt with a wrong key fails cleanly.
 3. Creating a provider + credential + model + offering + manual price works

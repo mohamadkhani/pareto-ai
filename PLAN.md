@@ -7,7 +7,7 @@ with fallback, per-user budgets, and admin oversight.
 
 - Stack: Rust (axum) backend, Angular frontend, SQLite (WAL) storage.
 - Research and decisions: [`docs/research/`](docs/research/README.md).
-- Decisions D1–D12 are locked; see [docs/research/05-decisions.md](docs/research/05-decisions.md).
+- Decisions D1–D27 are locked; see [docs/research/05-decisions.md](docs/research/05-decisions.md).
 - Budget enforcement is **hard stop** (decided 2026-11-15).
 - Execution: agent writes, human reviews each milestone.
 
@@ -15,17 +15,17 @@ with fallback, per-user budgets, and admin oversight.
 
 | Milestone | State | Date |
 | --- | --- | --- |
-| M0 repository skeleton | **Done** (fmt, clippy `-D warnings`, tests, `/health`, Angular build all pass) | 2026-11-15 |
-| M0.1 embedded UI + OpenAPI | **Done** (single binary serves the Angular build; `/openapi.json`; api-only feature measured at −455 KB) | 2026-11-16 |
-| M1 auth and audit | **Done** (backend + admin UI; two review rounds closed; 63 backend tests, 24 UI tests) | 2026-11-16 |
-| M2 providers, credentials, catalog | **Done** (backend + admin UI; security review + alignment pass closed; 129 backend tests, 81 UI tests) | 2026-11-16 |
-| M3 chat data plane | **Done** (deep review closed; 181 backend tests) | 2026-11-16 |
-| M4 users, keys, money | **Done** (backend + UI + alignment; 245 backend tests, 144 UI tests) | 2026-11-16 |
-| M5 routing | Backend **Done** (deep review closed; 314 backend tests) — UI in progress | 2026-11-16 |
+| M0 repository skeleton | **Done** (fmt, clippy `-D warnings`, tests, `/health`, Angular build all pass) — closed `520b60c` | 2026-11-15 |
+| M0.1 embedded UI + OpenAPI | **Done** (single binary serves the Angular build; `/openapi.json`) — closed `2b57725` (api-only feature measured −455 KB at that commit; superseded 2026-11-16 — see [README](README.md)) | 2026-11-16 |
+| M1 auth and audit | **Done** (backend + admin UI; two review rounds closed; 63 backend tests, 24 UI tests) — closed `a1f9c33` | 2026-11-16 |
+| M2 providers, credentials, catalog | **Done** (backend + admin UI; security review + alignment pass closed; 129 backend tests, 81 UI tests) — closed `79dc371` | 2026-11-16 |
+| M3 chat data plane | **Done** (deep review closed; 181 backend tests) — closed `9efd776`. Evidence is stub-based; live-provider verification and the 200-stream memory load test are pending (see the M3 acceptance block and [`docs/research/10-milestones.md`](docs/research/10-milestones.md)) | 2026-11-16 |
+| M4 users, keys, money | **Done** (backend + UI + alignment; 245 backend tests, 144 UI tests) — closed `b1e58f0` (backend `30f95ec`) | 2026-11-16 |
+| M5 routing | **Done** (backend deep review + UI alignment closed; 318 backend tests, 175 UI tests) — closed `d864224` (backend `03c0c3d`) | 2026-11-16 |
 
 Environment note: crates.io is unreachable from this network, so dependency
-commands run with `--offline` against the local cargo cache; `npm` works
-normally. Details in [`README.md`](README.md).
+commands run with `--offline` against the local cargo cache; `pnpm` works
+normally (it replaced npm per D21). Details in [`README.md`](README.md).
 
 ## Non-goals (v1)
 
@@ -77,7 +77,8 @@ Acceptance:
 
 - `cargo fmt --check && cargo clippy -- -D warnings && cargo test` pass.
 - `curl /health` returns 200 with `db: ok`.
-- `npm run build` produces `web/dist/`.
+- `pnpm run build` produces `web/dist/` (written as `npm run build` at the
+  time; the switch to pnpm is D21).
 - Startup creates `data/gateway.db` on first run.
 
 ## Milestone 1 — auth and audit (P0)
@@ -134,13 +135,24 @@ Tasks:
    error class); `request_logs` metadata-only by default.
 5. Deterministic single-candidate choice (no scoring yet).
 
-Acceptance:
+Acceptance (evidence status reconciled 2026-11-16; the running record is
+[`docs/research/10-milestones.md`](docs/research/10-milestones.md)):
 
-- Streaming works against a real provider and against a scripted fake upstream
-  that stalls, truncates, and returns 429/500.
+Proven by tests against a scripted fake upstream that stalls, truncates, and
+returns 429/500:
+
+- Streaming works end-to-end against the fake upstream.
 - A stalled stream is aborted at the configured timeout with a clean 504.
 - Disconnecting the client frees the upstream connection within one second.
-- Memory stays flat under 200 concurrent streams (test with a load script).
+
+Pending — not yet proven:
+
+- Streaming works against a real provider. Network-blocked in this environment
+  ([docs/research/09-environment.md](docs/research/09-environment.md));
+  tracked in `docs/research/10-milestones.md`.
+- Memory stays flat under 200 concurrent streams. A load script against the
+  stub upstream is in progress (2026-11-16); tracked in
+  `docs/research/10-milestones.md`.
 
 ## Milestone 4 — users, keys, money (P1)
 

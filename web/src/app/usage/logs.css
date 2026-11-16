@@ -29,7 +29,7 @@
   white-space: nowrap;
 }
 
-/* 402/429 rows are money events: the request never reached a provider. */
+/* 402/429/403 rows are money events: the request never reached a provider. */
 .logs-table tbody tr.money-event {
   background: #fff8ec;
 }

@@ -1,6 +1,7 @@
 # Spec: M5 — smart routing
 
-Status: draft (2026-11-16). Owner: chief-of-staff. Conventions:
+Status: shipped 2026-11-16 — closed by `d864224` (backend `03c0c3d`). Owner:
+chief-of-staff. Conventions:
 [`AGENTS.md`](../../AGENTS.md). Decisions: D4 (quality on models, price/speed
 on offerings), D5 (speed measured locally, quality imported), D6 (three
 strategies), scoring design in
@@ -30,9 +31,14 @@ categories (only generic quality for now).
    `telemetry_snapshots` for warm starts.
 2. **Combo models**: `combo_models(id, name, strategy, weights_json,
    members_json, enabled, created_at, updated_at)` where `strategy ∈
-   {'ordered','weighted','round_robin'}` and members are offerings/models with
+   {'ordered','weighted','round_robin'}` and members are offerings with
    optional per-member weight and ordering. A combo is addressable as a model
    id in `/v1/chat/completions`.
+   - Shipped deviations (2026-11-16, `03c0c3d`; recorded in `0007_routing.sql`
+     and `combos.rs`): members are **offerings only** (this spec allowed
+     offerings/models), and `combo_models` gained a `rr_cursor` column — the
+     persisted round-robin rotation cursor, advanced once per request that
+     actually sends.
 3. **Scoring** (weighted strategy): filter first (capability, context, grants,
    budget, breaker, enabled), then normalize price/speed/quality/reliability to
    `[0,1]` across the eligible pool, missing components get the neutral value
@@ -61,12 +67,15 @@ categories (only generic quality for now).
 
 ## Acceptance
 
-1. `scripts/check.sh` passes.
+1. `just check` passes (written as `scripts/check.sh` at the time; the rename
+   is D21).
 2. Same input → same ordering (property test over a fixed pool).
 3. Weight change flips the winner in a fixture test; presets match their
    documented intent.
 4. A breaker-open offering is excluded and the reason is visible in
    `decision_json`.
-5. Combo resolution works end-to-end through `/v1/chat/combos` or the model
-   id namespace `combo:<name>` (pick one, document it).
+5. Combo resolution works end-to-end through the model id namespace
+   **`combo:<name>`** — chosen 2026-11-16 (`03c0c3d`); `combos.rs` `NAMESPACE`.
+   Combos are advertised as `combo:<name>` entries in `GET /v1/models`
+   (discovery, not a hidden namespace).
 6. Benchmark import is idempotent and user overrides are never overwritten.

@@ -5,14 +5,17 @@
 //! paths and wrong methods get the uniform [`ApiError`] shape (`404
 //! route_not_found`, `405 method_not_allowed`) while every other path keeps
 //! the embedded UI fallback. `/v1/*` carries the same fallbacks: it is the
-//! OpenAI-compatible data plane (admin session until M4 API keys exist).
+//! OpenAI-compatible data plane (bearer API keys or an admin session).
 //! Everything under `/api/` goes through [`csrf_guard`]: state-changing
 //! methods must carry the session's CSRF token in `X-CSRF-Token`, except for
 //! login, which is mounted outside the guard because the caller has no
-//! session yet. `/v1/*` is exempt from the guard: OpenAI-SDK clients never
-//! send `X-CSRF-Token`, and the data plane authenticates with bearer API
-//! keys (or the admin session), not with cookies a browser would attach
-//! automatically. Everything except the rotation flow also goes through
+//! session yet. `/v1/*` is exempt from the guard because OpenAI-SDK clients
+//! never send `X-CSRF-Token`. Cookie-authenticated `/v1` calls are safe only
+//! while the `gateway_session` cookie stays `SameSite=Strict`
+//! ([`crate::auth::session_cookie`]): a cross-site request then never carries
+//! it. If that policy ever loosens to `SameSite=Lax`, the CSRF guard must be
+//! extended to cookie-authenticated `/v1` calls. Everything except the
+//! rotation flow also goes through
 //! [`rotation_guard`]: an account flagged `must_change_password` must change
 //! its password first (review finding 7).
 

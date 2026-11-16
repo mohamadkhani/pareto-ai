@@ -133,6 +133,30 @@ describe('Logs', () => {
     expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
   });
 
+  it('renders a 403 access_denied row with the same money/refusal emphasis as a 402 row', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, { status: 402, error_class: 'budget_exceeded', cost_usd: null }),
+          entry(1, { status: 403, error_class: 'access_denied', cost_usd: null }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const text = root.textContent ?? '';
+
+    expect(text).toContain('402 budget');
+    expect(text).toContain('403 access');
+    // Both refusals carry the row highlight and the labelled refusal badge.
+    expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
+    expect(root.querySelectorAll('tbody tr.money-event .badge.error').length).toBe(2);
+    expect(root.querySelector('.badge[title="Refused: access denied"]')?.textContent?.trim()).toBe(
+      '403 access',
+    );
+  });
+
   it('pages with the composite cursor and passes before_request_id', async () => {
     const tiedAt = '2026-01-01T00:00:00.000Z';
     const firstPage = Array.from({ length: 50 }, (_, i) => entry(i));

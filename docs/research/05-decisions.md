@@ -89,13 +89,19 @@ price per offering. A declarative "describe your price API" feature comes later.
 **Consequence:** unknown price is stored as `null` and scored as unknown, never
 as zero.
 
-### D11. Bodies retained for one day, later configurable
+### D11. Body capture policy — for a not-yet-implemented opt-in feature
 
-**Decision:** request/response bodies captured only when enabled, kept for 24h,
-stored as compressed files outside the database.
+**Status (2026-11-16, `d864224`): policy only, not implemented.** Body capture
+does not exist: `request_logs` is metadata-only (`0004_usage.sql` reserves
+`has_request_body` for correlation). This entry is deliberately kept: it is the
+retention decision that applies when the opt-in capture feature lands.
 
-**Consequence:** the database never holds megabyte blobs; retention becomes a
-setting later.
+**Decision (when capture lands):** request/response bodies are captured only
+when explicitly enabled, kept for 24h, stored as compressed files outside the
+database.
+
+**Consequence (when capture lands):** the database never holds megabyte blobs;
+retention becomes a setting later.
 
 ### D12. SQLite as system of record
 
@@ -127,10 +133,14 @@ handler keeps a `#[utoipa::path]` attribute in sync with the route table.
 **Decision:** the Angular build is embedded (`rust-embed`) and served by the
 gateway; a `--no-default-features` build produces an api-only binary.
 
-**Measured:** 7.1 MB with the UI, 6.7 MB without (−455 KB). The UI is cheap, so
-the single binary is the default artifact.
+**Measured (2026-11-16, `d864224`, release with `lto = "thin"`, `strip`):**
+18.85 MiB (19,765,096 B) with the UI, 18.15 MiB (19,033,768 B) without — the
+embedded UI costs 714 KiB. The UI is cheap, so the single binary is the default
+artifact. Superseded: the first measurement here (7.1 MB / 6.7 MB / −455 KB)
+was true 2026-11-16 at `2b57725` (M0.1); the M1–M5 dependencies grew the binary
+about 3x, not the UI.
 
-**Consequence:** `scripts/build.sh` builds the UI first, then the binary. The
+**Consequence:** `just build` builds the UI first (pnpm), then the binary. The
 build fails with a clear message when the Angular output is missing.
 
 ### D15. PBKDF2-HMAC-SHA256 for passwords until Argon2 is available
@@ -211,8 +221,10 @@ becomes an explicit `400` (finding B3).
 npm and was corrected. Also recorded in
 [11-user-preferences.md](11-user-preferences.md).
 
-**Consequence:** `scripts/check.sh`/`scripts/build.sh` are thin `exec just ...`
-wrappers kept only for in-flight callers and will be removed.
+**Consequence:** `scripts/check.sh`/`scripts/build.sh` were kept briefly as
+thin `exec just ...` wrappers for in-flight callers and **removed on
+2026-11-16** once none remained (the milestone log's historical entries still
+name the old path).
 
 ### D22. Subset-aware pricing for OpenAI-style usage
 

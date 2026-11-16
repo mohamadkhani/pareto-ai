@@ -49,15 +49,18 @@ just build-api         # api-only binary (no embedded UI)
 `just build` runs the Angular build first (pnpm) and embeds it in the binary,
 so production is a single artifact. The task runner is `just` (see
 `Justfile`); `just check` is the full quality gate and `just` lists every
-recipe. Size at the time of writing (release, `lto = "thin"`, `strip`):
+recipe. Size (release, `lto = "thin"`, `strip`; measured 2026-11-16 at
+`d864224`):
 
 | Build | Command | Size |
 | --- | --- | --- |
-| with UI embedded | `just build` | 7.1 MB |
-| api-only | `just build-api` | 6.7 MB |
+| with UI embedded | `just build` | 18.85 MiB (19,765,096 B) |
+| api-only | `just build-api` | 18.15 MiB (19,033,768 B) |
 
-The UI costs about 455 KB; ship the single binary unless a target really
-cannot spare it.
+The embedded UI adds 714 KiB (731,328 B); ship the single binary unless a
+target really cannot spare it. Superseded: the earlier numbers here (7.1 MB /
+6.7 MB / −455 KB) were true 2026-11-16 at `2b57725` (M0.1), before the M1–M5
+dependencies grew the binary about 3x.
 
 Serving rules: hashed assets (`main-<hash>.js`) are served with
 `Cache-Control: immutable`, `index.html` with `no-store`, and any path without a
@@ -71,6 +74,8 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | `GATEWAY_DATA_DIR` | `./data` | Database directory |
 | `GATEWAY_MASTER_KEY` | **required** | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). Startup fails without it. Generate: `openssl rand -base64 32 \| tr '+/' '-_'` |
 | `GATEWAY_TIMEZONE` | `UTC` | IANA timezone (e.g. `Asia/Tehran`) for budget-period boundaries and usage-rollup days. Startup fails on an unknown zone. |
+| `GATEWAY_INSECURE_COOKIES` | unset | Set to `1` to send session cookies without `Secure`, so the gateway works over plain HTTP during development |
+| `GATEWAY_TRUSTED_PROXY` | unset | Comma-separated IPv4/IPv6 CIDRs of reverse proxies allowed to vouch for the client address via `X-Forwarded-For`/`X-Real-IP` (e.g. `10.0.0.0/8,127.0.0.1/32`). This decides the client IP used for login rate limiting and audit rows: when unset, the peer address is the client and those headers are ignored ([review finding 4](docs/reviews/2026-11-16-m1-backend.md)). Startup warns when listening on a non-loopback address without it. |
 | `GATEWAY_MAX_BODY_BYTES` | `4194304` (4 MiB) | Largest `POST /v1/chat/completions` request body |
 | `GATEWAY_TIMEOUT_CONNECT_MS` | `10000` | Upstream TCP connect timeout |
 | `GATEWAY_TIMEOUT_FIRST_BYTE_MS` | `30000` | Budget from upstream request start to the first response byte |
@@ -107,6 +112,10 @@ From this network, `index.crates.io` and `static.crates.io` do not respond
 
 ## Status
 
-Milestones 0 and 0.1 of [`PLAN.md`](PLAN.md) are implemented: server skeleton,
-config from environment, SQLite with migrations, `/health`, `/openapi.json`, the
-Angular scaffold, and the single-binary production build that embeds the UI.
+Milestones M0–M5 of [`PLAN.md`](PLAN.md) are implemented and committed (10
+commits, `520b60c`..`d864224`, as of 2026-11-16): auth and audit, provider
+catalog with encrypted credentials and OpenRouter sync, the streaming
+`/v1/chat/completions` data plane with budgets and usage accounting, and
+weighted/combo routing — each with its admin UI. The per-milestone status
+table with closing commits and the open follow-ups live in the
+[`PLAN.md` status table](PLAN.md#status).

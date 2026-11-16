@@ -120,9 +120,12 @@ export class Logs {
     return user === '' ? { limit: PAGE_SIZE } : { limit: PAGE_SIZE, user };
   }
 
-  /** 402 and 429 are money events: the request was refused before forwarding. */
+  /**
+   * 402 budget, 429 token cap, and 403 access refusals are money events: the
+   * request was refused before anything was sent upstream (see `usage.types.ts`).
+   */
   protected isMoneyEvent(entry: RequestLogEntry): boolean {
-    return entry.status === 402 || entry.status === 429;
+    return entry.status === 402 || entry.status === 403 || entry.status === 429;
   }
 
   /** Opens/closes the "why this model" panel of one entry. */

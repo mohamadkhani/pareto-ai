@@ -1,6 +1,7 @@
 # Spec: M4 — users, API keys, access, money
 
-Status: draft (2026-11-16). Owner: chief-of-staff. Conventions:
+Status: shipped 2026-11-16 — closed by `b1e58f0` (backend `30f95ec`). Owner:
+chief-of-staff. Conventions:
 [`AGENTS.md`](../../AGENTS.md). Decisions: D7 (reservations), D8 (manual
 credential balance, advisory in v1), D9 (org limits on top of balance),
 D12 (SQLite), review finding 7 (forced password rotation lands here).
@@ -94,7 +95,12 @@ usage_daily(day TEXT NOT NULL, user_id TEXT NOT NULL, offering_id TEXT NOT NULL,
   reject with `402 budget_exceeded` or `429 token_cap_exceeded` when
   `used + open reservations + estimate > limit`. On completion settle:
   `used_usd += actual`, delete/close the reservation. A background task
-  releases reservations older than 10 minutes (`status='released'`).
+  releases reservations older than the reservation TTL (`status='released'`).
+  - Shipped deviation (2026-11-16, `30f95ec`; review blocker B1): the TTL is
+    **derived strictly above `GATEWAY_TIMEOUT_TOTAL_MS`**, not the fixed
+    10 minutes this spec first proposed — a fixed 10-minute TTL could release
+    a still-running request (default total timeout is 600 s) and lose its
+    actuals.
 - Periods: `reset_at` computed in `GATEWAY_TIMEZONE` (day/week/month; week
   starts Monday); a request settles into the period it started in. `total`
   never resets.
@@ -127,7 +133,8 @@ usage_daily(day TEXT NOT NULL, user_id TEXT NOT NULL, offering_id TEXT NOT NULL,
 
 ## Acceptance
 
-1. `scripts/check.sh` passes.
+1. `just check` passes (written as `scripts/check.sh` at the time; the rename
+   is D21).
 2. Documented `curl` sequence: create user → key → grant → request → budget
    exhausted → `402` → report shows the spend.
 3. Budget race test proves no overspend; reconciler test proves no lockout.

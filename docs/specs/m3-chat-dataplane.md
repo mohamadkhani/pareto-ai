@@ -1,6 +1,7 @@
 # Spec: M3 — chat data plane
 
-Status: draft (2026-11-16). Owner: chief-of-staff. Conventions:
+Status: shipped 2026-11-16 — closed by `9efd776`. Owner: chief-of-staff.
+Conventions:
 [`AGENTS.md`](../../AGENTS.md). Decisions: D3 (OpenAI-compatible only), D11
 (bodies retained 1 day, metadata only by default), D12 (SQLite), error taxonomy
 in [04-architecture.md](../research/04-architecture.md) §9.
@@ -127,7 +128,8 @@ a documented follow-up.
 
 ## Acceptance
 
-1. `scripts/check.sh` passes.
+1. `just check` passes (written as `scripts/check.sh` at the time; the rename
+   is D21).
 2. A `curl` sequence (documented in the report) streams a completion from the
    stub end-to-end, and `usage_events`/`request_logs` rows are written for it.
 3. Failover happens only before the first byte; after it, the client sees a

@@ -75,6 +75,15 @@ check: fmt-check lint test build-api ui-check
 # UI gate: build + tests + formatting
 ui-check: ui-build ui-test ui-fmt
 
+# M3 acceptance: memory stays flat under 200 concurrent streaming requests.
+# Runs the ignored in-process load test (server/src/load_test.rs) against the
+# stub upstream: two waves of 200 streams, sampling /proc/self RSS and fds
+# before/during/after and asserting bounded growth and no fd leaks. Linux
+# only. Runtime ~10 s on this machine (two ~4 s waves; the debug test binary
+# is reused from `just test`, a cold compile adds a couple of minutes).
+load-test:
+    cd server && cargo test --offline load_test -- --ignored --test-threads=1 --nocapture
+
 # what a release would run: the full gate, then the production binary
 verify: check build
 

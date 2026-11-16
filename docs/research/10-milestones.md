@@ -47,13 +47,38 @@ Claims here are dated; code facts cite commits.
 | 2026-11-16 | **M5 backend closed and committed** | chief-of-staff | `03c0c3d feat(routing): weighted scoring, combos, telemetry and circuit breaker` (verified `just check` + D24-D27 markers myself first) |
 | 2026-11-16 | M5 UI (combos, decision view, benchmarks, overrides) | sub-agent `ses_e1c0682a3ffeiTZsf7SIt56FN4` | done: 171 UI tests (27 new), build + prettier green. Combos page with weights editor (D24 contract), "Why this model" decision panel (imputed/shrunk badges, unclamped total), benchmarks import + override editor. 6 assumptions; two read endpoints (`GET /api/benchmarks`, `GET /api/quality-overrides`) missing in backend (UI degrades gracefully) |
 | 2026-11-16 | M5 alignment pass (UI ↔ live API) | sub-agent `ses_e1bed85edffexVjVZu46etvV0m` | done: 4 of 6 assumptions verified; `decision_json` real-vs-typed exact (incl. negative and >1 totals). 2 backend findings (missing `GET /api/benchmarks` and `GET /api/quality-overrides` list endpoints). UI: real-record rendering tests + `invalid_request` code alignment; 175 UI tests green |
-| 2026-11-16 | close M5 alignment findings (two list endpoints) | sub-agent `ses_e1bd7701dffeMKObR5nQZ2AczR` | running |
+| 2026-11-16 | close M5 alignment findings (two list endpoints) | sub-agent `ses_e1bd7701dffeMKObR5nQZ2AczR` | done: 318 backend tests (4 new), `just check` green. `GET /api/benchmarks` + `GET /api/quality-overrides` (newest-first, `model_name` via LEFT JOIN, audited reads, fail-closed) |
+| 2026-11-16 | **M5 closed and committed** | chief-of-staff | `d864224 feat(routing-ui): combos, decision view, benchmarks and quality overrides` (verified `just check`: 318 backend + 175 UI) |
+| 2026-11-16 | holistic review (whole project, fresh eyes) | sub-agent `ses_e1bc86206ffe3l77GV81u5E5WL` | verdict **ship with follow-ups**: no correctness/security defects. Verified clean end-to-end: money path (exactly-once settlement, D22 pricing, counter partition), authz uniformity, audit coverage, secret redaction, utoipa coverage of all 61 routes, migration chain. Findings: 1 major (M3 acceptance claims unproven: real-provider + 200-stream load), 10 minors (doc drift: README status, 3x-stale size claims, PLAN D1-D12/npm notes, 0004 edited post-commit, web/README fossil, D11 relabel), 5 nits |
+| 2026-11-16 | docs reconciliation + code close-out (load test, job supervision, wrappers) | sub-agents `ses_e1bb856daffeSMfbFy4ZQAQQyi` (docs) + `ses_e1bb856daffdakG9OO2DUaKpXZ` (code) | docs half done (next row); code half (load test, job supervision, wrappers) running |
+| 2026-11-16 | docs reconciliation (holistic review doc findings 1-10) | sub-agent `ses_e1bb856daffeSMfbFy4ZQAQQyi` | done: README/PLAN/`web/README`/research-README synced to `d864224` (README status → PLAN pointer, closing commits in the PLAN table, env table +`GATEWAY_INSECURE_COOKIES`/`GATEWAY_TRUSTED_PROXY`); sizes re-measured 2026-11-16 at `d864224` (18.85/18.15 MiB, UI −714 KiB; the M0.1 numbers marked superseded); M3 acceptance split into proven vs pending; `0004` post-commit edit + recreate rule recorded; D11 relabeled policy-for-future; all four specs flipped to shipped with closing commits, m5 acceptance #5 = `combo:<name>`, offerings-only members + `rr_cursor` deviation recorded |
+| 2026-11-16 | housekeeping | chief-of-staff | killed two leftover `ng serve` processes (06:53/07:08); dev ports free |
+
+**All milestones M0-M5 are implemented and committed** (10 commits,
+`520b60c`..`d864224`). Remaining: code close-out (load test, wrappers), the two
+M3 evidence items below, final wrap-up.
+
+**M3 pending evidence** (2026-11-16, docs reconciliation): two M3 acceptance
+claims are not yet proven — (a) streaming against a **real provider**
+(network-blocked here, the same environment limit as the fixture-based
+OpenRouter sync) and (b) **flat memory under 200 concurrent streams** (a load
+script against the stub upstream is being written in the code close-out run;
+it proves this item against the stub, not a live provider). PLAN's M3
+acceptance block marks both as pending; close this entry when they land.
+
+**Migration history** (2026-11-16): `0004_usage.sql` was edited after it was
+committed — it landed in `7000c88` and was modified again in `9efd776`
+(18 insertions, 6 deletions) — the one violation of the forward-only migration
+rule (found by the holistic review, 2026-11-16). Dev DBs created before
+`9efd776` carry the pre-edit schema and must be recreated; this extends the M4
+follow-up below beyond the 0005 rotation flag.
 
 **M4 follow-ups** (from the implementer's report, to keep): token caps are
 pre-checked only for the reservation's model (a failover to another model can
 overspend a cap by one request); `scopes_json` stored but unenforced (spec
 leaves scopes undefined); no admin "reset usage" action; pre-existing dev DBs
-need recreating for the rotation flag; `last_used_at`/`last_seen_at` are
+need recreating (the 0005 rotation flag and the post-commit `0004` edit — see
+"Migration history" above); `last_used_at`/`last_seen_at` are
 per-request writes (batch if profiling shows it).
 
 **M3 contract notes for future UI work** (from the M3 report): mid-stream

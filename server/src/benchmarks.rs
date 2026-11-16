@@ -318,7 +318,8 @@ pub async fn set_override(
     Ok(())
 }
 
-/// Removes a model's quality override (audited). Returns whether one existed.
+/// Removes a model's quality override, audited only when one existed (a
+/// no-op clear records nothing). Returns whether one existed.
 /// Failure mode: [`BenchmarkError`].
 pub async fn clear_override(
     pool: &SqlitePool,
@@ -330,17 +331,20 @@ pub async fn clear_override(
         .bind(model_id)
         .execute(&mut *tx)
         .await?;
-    catalog::audit(
-        &mut tx,
-        actor,
-        "quality.override_clear",
-        "model",
-        model_id,
-        &serde_json::json!({}),
-    )
-    .await?;
+    let cleared = result.rows_affected() > 0;
+    if cleared {
+        catalog::audit(
+            &mut tx,
+            actor,
+            "quality.override_clear",
+            "model",
+            model_id,
+            &serde_json::json!({}),
+        )
+        .await?;
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    Ok(cleared)
 }
 
 /// One imported benchmark score joined with its model's name, as listed by
@@ -554,6 +558,39 @@ mod tests {
             user_id: uid,
             ip: "127.0.0.1",
         }
+    }
+
+    /// `quality.override_clear` audit rows written so far.
+    async fn clear_audits(s: &Seeded) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'quality.override_clear'")
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("audit count")
+    }
+
+    #[tokio::test]
+    async fn clearing_without_an_override_is_not_audited() {
+        let s = seeded().await;
+        let claude = &s.models["claude-sonnet-4.5"];
+
+        // Nothing existed: the clear is a no-op and writes no audit row.
+        assert!(
+            !clear_override(&s.app.state.pool, &actor(&s.uid), claude)
+                .await
+                .expect("clear")
+        );
+        assert_eq!(clear_audits(&s).await, 0, "a no-op clear is not audited");
+
+        // With an override, the clear is audited exactly once.
+        set_override(&s.app.state.pool, &actor(&s.uid), claude, 1450.0)
+            .await
+            .expect("override");
+        assert!(
+            clear_override(&s.app.state.pool, &actor(&s.uid), claude)
+                .await
+                .expect("clear")
+        );
+        assert_eq!(clear_audits(&s).await, 1, "a real clear is audited");
     }
 
     #[test]

@@ -13,6 +13,8 @@ mod config;
 mod db;
 mod error;
 mod ip;
+#[cfg(test)]
+mod load_test;
 mod money;
 mod openapi;
 mod password;
@@ -25,6 +27,7 @@ mod routing;
 mod secrets;
 #[cfg(feature = "embedded-ui")]
 mod static_files;
+mod supervisor;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
@@ -140,13 +143,31 @@ async fn main() -> Result<()> {
     // settlement updates. M5 adds the telemetry cache refresh (derived from
     // `telemetry_attempts`, the per-attempt samples the settle transaction
     // writes — decision D26).
-    money::spawn_reconciler(state.pool.clone(), state.config.timeout_total);
-    reports::spawn_rollup_job(state.pool.clone(), state.config.tz);
-    telemetry::spawn_telemetry_job(
-        state.pool.clone(),
-        state.telemetry.clone(),
-        state.config.telemetry_refresh,
-    );
+    //
+    // Supervised (review finding 12): each job is an infinite loop, so a task
+    // that terminates has panicked or hit a bug. `supervisor::supervise` keeps
+    // the `JoinHandle`, logs `error!` when the task terminates, and restarts
+    // the job with exponential backoff (1 s doubling to 60 s, reset after a
+    // healthy minute); the gateway keeps serving while the job is down. The
+    // handles live for the lifetime of the process.
+    let _background: [tokio::task::JoinHandle<()>; 3] = [
+        supervisor::supervise("reservation reconciler", {
+            let pool = state.pool.clone();
+            let timeout = state.config.timeout_total;
+            move || money::spawn_reconciler(pool.clone(), timeout)
+        }),
+        supervisor::supervise("usage rollup", {
+            let pool = state.pool.clone();
+            let tz = state.config.tz;
+            move || reports::spawn_rollup_job(pool.clone(), tz)
+        }),
+        supervisor::supervise("telemetry refresh", {
+            let pool = state.pool.clone();
+            let store = state.telemetry.clone();
+            let interval = state.config.telemetry_refresh;
+            move || telemetry::spawn_telemetry_job(pool.clone(), store.clone(), interval)
+        }),
+    ];
 
     let app = request_id::stack(
         Router::new()

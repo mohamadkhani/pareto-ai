@@ -407,7 +407,7 @@ pub async fn override_price(
 /// overrides win) and prices in USD per 1M tokens. Unknown price components
 /// are null — never 0. Enabled combos are appended as `combo:<name>` entries
 /// (review m4 — discoverable), with null limits and price (they vary per
-/// member). Requires an admin session until M4 API keys exist.
+/// member). Auth: an API key (any account) or an admin session.
 #[utoipa::path(
     get,
     path = "/v1/models",
@@ -415,7 +415,7 @@ pub async fn override_price(
     responses(
         (status = 200, description = "enabled offerings", body = V1ModelList),
         (status = 401, description = "not authenticated", body = ErrorBody),
-        (status = 403, description = "not an admin", body = ErrorBody)
+        (status = 403, description = "cookie session is not an admin (API-key callers pass)", body = ErrorBody)
     )
 )]
 pub async fn v1_models(
