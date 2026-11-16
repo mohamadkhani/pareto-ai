@@ -1,0 +1,328 @@
+<div class="offerings">
+  <header class="page-head">
+    <h1>Offerings</h1>
+    <p class="hint">
+      Which provider serves which model, under which upstream id — with per-offering prices. A
+      manual price edit stands out from synced values and is never overwritten by sync.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">Offerings are restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+    @if (notice()) {
+      <div class="banner success" role="status">{{ notice() }}</div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openCreate()">New offering</button>
+      <span class="spacer"></span>
+      <span class="field inline">
+        <label for="filter-provider">Provider</label>
+        <select
+          id="filter-provider"
+          [value]="filterProviderId()"
+          (change)="setFilterProvider($event)"
+        >
+          <option value="">All providers</option>
+          @for (provider of providers(); track provider.id) {
+            <option [value]="provider.id">{{ provider.name }}</option>
+          }
+        </select>
+      </span>
+      <span class="field inline">
+        <label for="filter-model">Model</label>
+        <select id="filter-model" [value]="filterModelId()" (change)="setFilterModel($event)">
+          <option value="">All models</option>
+          @for (model of models(); track model.id) {
+            <option [value]="model.id">{{ model.canonical_name }}</option>
+          }
+        </select>
+      </span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (formState(); as state) {
+      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
+        <h2>
+          {{ state.mode === 'create' ? 'New offering' : 'Edit offering' }}
+        </h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="offering-provider">Provider</label>
+            <select id="offering-provider" formControlName="provider_id">
+              @for (provider of providers(); track provider.id) {
+                <option [value]="provider.id">{{ provider.name }}</option>
+              }
+            </select>
+            @if (showError('provider_id')) {
+              <p class="field-error" role="alert">{{ fieldError('provider_id') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="offering-model">Model</label>
+            <select id="offering-model" formControlName="model_id">
+              @for (model of models(); track model.id) {
+                <option [value]="model.id">{{ model.canonical_name }}</option>
+              }
+            </select>
+            @if (showError('model_id')) {
+              <p class="field-error" role="alert">{{ fieldError('model_id') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="offering-upstream">Upstream model id</label>
+            <input
+              id="offering-upstream"
+              type="text"
+              formControlName="upstream_model_id"
+              placeholder="openai/gpt-5"
+            />
+            @if (showError('upstream_model_id')) {
+              <p class="field-error" role="alert">{{ fieldError('upstream_model_id') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="offering-context">Context override</label>
+            <input
+              id="offering-context"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="context_override"
+              placeholder="use the model's context length"
+            />
+            @if (showError('context_override')) {
+              <p class="field-error" role="alert">{{ fieldError('context_override') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="offering-max-output">Max-output override</label>
+            <input
+              id="offering-max-output"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="max_output_override"
+              placeholder="use the model's limit"
+            />
+            @if (showError('max_output_override')) {
+              <p class="field-error" role="alert">{{ fieldError('max_output_override') }}</p>
+            }
+          </div>
+          <div class="checkbox-field">
+            <input id="offering-enabled" type="checkbox" formControlName="enabled" />
+            <label for="offering-enabled">Enabled</label>
+          </div>
+          <div class="field full">
+            <label>Custom headers</label>
+            <app-headers-editor [rows]="headerRows()" (rowsChange)="onHeaderRows($event)" />
+            <p class="note">
+              Merged over the credential's headers at request time (offering wins).
+            </p>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Save' }}
+          </button>
+          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (priceFor(); as offering) {
+      <form class="card form-card" [formGroup]="priceForm" (ngSubmit)="savePrice()" novalidate>
+        <h2>
+          Price — {{ providerName(offering.provider_id) }} / {{ modelName(offering.model_id) }}
+          <span class="badge {{ priceSourceClass(offering) }}">
+            {{ priceOf(offering)?.source ?? 'none' }}
+          </span>
+          <span class="fetched" [attr.title]="formatTime(priceOf(offering)?.fetched_at ?? null)">
+            fetched {{ formatAge(priceOf(offering)?.fetched_at ?? null) }}
+          </span>
+        </h2>
+        <p class="note">
+          Blank fields stay unknown (never 0). Saving marks this price as manual — sync will no
+          longer overwrite it.
+        </p>
+        <div class="form-grid">
+          <div class="field">
+            <label for="price-input">Input per 1M (USD)</label>
+            <input
+              id="price-input"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="input_per_m"
+              placeholder="unknown"
+            />
+            @if (showPriceError('input_per_m')) {
+              <p class="field-error" role="alert">{{ priceError('input_per_m') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="price-output">Output per 1M (USD)</label>
+            <input
+              id="price-output"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="output_per_m"
+              placeholder="unknown"
+            />
+            @if (showPriceError('output_per_m')) {
+              <p class="field-error" role="alert">{{ priceError('output_per_m') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="price-cache-read">Cache read per 1M (USD)</label>
+            <input
+              id="price-cache-read"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="cache_read_per_m"
+              placeholder="unknown"
+            />
+            @if (showPriceError('cache_read_per_m')) {
+              <p class="field-error" role="alert">{{ priceError('cache_read_per_m') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="price-cache-write">Cache write per 1M (USD)</label>
+            <input
+              id="price-cache-write"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="cache_write_per_m"
+              placeholder="unknown"
+            />
+            @if (showPriceError('cache_write_per_m')) {
+              <p class="field-error" role="alert">{{ priceError('cache_write_per_m') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="price-reasoning">Reasoning per 1M (USD)</label>
+            <input
+              id="price-reasoning"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="reasoning_per_m"
+              placeholder="unknown"
+            />
+            @if (showPriceError('reasoning_per_m')) {
+              <p class="field-error" role="alert">{{ priceError('reasoning_per_m') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="price-fee">Request fee (USD)</label>
+            <input
+              id="price-fee"
+              type="number"
+              min="0"
+              step="any"
+              formControlName="request_fee"
+              placeholder="unknown"
+            />
+            @if (showPriceError('request_fee')) {
+              <p class="field-error" role="alert">{{ priceError('request_fee') }}</p>
+            }
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="savingPrice()">
+            {{ savingPrice() ? 'Saving…' : 'Save price' }}
+          </button>
+          <button type="button" class="btn" (click)="closePrice()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && offerings().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (offerings().length === 0) {
+      <div class="card">
+        <h2>No offerings yet</h2>
+        <p class="empty-note">
+          Create a model and a provider first, then connect them with an offering.
+        </p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Provider</th>
+            <th scope="col">Model</th>
+            <th scope="col">Upstream id</th>
+            <th scope="col">Context / max out</th>
+            <th scope="col">Enabled</th>
+            <th scope="col">Price</th>
+            <th scope="col">Source</th>
+            <th scope="col">Fetched</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (offering of filtered(); track offering.id) {
+            <tr [class.price-manual]="priceSourceClass(offering) === 'manual'">
+              <td>{{ providerName(offering.provider_id) }}</td>
+              <td>
+                <code>{{ modelName(offering.model_id) }}</code>
+              </td>
+              <td>
+                <code>{{ offering.upstream_model_id }}</code>
+              </td>
+              <td>
+                {{ offering.context_override ?? '—' }} / {{ offering.max_output_override ?? '—' }}
+              </td>
+              <td>
+                <span class="badge {{ offering.enabled ? 'ok' : 'warn' }}">
+                  {{ offering.enabled ? 'enabled' : 'disabled' }}
+                </span>
+              </td>
+              <td>{{ priceSummary(offering) }}</td>
+              <td>
+                <span class="badge {{ priceSourceClass(offering) }}">
+                  {{ priceOf(offering)?.source ?? 'none' }}
+                </span>
+              </td>
+              <td [attr.title]="formatTime(priceOf(offering)?.fetched_at ?? null)">
+                {{ formatAge(priceOf(offering)?.fetched_at ?? null) }}
+              </td>
+              <td class="actions">
+                <button type="button" class="btn" (click)="openPrice(offering)">Price</button>
+                <button type="button" class="btn" (click)="openEdit(offering)">Edit</button>
+                <button
+                  type="button"
+                  class="btn"
+                  (click)="toggleEnabled(offering)"
+                  [disabled]="togglingId() !== null"
+                >
+                  {{ offering.enabled ? 'Disable' : 'Enable' }}
+                </button>
+                <app-delete-confirm
+                  [pending]="deletingId() === offering.id"
+                  (confirmed)="deleteOffering(offering)"
+                />
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>

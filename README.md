@@ -21,9 +21,13 @@ Backend:
 
 ```bash
 cd server
+GATEWAY_MASTER_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 GATEWAY_DATA_DIR=./data GATEWAY_LISTEN=127.0.0.1:8081 cargo run
 curl http://127.0.0.1:8081/health
 ```
+
+`GATEWAY_MASTER_KEY` is required: it encrypts provider credentials at rest
+(decision D16), and startup fails without it.
 
 Frontend (development):
 
@@ -61,7 +65,7 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | --- | --- | --- |
 | `GATEWAY_LISTEN` | `127.0.0.1:8081` | Bind address |
 | `GATEWAY_DATA_DIR` | `./data` | Database directory |
-| `GATEWAY_MASTER_KEY` | unset | 32-byte key for credential encryption (milestone 2) |
+| `GATEWAY_MASTER_KEY` | **required** | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). Startup fails without it. Generate: `openssl rand -base64 32 \| tr '+/' '-_'` |
 | `GATEWAY_TIMEZONE` | `UTC` | Timezone for budget periods |
 | `RUST_LOG` | `gateway=info` | Log filter |
 

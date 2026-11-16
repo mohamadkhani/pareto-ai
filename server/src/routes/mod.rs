@@ -4,15 +4,20 @@
 //! is mounted at `/api` and carries its own fallbacks, so unknown `/api/*`
 //! paths and wrong methods get the uniform [`ApiError`] shape (`404
 //! route_not_found`, `405 method_not_allowed`) while every other path keeps
-//! the embedded UI fallback. Everything under `/api/` goes through
-//! [`csrf_guard`]: state-changing methods must carry the session's CSRF token
-//! in `X-CSRF-Token`, except for login, which is mounted outside the guard
+//! the embedded UI fallback. `/v1/*` carries the same fallbacks: it is the
+//! OpenAI-compatible data plane (admin session until M4 API keys exist).
+//! Everything under `/api/` and `/v1/` goes through [`csrf_guard`]:
+//! state-changing methods must carry the session's CSRF token in
+//! `X-CSRF-Token`, except for login, which is mounted outside the guard
 //! because the caller has no session yet.
 
 pub(crate) mod audit;
 pub(crate) mod auth;
+pub(crate) mod catalog;
 pub(crate) mod health;
 pub(crate) mod openapi;
+pub(crate) mod providers;
+pub(crate) mod sync;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -31,8 +36,8 @@ pub fn public_routes() -> Router<AppState> {
         .route("/openapi.json", get(openapi::get))
 }
 
-/// Auth and admin routes, mounted at `/api`. Mutations require a valid
-/// session and its CSRF token.
+/// Auth, admin, and data-plane routes, mounted at `/api` and `/v1`.
+/// Mutations require a valid session and its CSRF token.
 ///
 /// Unknown paths and wrong methods answer with the uniform error shape
 /// instead of leaking into the UI fallback or an empty framework response.
@@ -48,6 +53,7 @@ pub fn api_routes(state: AppState) -> Router<AppState> {
         // empty tail: the bare `/api/` is just as unknown and must not leak
         // into the UI fallback.
         .route("/api/", axum::routing::any(api_not_found))
+        .nest("/v1", v1_surface(state.clone()))
 }
 
 /// The API surface as it sees itself, under the `/api` prefix.
@@ -57,6 +63,54 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .route("/auth/logout", axum::routing::post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/audit", get(audit::list))
+        // Providers and credentials.
+        .route("/providers", get(providers::list).post(providers::create))
+        .route(
+            "/providers/{id}",
+            get(providers::get)
+                .patch(providers::update)
+                .delete(providers::delete),
+        )
+        .route(
+            "/providers/{id}/credentials",
+            get(providers::list_credentials).post(providers::create_credential),
+        )
+        .route(
+            "/credentials/{id}",
+            get(providers::get_credential)
+                .patch(providers::update_credential)
+                .delete(providers::delete_credential),
+        )
+        .route(
+            "/credentials/{id}/test",
+            axum::routing::post(providers::test_credential),
+        )
+        // Models, offerings, and prices.
+        .route(
+            "/models",
+            get(catalog::list_models).post(catalog::create_model),
+        )
+        .route(
+            "/models/{id}",
+            get(catalog::get_model)
+                .patch(catalog::update_model)
+                .delete(catalog::delete_model),
+        )
+        .route(
+            "/offerings",
+            get(catalog::list_offerings).post(catalog::create_offering),
+        )
+        .route(
+            "/offerings/{id}",
+            axum::routing::patch(catalog::update_offering).delete(catalog::delete_offering),
+        )
+        .route(
+            "/offerings/{id}/price",
+            get(catalog::get_price).put(catalog::override_price),
+        )
+        // OpenRouter sync.
+        .route("/sync/openrouter", axum::routing::post(sync::trigger))
+        .route("/sync/openrouter/status", get(sync::status))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             csrf_guard,
@@ -67,6 +121,29 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .merge(csrf_protected)
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
+}
+
+/// The OpenAI-compatible data plane as it sees itself, under `/v1`. Only
+/// `GET /v1/models` exists in M2; `/v1/chat/completions` arrives in M3.
+fn v1_surface(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/models", get(catalog::v1_models))
+        .route_layer(axum::middleware::from_fn_with_state(state, csrf_guard))
+        .fallback(api_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+}
+
+/// Uniform body extractor rejection: generic message, detail only logged.
+/// Shared by every JSON-accepting handler so the 400 shape cannot drift.
+pub(crate) fn bad_body<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    what: &str,
+    rid: &Option<String>,
+) -> Result<T, ApiError> {
+    result.map_err(|e| {
+        tracing::debug!(error = %e, what, "request body rejected");
+        ApiError::bad_request("invalid request body").with_request_id(rid.clone())
+    })
 }
 
 /// Uniform `404 route_not_found` for unknown `/api/*` paths.

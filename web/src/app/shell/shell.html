@@ -1,7 +1,13 @@
 <header class="topbar">
   <div class="brand">Pareto Gateway</div>
   <nav class="nav">
-    <a routerLink="/audit" routerLinkActive="active">Audit log</a>
+    @if (auth.isAdmin()) {
+      <a routerLink="/providers" routerLinkActive="active">Providers</a>
+      <a routerLink="/models" routerLinkActive="active">Models</a>
+      <a routerLink="/offerings" routerLinkActive="active">Offerings</a>
+      <a routerLink="/sync" routerLinkActive="active">Price sync</a>
+      <a routerLink="/audit" routerLinkActive="active">Audit log</a>
+    }
   </nav>
   @if (auth.user(); as user) {
     <div class="user">

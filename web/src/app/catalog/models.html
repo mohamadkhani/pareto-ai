@@ -1,0 +1,169 @@
+<div class="models">
+  <header class="page-head">
+    <h1>Models</h1>
+    <p class="hint">
+      Canonical catalog entries. Modalities and capabilities are comma-separated tags.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">The model catalog is restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openCreate()">New model</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (formState(); as state) {
+      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
+        <h2>{{ state.mode === 'create' ? 'New model' : 'Edit ' + state.model.canonical_name }}</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="model-name">Canonical name</label>
+            <input
+              id="model-name"
+              type="text"
+              formControlName="canonical_name"
+              placeholder="openai/gpt-5"
+            />
+            @if (showError('canonical_name')) {
+              <p class="field-error" role="alert">{{ fieldError('canonical_name') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="model-family">Family</label>
+            <input id="model-family" type="text" formControlName="family" placeholder="gpt-5" />
+          </div>
+          <div class="field">
+            <label for="model-input-modalities">Input modalities</label>
+            <input
+              id="model-input-modalities"
+              type="text"
+              formControlName="modalities_input"
+              placeholder="text, image"
+            />
+          </div>
+          <div class="field">
+            <label for="model-output-modalities">Output modalities</label>
+            <input
+              id="model-output-modalities"
+              type="text"
+              formControlName="modalities_output"
+              placeholder="text"
+            />
+          </div>
+          <div class="field">
+            <label for="model-context">Context length</label>
+            <input
+              id="model-context"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="context_length"
+              placeholder="unknown"
+            />
+            @if (showError('context_length')) {
+              <p class="field-error" role="alert">{{ fieldError('context_length') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="model-max-output">Max output tokens</label>
+            <input
+              id="model-max-output"
+              type="number"
+              min="1"
+              step="1"
+              formControlName="max_output_tokens"
+              placeholder="unknown"
+            />
+            @if (showError('max_output_tokens')) {
+              <p class="field-error" role="alert">{{ fieldError('max_output_tokens') }}</p>
+            }
+          </div>
+          <div class="field full">
+            <label for="model-capabilities">Capabilities</label>
+            <input
+              id="model-capabilities"
+              type="text"
+              formControlName="capabilities"
+              placeholder="tools, json_mode, reasoning"
+            />
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Save' }}
+          </button>
+          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && models().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (models().length === 0) {
+      <div class="card">
+        <h2>No models yet</h2>
+        <p class="empty-note">Add a model by hand or sync the OpenRouter catalog.</p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Canonical name</th>
+            <th scope="col">Family</th>
+            <th scope="col">Modalities</th>
+            <th scope="col">Context</th>
+            <th scope="col">Max output</th>
+            <th scope="col">Capabilities</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (model of models(); track model.id) {
+            <tr>
+              <td>
+                <code>{{ model.canonical_name }}</code>
+              </td>
+              <td>{{ model.family ?? '—' }}</td>
+              <td>
+                {{ model.modalities_input.join(', ') || '—' }}
+                →
+                {{ model.modalities_output.join(', ') || '—' }}
+              </td>
+              <td>{{ model.context_length ?? '—' }}</td>
+              <td>{{ model.max_output_tokens ?? '—' }}</td>
+              <td>
+                @if (capabilityDisplay(model.capabilities)) {
+                  <code>{{ capabilityDisplay(model.capabilities) }}</code>
+                } @else {
+                  —
+                }
+              </td>
+              <td class="actions">
+                <button type="button" class="btn" (click)="openEdit(model)">Edit</button>
+                <app-delete-confirm
+                  [pending]="deletingId() === model.id"
+                  (confirmed)="deleteModel(model)"
+                />
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+  }
+</div>

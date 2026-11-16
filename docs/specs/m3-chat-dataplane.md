@@ -70,6 +70,13 @@ request_logs(request_id TEXT PK, occurred_at TEXT NOT NULL, method TEXT, path
   `max_output_override`; input longer than the offering's context minus
   `max_tokens` → `400 context_length_exceeded` before any upstream call.
 
+## Auth and CSRF
+
+- `/v1/*` is bearer-authenticated (API key from M4; admin session until then)
+  and **exempt from the CSRF guard** — OpenAI-SDK clients never send
+  `X-CSRF-Token` (M2 review nit, 2026-11-16). The CSRF guard stays on
+  cookie-authenticated `/api/*` only.
+
 ## Streaming and failure rules
 
 - SSE passthrough: forward bytes as they arrive (`Body::from_stream`), never

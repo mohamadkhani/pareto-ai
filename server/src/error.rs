@@ -119,6 +119,20 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
 
+    /// 404: the addressed entity does not exist.
+    pub fn not_found(what: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{what} not found"),
+        )
+    }
+
+    /// 409: the request conflicts with existing state (e.g. a duplicate name).
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
+    }
+
     /// 429: login rate limit reached; `retry_after` is the lockout in seconds.
     /// 429 (not 423) is used because the condition is a temporary rate limit.
     pub fn locked(retry_after: u64) -> Self {

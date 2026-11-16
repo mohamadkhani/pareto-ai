@@ -1,14 +1,16 @@
 //! Runtime configuration, read once from the environment at startup.
 //!
 //! Secrets are accepted from the environment only; nothing secret is read from
-//! a committed file. Missing optional values fall back to safe defaults, and a
-//! missing master key is reported as a warning until milestone 2 needs it.
+//! a committed file. Missing optional values fall back to safe defaults;
+//! `GATEWAY_MASTER_KEY` is required (milestone 2 encrypts credentials with it)
+//! and startup fails when it is missing or malformed.
 
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::ip::IpCidr;
+use crate::secrets::{self, MasterKey};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -17,8 +19,8 @@ pub struct Config {
     /// Directory that holds the SQLite database and its WAL files.
     pub data_dir: PathBuf,
     /// AEAD key for credential encryption at rest, as 32 bytes.
-    /// Present from milestone 2; absent values disable encryption and are warned.
-    pub master_key: Option<String>,
+    /// Startup fails when this is absent (see [`crate::secrets`]).
+    pub master_key: Option<MasterKey>,
     /// IANA timezone used for budget periods (day/week/month boundaries).
     pub timezone: String,
     /// When true, session cookies are sent without `Secure` so the gateway can
@@ -41,6 +43,8 @@ pub enum ConfigError {
     TrustedProxy(String),
     #[error("cannot determine the current directory: {0}")]
     CurrentDir(#[from] std::io::Error),
+    #[error("{0}")]
+    MasterKey(#[from] secrets::SecretError),
 }
 
 impl Config {
@@ -65,9 +69,7 @@ impl Config {
         Ok(Self {
             listen,
             data_dir,
-            master_key: env::var("GATEWAY_MASTER_KEY")
-                .ok()
-                .filter(|v| !v.is_empty()),
+            master_key: parse_master_key(env::var("GATEWAY_MASTER_KEY").ok().as_deref())?,
             timezone: env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string()),
             insecure_cookies: env::var("GATEWAY_INSECURE_COOKIES").as_deref() == Ok("1"),
             trusted_proxies: match env::var("GATEWAY_TRUSTED_PROXY") {
@@ -94,6 +96,16 @@ fn parse_trusted_proxies(raw: &str) -> Result<Vec<IpCidr>, ConfigError> {
             IpCidr::parse(entry).map_err(|e| ConfigError::TrustedProxy(format!("{entry}: {e}")))
         })
         .collect()
+}
+
+/// Parses the `GATEWAY_MASTER_KEY` value: absent or empty is `None` (startup
+/// then fails with its own actionable message); a malformed value is a
+/// [`ConfigError::MasterKey`] telling the operator how to fix it.
+fn parse_master_key(raw: Option<&str>) -> Result<Option<MasterKey>, ConfigError> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value) => Ok(Some(MasterKey::parse(value)?)),
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +137,26 @@ mod tests {
     fn rejects_malformed_trusted_proxy_entries() {
         let err = parse_trusted_proxies("10.0.0.0/8,garbage").expect_err("must fail");
         assert!(err.to_string().contains("garbage"), "{err}");
+    }
+
+    #[test]
+    fn master_key_is_parsed_or_actionably_rejected() {
+        // 43 base64url characters decode to 32 zero bytes.
+        let parsed =
+            parse_master_key(Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).expect("parse");
+        assert_eq!(
+            format!("{:?}", parsed.expect("present key")),
+            "MasterKey(****)",
+            "the key never shows up in Debug output"
+        );
+
+        assert!(parse_master_key(None).expect("absent").is_none());
+        assert!(parse_master_key(Some("   ")).expect("blank").is_none());
+
+        let err = parse_master_key(Some("too-short")).expect_err("short key must fail");
+        assert!(
+            err.to_string().contains("openssl rand"),
+            "the error is actionable: {err}"
+        );
     }
 }

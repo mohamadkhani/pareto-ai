@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use crate::auth::LoginRateLimiter;
 use crate::config::Config;
+use crate::secrets::{MasterKey, SecretBox};
 use crate::{AppState, auth, db, password, routes};
 
 /// The password given to every [`TestApp::create_user`] account.
@@ -36,13 +37,14 @@ impl TestApp {
             config: Arc::new(Config {
                 listen: "127.0.0.1:0".parse().expect("static address"),
                 data_dir: dir.clone(),
-                master_key: None,
+                master_key: Some(MasterKey::from_bytes([7u8; 32])),
                 timezone: "UTC".to_string(),
                 insecure_cookies: true,
                 trusted_proxies: Vec::new(),
                 version: "test".to_string(),
             }),
             pool,
+            secrets: Arc::new(SecretBox::new(MasterKey::from_bytes([7u8; 32]))),
             started: Instant::now(),
             login_limiter: Arc::new(LoginRateLimiter::new()),
         };
@@ -172,4 +174,59 @@ pub async fn login(router: &Router, email: &str) -> (String, String) {
         .expect("csrf_token in login response")
         .to_string();
     (cookie, csrf)
+}
+
+/// Serves one canned HTTP response per connection and records the raw request
+/// bytes of each, so tests can assert what went on the wire (used by the
+/// credential probe tests against a local "provider").
+pub async fn spawn_static_server(
+    status_line: &'static str,
+    body: &str,
+) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let addr = listener.local_addr().expect("test listener address");
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&seen);
+    let body = body.to_string();
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let captured = Arc::clone(&captured);
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                // Read until the end of the request headers; probes send no
+                // body.
+                loop {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(String::from_utf8_lossy(&buf).to_string());
+
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (addr, seen)
 }

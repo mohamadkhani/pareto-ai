@@ -1,0 +1,24 @@
+.form-card {
+  margin-bottom: 1rem;
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions .btn {
+  margin-right: 0.35rem;
+}
+
+tr.selected {
+  background: #eef3fb;
+}
+
+.credentials {
+  margin-top: 1.5rem;
+}
+
+.credentials h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}

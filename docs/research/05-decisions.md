@@ -153,6 +153,49 @@ stored as `v1:<nonce>:<ciphertext>` with the row id as associated data.
 **Consequence:** startup fails when `GATEWAY_MASTER_KEY` is missing, so
 credentials can never be written unencrypted.
 
+### D17. Credential header values are encrypted like the secret
+
+**Decision:** custom header values (credential and offering `headers_json`) are
+sealed with the same AES-256-GCM `SecretBox`, AAD = row id. Header *names* stay
+plain so lists and audit rows can show them.
+
+**Why:** review finding M1 (2026-11-16,
+[../reviews/2026-11-16-m2-backend.md](../reviews/2026-11-16-m2-backend.md)):
+`X-API-Key`-style headers are credential-equivalent material; storing them in
+plaintext next to an AEAD-sealed bearer secret contradicted `AGENTS.md` and
+D16's threat model (leaked DB file or backup).
+
+**Consequence:** `headers_json` becomes a sealed envelope; the UI already treats
+values as write-only (names only in responses), so no API change.
+
+### D18. Sync overwrites synced fields; admins correct prices, not parameters
+
+**Decision:** OpenRouter sync refreshes `context_length`, `max_output_tokens`,
+modalities and capabilities on every run; only prices have a `manual` override
+that sync never touches. Correcting a synced *parameter* by hand is not
+supported in M2 and is an explicit follow-up (needs a "manually edited" marker).
+
+**Consequence:** recorded per review minor 5 (2026-11-16); operators must not
+rely on hand-edited synced parameters surviving a sync.
+
+### D19. Price sync run rows are pruned
+
+**Decision:** `price_sync_runs.detail_json` keeps raw prices only for changed or
+skipped models; rows older than 30 runs are deleted. (Review minor 6: unpruned
+detail grows ~25-35 MB/year at daily syncs.)
+
+### D20. PATCH semantics: null means "keep"
+
+**Decision:** PATCH requests treat `null`/omitted fields as "leave unchanged";
+clearing a nullable column back to "unknown" is not supported in M2 (an
+all-null patch is `400`). Blank `secret` on a credential PATCH is `400`, not
+"keep" (alignment finding B2, 2026-11-16) — the UI omits the field instead.
+
+**Consequence:** recorded as a known API limitation (alignment finding B1);
+supporting explicit clearing needs `Option<Option<T>>` inputs and is a
+follow-up. Silent dropping of `provider_id`/`model_id` on offering PATCH
+becomes an explicit `400` (finding B3).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

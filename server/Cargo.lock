@@ -645,6 +645,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.9.5",
  "reqwest",
+ "ring",
  "rust-embed",
  "serde",
  "serde_json",
@@ -660,6 +661,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

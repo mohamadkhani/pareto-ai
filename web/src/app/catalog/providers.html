@@ -1,0 +1,135 @@
+<div class="providers">
+  <header class="page-head">
+    <h1>Providers</h1>
+    <p class="hint">
+      Register OpenAI-compatible upstreams, then attach credentials to each provider.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">Providers are restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="openCreate()">New provider</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (formState(); as state) {
+      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
+        <h2>{{ state.mode === 'create' ? 'New provider' : 'Edit ' + state.provider.name }}</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="provider-name">Name</label>
+            <input id="provider-name" type="text" formControlName="name" placeholder="openrouter" />
+            @if (showError('name')) {
+              <p class="field-error" role="alert">{{ fieldError('name') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="provider-base-url">Base URL</label>
+            <input
+              id="provider-base-url"
+              type="text"
+              formControlName="base_url"
+              placeholder="https://api.example.com/v1"
+            />
+            @if (showError('base_url')) {
+              <p class="field-error" role="alert">{{ fieldError('base_url') }}</p>
+            }
+          </div>
+          <div class="field">
+            <label for="provider-kind">Kind</label>
+            <select id="provider-kind" formControlName="kind">
+              <option value="openai_compatible">openai_compatible</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary" [disabled]="saving()">
+            {{ saving() ? 'Saving…' : 'Save' }}
+          </button>
+          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+        </div>
+      </form>
+    }
+
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    } @else if (loading() && providers().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (providers().length === 0) {
+      <div class="card">
+        <h2>No providers yet</h2>
+        <p class="empty-note">Register your first upstream to start building the catalog.</p>
+      </div>
+    } @else {
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col">Base URL</th>
+            <th scope="col">Kind</th>
+            <th scope="col">Enabled</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (provider of providers(); track provider.id) {
+            <tr [class.selected]="selected()?.id === provider.id">
+              <td>{{ provider.name }}</td>
+              <td>
+                <code>{{ provider.base_url }}</code>
+              </td>
+              <td>{{ provider.kind }}</td>
+              <td>
+                <span class="badge {{ provider.enabled ? 'ok' : 'warn' }}">
+                  {{ provider.enabled ? 'enabled' : 'disabled' }}
+                </span>
+              </td>
+              <td class="actions">
+                <button type="button" class="btn" (click)="select(provider)">
+                  {{ selected()?.id === provider.id ? 'Hide credentials' : 'Credentials' }}
+                </button>
+                <button type="button" class="btn" (click)="openEdit(provider)">Edit</button>
+                <button
+                  type="button"
+                  class="btn"
+                  (click)="toggleEnabled(provider)"
+                  [disabled]="togglingId() !== null"
+                >
+                  {{ provider.enabled ? 'Disable' : 'Enable' }}
+                </button>
+                <app-delete-confirm
+                  [pending]="deletingId() === provider.id"
+                  (confirmed)="deleteProvider(provider)"
+                />
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    }
+
+    @if (selected(); as provider) {
+      <section class="credentials">
+        <div class="toolbar">
+          <h2>Credentials — {{ provider.name }}</h2>
+          <span class="spacer"></span>
+          <button type="button" class="btn" (click)="clearSelection()">Close</button>
+        </div>
+        <app-credentials [provider]="provider" />
+      </section>
+    }
+  }
+</div>

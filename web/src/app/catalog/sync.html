@@ -1,0 +1,94 @@
+<div class="sync">
+  <header class="page-head">
+    <h1>Price sync</h1>
+    <p class="hint">
+      Import the OpenRouter model catalog and prices. Manual prices are never overwritten (D10).
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <div class="card">
+      <h2>Forbidden</h2>
+      <p class="empty-note">Price sync is restricted to administrators.</p>
+    </div>
+  } @else {
+    @if (actionError()) {
+      <div class="banner error" role="alert">{{ actionError() }}</div>
+    }
+    @if (loadError()) {
+      <div class="banner error" role="alert">
+        {{ loadError() }}
+        <button type="button" class="btn" (click)="reload()">Try again</button>
+      </div>
+    }
+
+    <div class="toolbar">
+      <button type="button" class="btn primary" (click)="runSync()" [disabled]="syncing()">
+        {{ syncing() ? 'Syncing…' : 'Sync OpenRouter' }}
+      </button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    </div>
+
+    @if (run(); as lastRun) {
+      @if (isStale(lastRun)) {
+        <div class="banner warn" role="alert">
+          The last sync failed, so prices come from the previous snapshot and may be stale.
+          @if (runError(lastRun)) {
+            <br />
+            {{ runError(lastRun) }}
+          }
+        </div>
+      } @else if (lastRun.status === 'error') {
+        <div class="banner error" role="alert">
+          The last sync failed and no snapshot was kept.
+          @if (runError(lastRun)) {
+            <br />
+            {{ runError(lastRun) }}
+          }
+        </div>
+      }
+
+      <table class="data-table">
+        <tbody>
+          <tr>
+            <th scope="row">Status</th>
+            <td>
+              <span class="badge {{ statusClass(lastRun) }}">{{ lastRun.status }}</span>
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Models imported</th>
+            <td>{{ lastRun.model_count }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Started</th>
+            <td [attr.title]="formatTime(lastRun.started_at)">
+              {{ formatTime(lastRun.started_at) }} ({{ formatAge(lastRun.started_at) }})
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Finished</th>
+            <td [attr.title]="formatTime(lastRun.finished_at)">
+              {{ formatTime(lastRun.finished_at) }}
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Error</th>
+            <td>{{ runError(lastRun) ?? '—' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    } @else if (loading()) {
+      <p class="empty-note">Loading…</p>
+    } @else {
+      <div class="card">
+        <h2>No sync yet</h2>
+        <p class="empty-note">
+          Run the first sync to import OpenRouter's catalog and prices. Each run is recorded with
+          its status and model count.
+        </p>
+      </div>
+    }
+  }
+</div>
