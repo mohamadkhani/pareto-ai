@@ -42,16 +42,40 @@
 //!   change fails that one source, is recorded as `status = 'error'`, and
 //!   never stops the other sources.
 //!
-//! **Matching.** Both sides are normalized ([`normalize_model_key`]): lower
-//! case, vendor prefix (`vendor/`) dropped, non-alphanumerics collapsed to
-//! `-`, parenthetical tier markers removed, and the suffix markers
-//! `:free`, `-free`, `-latest`, `-preview`, `-thinking`, `-nothinking`,
-//! `-xhigh`, `-high`, `-medium`, `-low` plus trailing date stamps stripped.
-//! A hint is matched against `models.canonical_name` and
-//! `offerings.upstream_model_id`; exactly one distinct model is a match, zero
-//! is `skipped_unknown`, and more than one is `ambiguous` — never guessed.
-//! Two entries of one run resolving to the same model keep the better rank
-//! and count the loser as ambiguous.
+//! **Fetching.** Every request identifies the gateway (`pareto-ai/<version>`),
+//! asks for JSON with identity encoding, and is retried up to
+//! [`FETCH_ATTEMPTS`] times with exponential backoff (0.5 s, 1 s, 2 s, plus
+//! jitter) on transport errors, timeouts, body decode failures, 5xx and 429;
+//! the retries downgrade to HTTP/1.1 then HTTP/1.0 with `Connection: close`.
+//! A body is read chunk by chunk under [`MAX_BODY_BYTES`], and a body that
+//! ended early is still used when it is a complete JSON document: the recorded
+//! BenchmarkList failure reached a 2xx, transferred for seconds and then broke
+//! while decoding the body, which is the shape of a dropped chunk terminator
+//! (curl writes the file and exits non-zero). A paged source that cannot read
+//! a page after every retry fails with [`SyncError::Page`], never a silent
+//! truncation.
+//!
+//! **Matching (D38).** Both sides are normalized ([`normalize_model_key`]):
+//! lower case, vendor prefix (`vendor/`) dropped, non-alphanumerics collapsed
+//! to `-`, parenthetical tier markers removed. The *identity* used for
+//! matching then drops trailing tier markers (`-latest`, `-preview`,
+//! `-thinking`, `-nothinking`, `-xhigh|-high|-medium|-low`), trailing date and
+//! build stamps (`-1017`, `-0731`, `-20250807`, `-2025-08-07`), and a leading
+//! vendor token from the hyphen shape BenchmarkList publishes
+//! (`openai-gpt-5.4`). Vendor spellings are aligned through
+//! [`canonical_vendor`] (`deepseek-ai`↔`deepseek`, `z-ai`↔`zai-org`,
+//! `x-ai`↔`xai`, `moonshotai`↔`moonshot`, `google-ai`↔`google`) for matching
+//! only; stored names are never rewritten. `:free`/`:batch` stay distinct
+//! offerings.
+//!
+//! A hint resolves to **every catalog model that shares its identity** — one
+//! benchmark row per model, because a published score is model-level and two
+//! providers of the same model both deserve it. Zero models is
+//! `skipped_unknown`, and more than one *distinct* candidate (candidates that
+//! differ by more than a vendor or date suffix) is `ambiguous` — never
+//! guessed. A generic tail (`flash`, `pro`, `auto`) is skipped unless an exact
+//! full id matches. Two entries of one run resolving to the same model keep
+//! the better rank.
 //!
 //! **Run log.** `benchmark_sync_runs` holds one row per source per attempt
 //! with status, counts, duration, a secret-free `error`, and `source_url`
@@ -85,8 +109,24 @@ pub const JOB_START_DELAY: Duration = Duration::from_secs(60);
 /// How often the background job checks which sources are due.
 pub const JOB_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Per-HTTP-request timeout (a source can issue several requests).
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-HTTP-request timeout (a source can issue several requests). Three
+/// attempts of this plus the backoff fit inside [`SOURCE_TIMEOUT`], so a page
+/// that keeps failing is reported as a failed page rather than as a source
+/// timeout.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Attempts per HTTP request, including the first. The Arena rows API
+/// returns 502/503 under load and sends early-closed bodies, so a request
+/// gets two more tries before its page counts as failed.
+const FETCH_ATTEMPTS: usize = 3;
+
+/// First retry delay; each later attempt doubles it (0.5 s, 1 s, 2 s) with
+/// up to 25% jitter. The whole source still runs under [`SOURCE_TIMEOUT`].
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+
+/// Upper bound on one response body. The BenchmarkList document is ~11 MiB;
+/// the cap only stops a runaway transfer.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Runs kept per source before pruning (D19).
 const MAX_RUNS: i64 = 30;
@@ -189,6 +229,12 @@ impl SourceId {
 pub enum SyncError {
     #[error("fetching {url} failed: {detail}")]
     Fetch { url: String, detail: String },
+    #[error("{what} page at offset {offset} failed: {detail}")]
+    Page {
+        what: &'static str,
+        offset: usize,
+        detail: String,
+    },
     #[error("the {what} response is malformed: {detail}")]
     Parse { what: &'static str, detail: String },
     #[error("database error: {0}")]
@@ -198,6 +244,16 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    /// Pages that failed after all retries; `1` for [`SyncError::Page`] and
+    /// `0` for every other failure. A paged source aborts on the first page
+    /// it cannot read, so it never truncates silently.
+    pub fn failed_pages(&self) -> usize {
+        match self {
+            Self::Page { .. } => 1,
+            _ => 0,
+        }
+    }
+
     /// The uniform API error for this failure.
     pub fn into_api_error(self, rid: Option<String>) -> crate::error::ApiError {
         match self {
@@ -206,7 +262,7 @@ impl SyncError {
             }
             Self::Audit(e) => e.into_api_error(rid),
             // Source failures are outcomes, never propagated this far.
-            Self::Fetch { .. } | Self::Parse { .. } => {
+            Self::Fetch { .. } | Self::Page { .. } | Self::Parse { .. } => {
                 crate::error::ApiError::internal("benchmark source", self).with_request_id(rid)
             }
         }
@@ -219,52 +275,133 @@ pub trait Fetcher {
     fn get(&self, url: &str) -> impl Future<Output = Result<String, SyncError>> + Send;
 }
 
-/// The production fetcher: a pooled HTTP client with [`FETCH_TIMEOUT`].
+/// The production fetcher: a pooled HTTP client with [`FETCH_TIMEOUT`],
+/// [`FETCH_ATTEMPTS`] bounded retries, and a body read that tolerates a
+/// chunked or early-closed transfer.
 #[derive(Clone)]
 pub struct HttpFetcher {
     client: reqwest::Client,
+    retry_base: Duration,
 }
 
 impl HttpFetcher {
     /// Builds the HTTP client. Fails only when the TLS/HTTP stack cannot be
     /// initialized.
     pub fn new() -> Result<Self, SyncError> {
+        // Identify the gateway on every request (`pareto-ai/<version>`); some
+        // CDNs close the connection early for clients that do not, and a
+        // named client is what an operator reads in the source's logs.
         let client = reqwest::Client::builder()
             .timeout(FETCH_TIMEOUT)
-            .user_agent("pareto-ai-gateway/0.1 benchmark-sync")
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent(concat!("pareto-ai/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| SyncError::Fetch {
                 url: "http client".to_string(),
                 detail: e.to_string(),
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            retry_base: RETRY_BASE_DELAY,
+        })
     }
+
+    /// Test seam: the same client with a shorter retry base so retry tests do
+    /// not sleep for seconds.
+    #[cfg(test)]
+    fn with_retry_base(retry_base: Duration) -> Result<Self, SyncError> {
+        let mut fetcher = Self::new()?;
+        fetcher.retry_base = retry_base;
+        Ok(fetcher)
+    }
+}
+
+/// The delay before retry `attempt` (0-based): exponential from `base`, plus
+/// up to 25% jitter so parallel retries do not synchronise.
+fn retry_delay(base: Duration, attempt: usize) -> Duration {
+    let factor: u32 = 1u32 << u32::try_from(attempt.min(6)).unwrap_or(6);
+    let step = base.saturating_mul(factor);
+    step + step.mul_f64(rand::random::<f64>() * 0.25)
+}
+
+/// Reads a response body chunk by chunk until EOF, under [`MAX_BODY_BYTES`].
+/// Returns the bytes read so far and, when the transfer broke, why. An early
+/// close is never treated as a short read of a complete document by accident;
+/// [`HttpFetcher`] decides whether a broken transfer still holds a whole JSON
+/// document. Failure mode: the detail string names how many bytes were read
+/// before the transfer broke.
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, (Vec<u8>, String)> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_BODY_BYTES {
+                    return Err((
+                        body,
+                        format!(
+                            "the body exceeds the {} MiB cap",
+                            MAX_BODY_BYTES / (1024 * 1024)
+                        ),
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(body),
+            Err(error) => {
+                let detail = format!("the transfer broke after {} bytes: {error}", body.len());
+                return Err((body, detail));
+            }
+        }
+    }
+}
+
+/// True when a body that arrived with a broken transfer is nevertheless a
+/// complete JSON document. The recorded benchmarklist.com failure reached a
+/// 2xx, transferred for seconds and then reported a body decode error, while
+/// `curl` wrote the whole file: a dropped chunk terminator looks exactly like
+/// that. Parsing the bytes is the only honest test — a truncated JSON document
+/// does not parse.
+fn is_complete_json(body: &[u8]) -> bool {
+    !body.is_empty() && serde_json::from_slice::<serde_json::Value>(body).is_ok()
 }
 
 impl Fetcher for HttpFetcher {
     fn get(&self, url: &str) -> impl Future<Output = Result<String, SyncError>> + Send {
         let client = self.client.clone();
         let url = url.to_string();
+        let retry_base = self.retry_base;
         async move {
-            // Two attempts: a connect failure or a body decode failure (an
-            // interrupted transfer, not a JSON shape problem) gets one fresh
-            // connection, because `send()` surfaces a mid-body decode error
-            // too. Both the send and the body read are inside the loop, and
-            // the attempt-level error is kept for the final message. The
-            // request uses identity encoding and the body is decoded lossily
-            // from raw bytes, so an encoding/charset disagreement cannot
-            // masquerade as a parse error. Status, headers, elapsed time and
-            // the first bytes are logged at debug level, which is enough to
-            // tell transport from serde.
+            // Bounded retries with exponential backoff. Retried: transport
+            // errors, timeouts, body decode failures (an interrupted
+            // transfer), 5xx, and 429. Not retried: any other 4xx, which a
+            // fresh connection cannot fix.
+            //
+            // Every request states who it is: a `User-Agent` (some CDNs close
+            // the connection early without one), `Accept: application/json`,
+            // and `Accept-Encoding: identity` (a compressed early close is
+            // harder to diagnose than a plain one). It also asks the server to
+            // close the connection, and the retries downgrade to HTTP/1.1 and
+            // then HTTP/1.0, because an HTTP/2 stream reset mid-body surfaces
+            // as a body decode error.
             let mut last_error: Option<SyncError> = None;
-            for attempt in 0..2 {
-                let started = std::time::Instant::now();
+            for attempt in 0..FETCH_ATTEMPTS {
+                let started = Instant::now();
                 let mut request = client
                     .get(&url)
+                    .header(reqwest::header::ACCEPT, "application/json")
                     .header(reqwest::header::ACCEPT_ENCODING, "identity");
-                if attempt == 1 {
-                    request = request.version(reqwest::Version::HTTP_11);
-                }
+                // Attempt 0 may negotiate HTTP/2, where `Connection` is
+                // forbidden (hyper strips it with a warning). The retries are
+                // pinned to HTTP/1.x, so they ask for a close.
+                request = match attempt {
+                    0 => request,
+                    1 => request
+                        .version(reqwest::Version::HTTP_11)
+                        .header(reqwest::header::CONNECTION, "close"),
+                    _ => request
+                        .version(reqwest::Version::HTTP_10)
+                        .header(reqwest::header::CONNECTION, "close"),
+                };
                 let response = match request.send().await {
                     Ok(response) => response,
                     Err(error) => {
@@ -278,19 +415,19 @@ impl Fetcher for HttpFetcher {
                         );
                         last_error = Some(SyncError::Fetch {
                             url: url.clone(),
-                            detail: format!("attempt {} (send): {error}", attempt + 1),
+                            detail: format!(
+                                "attempt {} of {FETCH_ATTEMPTS} (send): {error}",
+                                attempt + 1
+                            ),
                         });
+                        if attempt + 1 < FETCH_ATTEMPTS {
+                            tokio::time::sleep(retry_delay(retry_base, attempt)).await;
+                        }
                         continue;
                     }
                 };
                 let status = response.status();
                 let headers = response.headers().clone();
-                if !status.is_success() {
-                    return Err(SyncError::Fetch {
-                        url,
-                        detail: format!("HTTP {status}"),
-                    });
-                }
                 let header = |name: &str| {
                     headers
                         .get(name)
@@ -298,7 +435,32 @@ impl Fetcher for HttpFetcher {
                         .unwrap_or("")
                         .to_string()
                 };
-                match response.bytes().await {
+                if !status.is_success() {
+                    let retryable = status.is_server_error()
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                    last_error = Some(SyncError::Fetch {
+                        url: url.clone(),
+                        detail: format!(
+                            "attempt {} of {FETCH_ATTEMPTS}: HTTP {status}",
+                            attempt + 1
+                        ),
+                    });
+                    tracing::debug!(
+                        url = %url,
+                        status = %status,
+                        attempt,
+                        retryable,
+                        "benchmark source returned a non-success status"
+                    );
+                    if !retryable {
+                        break;
+                    }
+                    if attempt + 1 < FETCH_ATTEMPTS {
+                        tokio::time::sleep(retry_delay(retry_base, attempt)).await;
+                    }
+                    continue;
+                }
+                match read_body(response).await {
                     Ok(bytes) => {
                         tracing::debug!(
                             url = %url,
@@ -313,7 +475,21 @@ impl Fetcher for HttpFetcher {
                         );
                         return Ok(String::from_utf8_lossy(&bytes).into_owned());
                     }
-                    Err(error) => {
+                    Err((bytes, detail)) => {
+                        // The document arrived whole but the transfer broke
+                        // (a dropped chunk terminator is the live shape). The
+                        // bytes are the source's answer; the parser judges
+                        // them, and a truncated JSON body does not parse.
+                        if is_complete_json(&bytes) {
+                            tracing::warn!(
+                                url = %url,
+                                status = %status,
+                                bytes = bytes.len(),
+                                detail = %detail,
+                                "benchmark source body ended early but is a complete JSON document"
+                            );
+                            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+                        }
                         tracing::debug!(
                             url = %url,
                             status = %status,
@@ -321,13 +497,19 @@ impl Fetcher for HttpFetcher {
                             content_encoding = %header("content-encoding"),
                             content_length = %header("content-length"),
                             attempt,
-                            error = %error,
+                            detail = %detail,
                             "benchmark source body failed to decode"
                         );
                         last_error = Some(SyncError::Fetch {
                             url: url.clone(),
-                            detail: format!("attempt {} (body): {error}", attempt + 1),
+                            detail: format!(
+                                "attempt {} of {FETCH_ATTEMPTS} (body): {detail}",
+                                attempt + 1
+                            ),
                         });
+                        if attempt + 1 < FETCH_ATTEMPTS {
+                            tokio::time::sleep(retry_delay(retry_base, attempt)).await;
+                        }
                     }
                 }
             }
@@ -378,14 +560,25 @@ pub struct ArenaPage {
 }
 
 /// Downloads up to [`ARENA_MAX_PAGES`] Arena pages (the top of the WebDev
-/// leaderboard). Failure mode: [`SyncError::Fetch`] or [`SyncError::Parse`].
+/// leaderboard). Each page gets [`FETCH_ATTEMPTS`] tries inside the fetcher;
+/// a page that still fails aborts the source with [`SyncError::Page`] (and a
+/// `failed_pages` count of 1) instead of silently truncating the result.
+/// Failure mode: [`SyncError::Page`].
 pub async fn fetch_arena<F: Fetcher>(fetcher: &F) -> Result<Vec<Entry>, SyncError> {
     let mut offset = 0usize;
     let mut entries = Vec::new();
     for _ in 0..ARENA_MAX_PAGES {
         let url = format!("{ARENA_ROWS_URL}&offset={offset}&length={ARENA_PAGE_SIZE}");
-        let raw = fetcher.get(&url).await?;
-        let page = parse_arena_page(&raw)?;
+        let page_error = |detail: String| SyncError::Page {
+            what: SourceId::Arena.as_str(),
+            offset,
+            detail,
+        };
+        let raw = fetcher
+            .get(&url)
+            .await
+            .map_err(|error| page_error(error.to_string()))?;
+        let page = parse_arena_page(&raw).map_err(|error| page_error(error.to_string()))?;
         entries.extend(page.entries);
         if page.rows_seen == 0 {
             break;
@@ -673,34 +866,70 @@ pub fn parse_benchlm(raw: &str) -> Result<BenchLmPage, SyncError> {
 // Model matching
 // ---------------------------------------------------------------------------
 
-/// Normalizes a model name or id for matching.
-///
-/// Lower-cases, drops parenthetical tier groups (`(xHigh)`), replaces every
-/// run of non-alphanumerics with `-`, keeps only the part after the last
-/// `/` (vendor prefix), and trims dashes. Variant suffixes (`:free`, `:batch`,
-/// `-preview`, `-latest`, dates, …) are kept here: the exact key identifies a
-/// distinct offering. [`ModelIndex::lookup`] tries the exact key first and
-/// only then a suffix-stripped fallback that must identify exactly one model.
-/// The result is empty when the input has no alphanumerics.
-pub fn normalize_model_key(raw: &str) -> String {
-    let mut lowered = raw.trim().to_lowercase();
+/// Vendor spellings that name the same organization, used **for matching
+/// only** (`deepseek-ai` and `deepseek` publish the same weights under
+/// different ids). Stored names are never rewritten.
+const VENDOR_ALIASES: [(&str, &str); 20] = [
+    ("deepseek-ai", "deepseek"),
+    ("deepseek", "deepseek"),
+    ("z-ai", "zai-org"),
+    ("zai-org", "zai-org"),
+    ("zai", "zai-org"),
+    ("x-ai", "xai"),
+    ("xai", "xai"),
+    ("moonshotai", "moonshot"),
+    ("moonshot-ai", "moonshot"),
+    ("moonshot", "moonshot"),
+    ("google-ai", "google"),
+    ("google", "google"),
+    ("meta-llama", "meta"),
+    ("meta", "meta"),
+    ("mistralai", "mistral"),
+    ("mistral", "mistral"),
+    ("openai", "openai"),
+    ("anthropic", "anthropic"),
+    ("alibaba", "qwen"),
+    ("qwen", "qwen"),
+];
 
-    // Remove parenthetical groups, e.g. "Claude Sonnet 5.2 (xHigh)".
+/// Tails too generic to identify a model on their own: a benchmark row named
+/// `flash` (or `pro`, or `auto`) must never attach to whichever model happens
+/// to carry that word.
+const GENERIC_TOKENS: [&str; 14] = [
+    "flash", "pro", "auto", "mini", "lite", "turbo", "base", "chat", "instruct", "preview",
+    "latest", "thinking", "small", "large",
+];
+
+/// Trailing tier markers stripped for the identity (fallback) key only.
+const TIER_SUFFIXES: [&str; 9] = [
+    "latest",
+    "preview",
+    "thinking",
+    "nothinking",
+    "xhigh",
+    "high",
+    "medium",
+    "low",
+    "exp",
+];
+
+/// Removes parenthetical tier groups, e.g. `Claude Sonnet 5.2 (xHigh)`.
+fn strip_parentheticals(mut lowered: String) -> String {
     while let (Some(start), Some(end)) = (lowered.find('('), lowered.find(')')) {
         if end <= start {
             break;
         }
         lowered.replace_range(start..=end, " ");
     }
+    lowered
+}
 
-    // Vendor prefix: the canonical name and the upstream id share the tail.
-    if let Some((_, tail)) = lowered.rsplit_once('/') {
-        lowered = tail.to_string();
-    }
-
-    let mut key = String::with_capacity(lowered.len());
+/// Lower-cases are the caller's job; this collapses non-alphanumerics into
+/// single dashes.
+fn normalize_text(raw: &str) -> String {
+    let mut key = String::with_capacity(raw.len());
     let mut last_dash = true;
-    for character in lowered.chars() {
+    for character in raw.chars() {
         if character.is_ascii_alphanumeric() {
             key.push(character);
             last_dash = false;
@@ -715,72 +944,174 @@ pub fn normalize_model_key(raw: &str) -> String {
     key
 }
 
-/// Strips trailing tier markers and date stamps for the *fallback* match
-/// only. `free` and `batch` are deliberately absent: they denote distinct
-/// offerings, not the same model under another label.
-fn strip_variant_suffixes(mut key: String) -> String {
-    const SUFFIXES: [&str; 9] = [
-        "latest",
-        "preview",
-        "thinking",
-        "nothinking",
-        "xhigh",
-        "high",
-        "medium",
-        "low",
-        "exp",
-    ];
-    while let Some((head, tail)) = key.rsplit_once('-') {
-        if !SUFFIXES.contains(&tail) {
-            break;
-        }
-        key.truncate(head.len());
-    }
+/// Normalizes a model name or id for matching: lower case, parenthetical
+/// tier groups removed, the part after the last `/` kept (vendor prefix
+/// dropped), and every run of non-alphanumerics collapsed to `-`.
+///
+/// Variant suffixes (`:free`, `:batch`, `-preview`, `-latest`, dates, …) are
+/// kept here so an exact offering id still identifies one offering;
+/// [`identity_keys`] is what merges the same model across providers.
+/// The result is empty when the input has no alphanumerics.
+pub fn normalize_model_key(raw: &str) -> String {
+    let lowered = strip_parentheticals(raw.trim().to_lowercase());
+    let tail = lowered.rsplit('/').next().unwrap_or(&lowered);
+    normalize_text(tail)
+}
 
-    // Trailing date stamps: "-2025-08-07" or a compact "-20250807".
-    loop {
-        let parts: Vec<&str> = key.rsplitn(4, '-').collect();
-        let compact = parts.first().and_then(|last| {
-            if last.len() == 8 && last.starts_with("20") && last.bytes().all(|b| b.is_ascii_digit())
-            {
-                Some(key.len() - last.len() - 1)
-            } else {
-                None
-            }
-        });
-        if let Some(keep) = compact {
-            key.truncate(keep);
+/// The normalized *full* id, vendor segment included
+/// (`deepseek-ai/deepseek-v4-1-flash-1017` -> `deepseek-ai-deepseek-v4-1-flash-1017`).
+/// Used only for an exact full-id match, which does not apply the generic-tail
+/// guard.
+fn normalize_full_key(raw: &str) -> String {
+    normalize_text(&strip_parentheticals(raw.trim().to_lowercase()))
+}
+
+/// The canonical vendor spelling for matching, or the normalized input when
+/// it is not a known alias.
+pub fn canonical_vendor(vendor: &str) -> String {
+    let normalized = normalize_text(&vendor.trim().to_lowercase());
+    VENDOR_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == normalized)
+        .map_or(normalized, |(_, canonical)| (*canonical).to_string())
+}
+
+/// Splits a leading hyphenated vendor token off a tail id, longest alias
+/// first (`z-ai-glm-5` -> (`zai-org`, `glm-5`)). The returned vendor is
+/// canonical; `None` when no known vendor prefixes the key.
+fn split_leading_vendor(key: &str) -> Option<(String, String)> {
+    let mut best: Option<(String, String)> = None;
+    for (alias, _canonical) in VENDOR_ALIASES {
+        let Some(rest) = key
+            .strip_prefix(alias)
+            .and_then(|rest| rest.strip_prefix('-'))
+        else {
+            continue;
+        };
+        if rest.is_empty() {
             continue;
         }
-        let date_suffix = parts.len() == 4
+        let shorter = best
+            .as_ref()
+            .is_none_or(|(_, current)| rest.len() < current.len());
+        if shorter {
+            best = Some((canonical_vendor(alias), rest.to_string()));
+        }
+    }
+    best
+}
+
+/// `:free` / `:batch` (normalized to `-free` / `-batch`) mark a distinct
+/// offering, never a tier of the same one.
+fn split_offering(key: &str) -> (&str, Option<&'static str>) {
+    for tag in ["free", "batch"] {
+        if let Some(base) = key.strip_suffix(&format!("-{tag}"))
+            && !base.is_empty()
+        {
+            return (base, Some(tag));
+        }
+    }
+    (key, None)
+}
+
+/// True when a trailing token is a date or build stamp: four to eight digits
+/// (`-1017`, `-0731`, `-20250807`). One-to-three digit version parts
+/// (`-4`, `-5`, `-70b`) are part of the model name and stay.
+fn is_date_or_build(token: &str) -> bool {
+    (4..=8).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Strips trailing tier markers and date/build stamps repeatedly, so
+/// `deepseek-v4-flash-20250807-thinking` and `deepseek-v4-flash` share an
+/// identity.
+fn strip_variant_suffixes(mut key: String) -> String {
+    loop {
+        let before = key.len();
+        if let Some((head, tail)) = key.rsplit_once('-')
+            && TIER_SUFFIXES.contains(&tail)
+        {
+            key.truncate(head.len());
+        }
+        if let Some((head, tail)) = key.rsplit_once('-')
+            && is_date_or_build(tail)
+        {
+            key.truncate(head.len());
+        }
+        // A dashed date: `-2025-08-07`.
+        let parts: Vec<&str> = key.rsplitn(4, '-').collect();
+        if parts.len() == 4
             && parts[0].len() == 2
             && parts[1].len() == 2
             && parts[2].len() == 4
-            && parts[2].starts_with("20")
+            && parts[2].starts_with('2')
             && parts[..3]
                 .iter()
-                .all(|part| part.bytes().all(|b| b.is_ascii_digit()));
-        if date_suffix {
+                .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+        {
             key.truncate(key.len() - 11);
-            continue;
         }
-        break;
+        if key.len() == before {
+            break;
+        }
     }
     key
 }
 
-/// Maps an exact key's model ids to a resolution.
-fn best_match(ids: &[String]) -> Matching {
-    match ids {
-        [model_id] => Matching::Matched(model_id.clone()),
-        _ => Matching::Ambiguous,
+/// True when a stripped key still names something: it contains a digit, or a
+/// token that is not on the generic list.
+fn is_distinctive(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    if key.bytes().any(|byte| byte.is_ascii_digit()) {
+        return true;
+    }
+    !key.split('-').all(|token| GENERIC_TOKENS.contains(&token))
+}
+
+/// The identities of a normalized key, most specific first: offering tag
+/// kept, tiers/dates/build stamps removed, and (for the hyphen vendor shape)
+/// a leading vendor token removed too. Two catalog entries sharing any one of
+/// these identities are the same model under different provider spellings.
+/// Empty when every candidate is generic.
+fn identity_keys(normalized_key: &str) -> Vec<String> {
+    let (base, offering) = split_offering(normalized_key);
+    let mut candidates = vec![base.to_string()];
+    if let Some((_vendor, remainder)) = split_leading_vendor(base) {
+        candidates.push(remainder);
+    }
+    let mut identities = Vec::new();
+    for candidate in candidates {
+        let base = strip_variant_suffixes(candidate);
+        if !is_distinctive(&base) {
+            continue;
+        }
+        let identity = match offering {
+            Some(tag) => format!("{base}|{tag}"),
+            None => base,
+        };
+        if !identities.contains(&identity) {
+            identities.push(identity);
+        }
+    }
+    identities
+}
+
+/// Splits an identity key into its base and offering tag.
+fn split_identity(identity: &str) -> (&str, Option<&str>) {
+    match identity.rsplit_once('|') {
+        Some((base, tag)) => (base, Some(tag)),
+        None => (identity, None),
     }
 }
 
-/// How one hint resolved against the catalog.
+/// How one hint resolved against the catalog. `Matched` lists **every** catalog
+/// model that shares the hint's identity (one benchmark row per model, because
+/// the published score is model-level); `Ambiguous` means several *distinct*
+/// identities could be meant and nothing is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matching {
-    Matched(String),
+    Matched(Vec<String>),
     Unknown,
     Ambiguous,
 }
@@ -788,19 +1119,26 @@ pub enum Matching {
 /// A normalized index over `models.canonical_name` and
 /// `offerings.upstream_model_id`.
 ///
-/// `keys` is the exact normalized key (distinct offerings stay distinct:
-/// `gpt-4o` and `gpt-4o:batch` are two keys). `bases` is the suffix-stripped
-/// fallback index, consulted only when the exact key is absent and only when
-/// it names exactly one model.
+/// `full` holds the normalized full id for an exact (precise) match. `identities`
+/// holds the merge key: suffix-stripped tail, offering tag kept, vendor prefix
+/// stripped (path or hyphen shape) and aliased. One identity maps to every
+/// catalog model that uses it, which is exactly the multi-model attachment
+/// rule.
 #[derive(Debug, Default)]
 pub struct ModelIndex {
-    keys: HashMap<String, Vec<String>>,
-    bases: HashMap<String, Vec<String>>,
+    full: HashMap<String, Vec<String>>,
+    identities: HashMap<String, Vec<String>>,
+}
+
+fn push_unique(ids: &mut Vec<String>, model_id: &str) {
+    if !ids.iter().any(|id| id == model_id) {
+        ids.push(model_id.to_string());
+    }
 }
 
 impl ModelIndex {
     /// Builds an index from `(hint, model_id)` pairs. Duplicate ids for one
-    /// key collapse; distinct ids make that key ambiguous.
+    /// key collapse; distinct ids under one identity are returned together.
     pub fn new(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
         let mut index = Self::default();
         for (hint, model_id) in pairs {
@@ -808,59 +1146,84 @@ impl ModelIndex {
             if key.is_empty() {
                 continue;
             }
-            let ids = index.keys.entry(key.clone()).or_default();
-            if !ids.contains(&model_id) {
-                ids.push(model_id.clone());
+            let full = normalize_full_key(&hint);
+            if full != key {
+                push_unique(index.full.entry(full).or_default(), &model_id);
             }
-            let base = strip_variant_suffixes(key);
-            if base.is_empty() {
-                continue;
-            }
-            let ids = index.bases.entry(base).or_default();
-            if !ids.contains(&model_id) {
-                ids.push(model_id);
+            for identity in identity_keys(&key) {
+                push_unique(index.identities.entry(identity).or_default(), &model_id);
             }
         }
         index
     }
 
-    /// Resolves one hint: exactly one model, none, or several.
+    /// Every model id under any of the given identities, sorted. `None` when
+    /// none of them is indexed.
+    fn identity_match(&self, identities: &[String]) -> Option<Matching> {
+        let mut ids: Vec<String> = Vec::new();
+        for identity in identities {
+            if let Some(found) = self.identities.get(identity) {
+                for id in found {
+                    push_unique(&mut ids, id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        ids.sort();
+        Some(Matching::Matched(ids))
+    }
+
+    /// Resolves one hint. Order:
     ///
-    /// 1. The exact normalized key wins, so `:free`/`:batch` variants never
-    ///    collide with their base model.
-    /// 2. Otherwise a suffix-stripped fallback (`-preview`, `-latest`, dates,
-    ///    tier markers) is tried; it must identify exactly one model.
-    /// 3. Finally a hyphen-boundary vendor prefix match (`openai-gpt-5-4` ->
-    ///    `gpt-5-4`, BenchmarkList's id shape) is tried under the same
-    ///    uniqueness rule.
+    /// 1. The exact full id (vendor included) united with the hint's
+    ///    identities. The exact id is what makes a generic tail matchable;
+    ///    the identity group is what attaches the row to every provider of the
+    ///    same model.
+    /// 2. A unique hyphen-boundary suffix match over stripped identities;
+    ///    several distinct candidates stay [`Matching::Ambiguous`].
     pub fn lookup(&self, hint: &str) -> Matching {
         let key = normalize_model_key(hint);
         if key.is_empty() {
             return Matching::Unknown;
         }
-        if let Some(ids) = self.keys.get(&key) {
-            return best_match(ids);
-        }
-
-        let base = strip_variant_suffixes(key.clone());
-        if !base.is_empty()
-            && let Some(ids) = self.bases.get(&base)
-        {
-            return best_match(ids);
-        }
-
-        let mut ids: Vec<&str> = Vec::new();
-        for (index_key, index_ids) in &self.keys {
-            if key.ends_with(&format!("-{index_key}")) {
-                for id in index_ids {
-                    if !ids.contains(&id.as_str()) {
-                        ids.push(id);
-                    }
-                }
+        let full = normalize_full_key(hint);
+        let identities = identity_keys(&key);
+        let mut ids = self.full.get(&full).cloned().unwrap_or_default();
+        if let Some(Matching::Matched(found)) = self.identity_match(&identities) {
+            for id in found {
+                push_unique(&mut ids, &id);
             }
         }
-        match ids.as_slice() {
-            [model_id] => Matching::Matched((*model_id).to_string()),
+        if !ids.is_empty() {
+            ids.sort();
+            ids.dedup();
+            return Matching::Matched(ids);
+        }
+        // Fuzzy: the hint's most-stripped identity ends with a catalog
+        // identity. Only one distinct identity may answer; several means the
+        // hint does not say which model it means.
+        let Some(hint_identity) = identities.last() else {
+            return Matching::Unknown;
+        };
+        let (hint_base, hint_offering) = split_identity(hint_identity);
+        let mut candidates: Vec<&String> = Vec::new();
+        for candidate in self.identities.keys() {
+            let (base, offering) = split_identity(candidate);
+            if offering != hint_offering || base == hint_base {
+                continue;
+            }
+            if hint_base.ends_with(&format!("-{base}")) {
+                candidates.push(candidate);
+            }
+        }
+        match candidates.as_slice() {
+            [identity] => {
+                let identity = (*identity).clone();
+                self.identity_match(std::slice::from_ref(&identity))
+                    .unwrap_or(Matching::Unknown)
+            }
             [] => Matching::Unknown,
             _ => Matching::Ambiguous,
         }
@@ -891,11 +1254,17 @@ pub struct Counts {
     /// Entries after the source's own filtering (Arena `overall`, scored
     /// BenchmarkList rows, scored BenchLM rows).
     pub published: usize,
-    /// Entries that resolved to one model and were kept (one per model).
+    /// Catalog models that received a row (one row per model; a hint can
+    /// attach to several models).
     pub matched: usize,
+    /// Hints that resolved to at least one model.
+    pub matched_hints: usize,
     pub skipped_unknown: usize,
-    /// Multi-model matches plus duplicate entries for one model.
+    /// Hints that named several distinct models (never guessed). Duplicate
+    /// entries for one model keep the better rank and are not counted here.
     pub ambiguous: usize,
+    /// Pages that failed after every retry before the source aborted.
+    pub failed_pages: usize,
     pub inserted: usize,
     pub updated: usize,
     pub unchanged: usize,
@@ -947,8 +1316,9 @@ fn better_rank(candidate: &Entry, current: &Entry) -> bool {
     }
 }
 
-/// Resolves entries to models and dedupes per model. Never guesses: an entry
-/// with no unique match is counted, not written.
+/// Resolves entries to models and dedupes per model. A hint that names several
+/// models of the same identity attaches to all of them; a hint naming several
+/// distinct identities is counted as ambiguous, never guessed.
 fn resolve(
     entries: Vec<Entry>,
     index: &ModelIndex,
@@ -963,17 +1333,23 @@ fn resolve(
         match index.lookup(&entry.model_hint) {
             Matching::Unknown => counts.skipped_unknown += 1,
             Matching::Ambiguous => counts.ambiguous += 1,
-            Matching::Matched(model_id) => match picked.get(&model_id) {
-                None => {
-                    picked.insert(model_id, entry);
-                }
-                Some(current) => {
-                    counts.ambiguous += 1;
-                    if better_rank(&entry, current) {
-                        picked.insert(model_id, entry);
+            Matching::Matched(model_ids) => {
+                counts.matched_hints += 1;
+                for model_id in model_ids {
+                    match picked.get(&model_id) {
+                        None => {
+                            picked.insert(model_id, entry.clone());
+                        }
+                        Some(current) => {
+                            // The same model twice in one run: keep the better
+                            // rank. That is a duplicate, not an ambiguity.
+                            if better_rank(&entry, current) {
+                                picked.insert(model_id, entry.clone());
+                            }
+                        }
                     }
                 }
-            },
+            }
         }
     }
     counts.matched = picked.len();
@@ -1026,6 +1402,10 @@ pub async fn run_source<F: Fetcher>(
     let started = Instant::now();
     let fetched = tokio::time::timeout(SOURCE_TIMEOUT, fetch_entries(source, fetcher)).await;
 
+    let failed_pages = match &fetched {
+        Ok(Err(error)) => error.failed_pages(),
+        _ => 0,
+    };
     let fetch_error = match fetched {
         Ok(Ok(fetched)) => {
             let index = load_model_index(pool).await?;
@@ -1069,7 +1449,10 @@ pub async fn run_source<F: Fetcher>(
         source,
         status: RunStatus::Error,
         dry_run,
-        counts: Counts::default(),
+        counts: Counts {
+            failed_pages,
+            ..Counts::default()
+        },
         started_at,
         finished_at,
         duration_ms: elapsed_ms(started),
@@ -1155,8 +1538,9 @@ async fn apply(
     sqlx::query(
         "INSERT INTO benchmark_sync_runs \
            (id, source, status, started_at, finished_at, duration_ms, published, matched, \
-            skipped_unknown, ambiguous, inserted, updated, unchanged, source_url, error) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            matched_hints, skipped_unknown, ambiguous, failed_pages, inserted, updated, unchanged, \
+            source_url, error) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
     )
     .bind(&run_id)
     .bind(source.as_str())
@@ -1166,8 +1550,10 @@ async fn apply(
     .bind(duration_ms)
     .bind(counts.published as i64)
     .bind(counts.matched as i64)
+    .bind(counts.matched_hints as i64)
     .bind(counts.skipped_unknown as i64)
     .bind(counts.ambiguous as i64)
+    .bind(counts.failed_pages as i64)
     .bind(counts.inserted as i64)
     .bind(counts.updated as i64)
     .bind(counts.unchanged as i64)
@@ -1186,8 +1572,10 @@ async fn apply(
                 "source": source.as_str(),
                 "published": counts.published,
                 "matched": counts.matched,
+                "matched_hints": counts.matched_hints,
                 "skipped_unknown": counts.skipped_unknown,
                 "ambiguous": counts.ambiguous,
+                "failed_pages": counts.failed_pages,
                 "inserted": counts.inserted,
                 "updated": counts.updated,
                 "unchanged": counts.unchanged,
@@ -1211,8 +1599,9 @@ async fn record_run(
     sqlx::query(
         "INSERT INTO benchmark_sync_runs \
            (id, source, status, started_at, finished_at, duration_ms, published, matched, \
-            skipped_unknown, ambiguous, inserted, updated, unchanged, source_url, error) \
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?)",
+            matched_hints, skipped_unknown, ambiguous, failed_pages, inserted, updated, unchanged, \
+            source_url, error) \
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, 0, 0, ?, ?)",
     )
     .bind(&run_id)
     .bind(outcome.source.as_str())
@@ -1220,6 +1609,7 @@ async fn record_run(
     .bind(&outcome.started_at)
     .bind(&outcome.finished_at)
     .bind(outcome.duration_ms)
+    .bind(outcome.counts.failed_pages as i64)
     .bind(outcome.source_url.as_str())
     .bind(outcome.error.as_deref())
     .execute(&mut *tx)
@@ -1235,6 +1625,7 @@ async fn record_run(
             &serde_json::json!({
                 "source": outcome.source.as_str(),
                 "status": outcome.status.as_str(),
+                "failed_pages": outcome.counts.failed_pages,
                 "error": outcome.error,
             }),
         )
@@ -1323,8 +1714,10 @@ pub struct RunRow {
     pub duration_ms: i64,
     pub published: i64,
     pub matched: i64,
+    pub matched_hints: i64,
     pub skipped_unknown: i64,
     pub ambiguous: i64,
+    pub failed_pages: i64,
     pub inserted: i64,
     pub updated: i64,
     pub unchanged: i64,
@@ -1337,7 +1730,8 @@ pub struct RunRow {
 pub async fn last_run(pool: &SqlitePool, source: SourceId) -> Result<Option<RunRow>, SyncError> {
     Ok(sqlx::query_as::<_, RunRow>(
         "SELECT id, source, status, started_at, finished_at, duration_ms, published, matched, \
-                skipped_unknown, ambiguous, inserted, updated, unchanged, source_url, error \
+                matched_hints, skipped_unknown, ambiguous, failed_pages, inserted, updated, \
+                unchanged, source_url, error \
          FROM benchmark_sync_runs WHERE source = ? \
          ORDER BY finished_at DESC, id DESC LIMIT 1",
     )
@@ -1701,52 +2095,67 @@ mod tests {
         assert_eq!(normalize_model_key("!!!"), "");
     }
 
+    /// `Matching::Matched` from plain ids, for readable assertions.
+    fn matched(ids: &[&str]) -> Matching {
+        Matching::Matched(ids.iter().map(|id| (*id).to_string()).collect())
+    }
+
     #[test]
-    fn matching_is_exact_first_then_a_unique_suffix_fallback() {
+    fn matching_follows_the_decision_table() {
         let index = ModelIndex::new(vec![
             ("openai/gpt-4o".to_string(), "model-gpt".to_string()),
             ("claude-sonnet-4.5".to_string(), "model-claude".to_string()),
             ("acme-widget-7b".to_string(), "model-widget".to_string()),
         ]);
-        assert_eq!(
-            index.lookup("GPT-4o"),
-            Matching::Matched("model-gpt".into())
-        );
+        assert_eq!(index.lookup("GPT-4o"), matched(&["model-gpt"]));
         // A variant the catalog does not have is unknown, never the base.
         assert_eq!(index.lookup("openai/gpt-4o:free"), Matching::Unknown);
         assert_eq!(
             index.lookup("Claude Sonnet 4.5"),
-            Matching::Matched("model-claude".into())
+            matched(&["model-claude"])
         );
-        // BenchmarkList writes the vendor with a hyphen; the suffix match
-        // strips it. Unknown hints are skipped, never guessed.
-        assert_eq!(
-            index.lookup("openai-gpt-4o"),
-            Matching::Matched("model-gpt".into())
-        );
+        // BenchmarkList writes the vendor with a hyphen; that token is
+        // stripped for matching. Unknown hints are skipped, never guessed.
+        assert_eq!(index.lookup("openai-gpt-4o"), matched(&["model-gpt"]));
         assert_eq!(index.lookup("totally-unknown"), Matching::Unknown);
+        // A generic tail is never matched, even when a model ends with it.
+        assert_eq!(index.lookup("flash"), Matching::Unknown);
+        assert_eq!(index.lookup("pro"), Matching::Unknown);
 
-        // Two distinct models under one key are ambiguous, not a guess.
-        let ambiguous = ModelIndex::new(vec![
+        // Two catalog entries of the same model under different spellings
+        // (vendor difference only) resolve to both, not to a guess.
+        let shared = ModelIndex::new(vec![
             ("gpt-4o".to_string(), "model-gpt".to_string()),
             ("openai/gpt-4o".to_string(), "model-other".to_string()),
         ]);
-        assert_eq!(ambiguous.lookup("gpt-4o"), Matching::Ambiguous);
-
-        // A suffix fallback matches only when exactly one model has that base.
-        let unique = ModelIndex::new(vec![(
-            "qwen3-coder-2025-08-07".to_string(),
-            "model-qwen".to_string(),
-        )]);
         assert_eq!(
-            unique.lookup("qwen3-coder"),
-            Matching::Matched("model-qwen".into())
+            shared.lookup("gpt-4o"),
+            matched(&["model-gpt", "model-other"])
         );
-        let competing = ModelIndex::new(vec![
+
+        // Date-stamped variants of one name are the same identity too.
+        let dated = ModelIndex::new(vec![
             ("qwen3-coder-2025-08-07".to_string(), "model-a".to_string()),
             ("qwen3-coder-2025-09-01".to_string(), "model-b".to_string()),
         ]);
-        assert_eq!(competing.lookup("qwen3-coder"), Matching::Ambiguous);
+        assert_eq!(
+            dated.lookup("qwen3-coder"),
+            matched(&["model-a", "model-b"])
+        );
+
+        // Distinct identities that both suffix the hint stay ambiguous.
+        let nested = ModelIndex::new(vec![
+            (
+                "acme-labs/qwen3-coder-30b".to_string(),
+                "model-a".to_string(),
+            ),
+            ("beta-labs/coder-30b".to_string(), "model-b".to_string()),
+        ]);
+        assert_eq!(
+            nested.lookup("some-vendor-x-qwen3-coder-30b"),
+            Matching::Ambiguous,
+            "two distinct identities is a guess, never a write"
+        );
     }
 
     #[test]
@@ -1759,34 +2168,159 @@ mod tests {
             ("openai/gpt-4o:batch".to_string(), "batch".to_string()),
             ("openai/gpt-4o:free".to_string(), "free".to_string()),
         ]);
-        assert_eq!(
-            index.lookup("openai/gpt-4o"),
-            Matching::Matched("base".into())
-        );
-        assert_eq!(
-            index.lookup("openai/gpt-4o:batch"),
-            Matching::Matched("batch".into())
-        );
-        assert_eq!(
-            index.lookup("openai/gpt-4o:free"),
-            Matching::Matched("free".into())
-        );
-        // The vendor-hyphen fallback still lands on one of the variants.
-        assert_eq!(
-            index.lookup("openai-gpt-4o"),
-            Matching::Matched("base".into())
-        );
+        assert_eq!(index.lookup("openai/gpt-4o"), matched(&["base"]));
+        assert_eq!(index.lookup("openai/gpt-4o:batch"), matched(&["batch"]));
+        assert_eq!(index.lookup("openai/gpt-4o:free"), matched(&["free"]));
+        assert_eq!(index.lookup("openai-gpt-4o"), matched(&["base"]));
 
-        // A genuinely ambiguous suffix still reports ambiguous.
-        let ambiguous = ModelIndex::new(vec![
-            ("gpt-4o-preview".to_string(), "model-a".to_string()),
-            ("openai/gpt-4o-preview".to_string(), "model-b".to_string()),
+        // Two providers of the base model attach to both; the `:free`
+        // offering still stays on its own row.
+        let two_providers = ModelIndex::new(vec![
+            ("openrouter/openai/gpt-4o".to_string(), "or".to_string()),
+            ("azure/openai/gpt-4o".to_string(), "az".to_string()),
+            (
+                "openrouter/openai/gpt-4o:free".to_string(),
+                "free".to_string(),
+            ),
         ]);
-        assert_eq!(ambiguous.lookup("GPT-4o Preview"), Matching::Ambiguous);
+        assert_eq!(
+            two_providers.lookup("GPT-4o"),
+            matched(&["az", "or"]),
+            "same identity, two providers"
+        );
+        assert_eq!(
+            two_providers.lookup("GPT-4o:free"),
+            matched(&["free"]),
+            "an offering tag is not merged with the base model"
+        );
+    }
+
+    const MATCHING_SHAPES: &str =
+        include_str!("../tests/fixtures/benchmarks/matching_live_shapes.json");
+
+    #[test]
+    fn live_shaped_ids_and_benchmark_names_match_the_same_models() {
+        // Catalog shapes observed live (OpenRouter ids + SailResearch/Sail
+        // canonical names) against the benchmark names Arena/BenchLM publish.
+        #[derive(serde::Deserialize)]
+        struct Shapes {
+            catalog: Vec<CatalogModel>,
+            expectations: Vec<Expectation>,
+            expected_counts: ExpectedCounts,
+        }
+        #[derive(serde::Deserialize)]
+        struct CatalogModel {
+            id: String,
+            name: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Expectation {
+            hint: String,
+            #[serde(default)]
+            matched: Option<Vec<String>>,
+            #[serde(default)]
+            skipped: bool,
+            #[serde(default)]
+            ambiguous: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct ExpectedCounts {
+            published: usize,
+            matched_models: usize,
+            matched_hints: usize,
+            skipped_unknown: usize,
+            ambiguous: usize,
+        }
+
+        let shapes: Shapes = serde_json::from_str(MATCHING_SHAPES).expect("fixture parses");
+        assert!(shapes.catalog.len() >= 10, "real-shape catalog ids");
+        assert!(shapes.expectations.len() >= 10, "real-shape hints");
+
+        let index = ModelIndex::new(
+            shapes
+                .catalog
+                .iter()
+                .map(|model| (model.name.clone(), model.id.clone())),
+        );
+        for expectation in &shapes.expectations {
+            let actual = index.lookup(&expectation.hint);
+            let expected = if let Some(ids) = &expectation.matched {
+                matched(&ids.iter().map(String::as_str).collect::<Vec<_>>())
+            } else if expectation.ambiguous {
+                Matching::Ambiguous
+            } else {
+                assert!(expectation.skipped, "fixture row declares no outcome");
+                Matching::Unknown
+            };
+            assert_eq!(actual, expected, "hint {:?}", expectation.hint);
+        }
+
+        // The counts the status endpoint reports for this run.
+        let entries: Vec<Entry> = shapes
+            .expectations
+            .iter()
+            .map(|expectation| Entry::new(expectation.hint.clone(), "text", 50.0))
+            .collect();
+        let (_, counts) = resolve(entries, &index, shapes.expectations.len());
+        assert_eq!(counts.published, shapes.expected_counts.published);
+        assert_eq!(counts.matched, shapes.expected_counts.matched_models);
+        assert_eq!(counts.matched_hints, shapes.expected_counts.matched_hints);
+        assert_eq!(
+            counts.skipped_unknown,
+            shapes.expected_counts.skipped_unknown
+        );
+        assert_eq!(counts.ambiguous, shapes.expected_counts.ambiguous);
+        assert_eq!(counts.matched, 11, "one row per model, two for deepseek");
+
+        // Vendor aliases normalize for matching only.
+        assert_eq!(canonical_vendor("deepseek-ai"), "deepseek");
+        assert_eq!(canonical_vendor("z-ai"), "zai-org");
+        assert_eq!(canonical_vendor("x-ai"), "xai");
+        assert_eq!(canonical_vendor("moonshotai"), "moonshot");
+        assert_eq!(canonical_vendor("google-ai"), "google");
     }
 
     #[test]
-    fn duplicate_entries_keep_the_best_rank_and_count_the_rest() {
+    fn one_hint_attaches_to_every_model_with_its_identity() {
+        let index = ModelIndex::new(vec![
+            (
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017".to_string(),
+                "sail".to_string(),
+            ),
+            (
+                "deepseek/deepseek-v4.1-flash".to_string(),
+                "openrouter".to_string(),
+            ),
+            ("openai/gpt-5.4".to_string(), "gpt".to_string()),
+        ]);
+        let entries = vec![
+            Entry::new("deepseek-v4.1-flash", "text", 88.0),
+            Entry::new("openai-gpt-5.4", "text", 87.0),
+            Entry::new("some-unknown-model", "text", 60.0),
+        ];
+        let (picked, counts) = resolve(entries, &index, 3);
+        assert_eq!(counts.published, 3);
+        assert_eq!(counts.matched_hints, 2, "two hints resolved");
+        assert_eq!(
+            counts.matched, 3,
+            "the deepseek hint attached to two models"
+        );
+        assert_eq!(counts.skipped_unknown, 1);
+        assert_eq!(counts.ambiguous, 0);
+        let ids: Vec<&str> = picked.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["gpt", "openrouter", "sail"]);
+        assert!(picked.iter().all(|(_, entry)| entry.score != 60.0));
+
+        // A hint written as one provider's full id reaches the other
+        // provider of the same model too.
+        assert_eq!(
+            index.lookup("deepseek/deepseek-v4.1-flash"),
+            matched(&["openrouter", "sail"])
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_keep_the_best_rank_without_reading_as_ambiguous() {
         let index = ModelIndex::new(vec![("m".to_string(), "model-m".to_string())]);
         let mut first = Entry::new("m", "text", 90.0);
         first.rank = Some(8);
@@ -1796,7 +2330,8 @@ mod tests {
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].1.score, 95.0);
         assert_eq!(counts.matched, 1);
-        assert_eq!(counts.ambiguous, 1);
+        assert_eq!(counts.matched_hints, 2);
+        assert_eq!(counts.ambiguous, 0, "a duplicate is not an ambiguity");
         assert_eq!(counts.published, 2);
     }
 
@@ -2146,18 +2681,144 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // HttpFetcher retry (live finding 2026-11-17)
+    // HttpFetcher hardening (live finding 2026-11-17: BenchmarkList failed
+    // from the gateway while curl succeeded; Arena 502/503 under load)
     // -----------------------------------------------------------------------
 
-    /// Accepts the first connection and closes it without a response, then
-    /// serves `body` on every later connection: `send()` fails once.
-    async fn spawn_close_first_server(body: &'static str) -> std::net::SocketAddr {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    /// One scripted HTTP server: one response per accepted connection, in
+    /// order, plus the request head each connection sent.
+    struct Scripted {
+        addr: std::net::SocketAddr,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl Scripted {
+        fn url(&self) -> String {
+            format!("http://{}/models", self.addr)
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.seen.lock().expect("request log").clone()
+        }
+    }
+
+    async fn spawn_scripted(responses: Vec<String>) -> Scripted {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted listener");
+        let addr = listener.local_addr().expect("scripted address");
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                log.lock()
+                    .expect("request log")
+                    .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        Scripted { addr, seen }
+    }
+
+    fn ok_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn status_response(status: &str) -> String {
+        format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+    }
+
+    /// A 200 whose `Content-Length` promises more than the server sends before
+    /// closing: reqwest reports a body decode error mid-transfer.
+    fn truncated_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len() + 500
+        )
+    }
+
+    /// A chunked 200 that sends one complete chunk and closes without the
+    /// terminating `0\r\n\r\n`: the whole document arrived, the framing broke.
+    fn unterminated_chunked_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+             transfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{body}\r\n",
+            body.len()
+        )
+    }
+
+    fn fast_fetcher() -> HttpFetcher {
+        HttpFetcher::with_retry_base(Duration::from_millis(1)).expect("http client")
+    }
+
+    #[tokio::test]
+    async fn every_request_states_a_user_agent_and_asks_for_json() {
+        // benchmarklist.com's CDN closes TLS on requests without a
+        // `User-Agent`; the gateway used to send reqwest's default (none).
+        let scripted = spawn_scripted(vec![ok_response("{\"rows\":[]}")]).await;
+        let body = fast_fetcher().get(&scripted.url()).await.expect("fetch");
+        assert_eq!(body, "{\"rows\":[]}");
+
+        let head = scripted.requests().join("\n").to_lowercase();
+        assert!(head.contains("user-agent: pareto-ai/"), "{head}");
+        assert!(head.contains("accept: application/json"), "{head}");
+        assert!(head.contains("accept-encoding: identity"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn a_user_agent_is_required_not_optional() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ua listener");
+        let addr = listener.local_addr().expect("ua address");
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..read]).to_lowercase();
+                let response = if head.contains("user-agent: pareto-ai/") {
+                    ok_response("{\"data\":[]}")
+                } else {
+                    status_response("403 Forbidden")
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let body = fast_fetcher()
+            .get(&format!("http://{addr}/models"))
+            .await
+            .expect("the gateway identifies itself, so the server answers");
+        assert_eq!(body, "{\"data\":[]}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_is_retried_and_succeeds() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind flaky listener");
         let addr = listener.local_addr().expect("flaky address");
+        let body = "{\"data\":[]}";
         tokio::spawn(async move {
             let mut first = true;
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -2169,43 +2830,208 @@ mod tests {
                 }
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf).await;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
+                let response = ok_response(body);
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.shutdown().await;
             }
         });
-        addr
-    }
 
-    #[tokio::test]
-    async fn a_failed_send_is_retried_and_succeeds() {
-        let addr = spawn_close_first_server("{\"data\":[]}").await;
-        let fetcher = HttpFetcher::new().expect("http client");
-        let body = fetcher
+        let fetched = fast_fetcher()
             .get(&format!("http://{addr}/models"))
             .await
-            .expect("the second attempt succeeds");
-        assert_eq!(body, "{\"data\":[]}");
+            .expect("an attempt succeeds");
+        assert_eq!(fetched, body);
     }
 
     #[tokio::test]
-    async fn an_unreachable_host_reports_the_attempt_level_error() {
+    async fn an_early_closed_body_is_retried_and_counted_by_bytes() {
+        // The live failure: the response head arrives, the body is cut short.
+        // That is an interrupted transfer, not a JSON shape problem, so a
+        // fresh connection gets the whole document.
+        let scripted = spawn_scripted(vec![
+            truncated_response("{\"rows\": [{\"id\": \"a\"}"),
+            ok_response("{\"rows\": []}"),
+        ])
+        .await;
+        let body = fast_fetcher()
+            .get(&scripted.url())
+            .await
+            .expect("retry wins");
+        assert_eq!(body, "{\"rows\": []}");
+        let requests = scripted.requests();
+        assert_eq!(requests.len(), 2);
+        let retry = requests[1].to_lowercase();
+        assert!(retry.contains("connection: close"), "{retry}");
+        assert!(
+            retry.starts_with("get /models http/1.1"),
+            "the retry is pinned to HTTP/1.1: {retry}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_5xx_is_retried_with_backoff_and_succeeds() {
+        let scripted = spawn_scripted(vec![
+            status_response("503 Service Unavailable"),
+            status_response("502 Bad Gateway"),
+            ok_response("{\"rows\": [1]}"),
+        ])
+        .await;
+        let body = fast_fetcher()
+            .get(&scripted.url())
+            .await
+            .expect("third try");
+        assert_eq!(body, "{\"rows\": [1]}");
+        assert_eq!(scripted.requests().len(), 3, "three attempts, no more");
+    }
+
+    #[tokio::test]
+    async fn a_permanent_5xx_reports_every_attempt() {
+        let scripted = spawn_scripted(vec![
+            status_response("503 Service Unavailable"),
+            status_response("503 Service Unavailable"),
+            status_response("503 Service Unavailable"),
+        ])
+        .await;
+        let error = fast_fetcher()
+            .get(&scripted.url())
+            .await
+            .expect_err("three 503s are a failure");
+        let message = error.to_string();
+        assert!(message.contains("attempt 3 of 3"), "{message}");
+        assert!(message.contains("503"), "{message}");
+        assert_eq!(scripted.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_complete_document_with_a_broken_chunk_terminator_is_used() {
+        // The shape that fits the recorded live failure: the whole 10 MiB
+        // document arrives and the terminator is dropped. curl writes the
+        // file; reqwest reported "error decoding response body". The bytes are
+        // the answer, so they are used, and no retry is spent on them.
+        let body = "{\"rows\": [{\"id\": \"live-shape\"}]}";
+        let scripted = spawn_scripted(vec![unterminated_chunked_response(body)]).await;
+        let fetched = fast_fetcher().get(&scripted.url()).await.expect("salvaged");
+        assert_eq!(fetched, body);
+        assert_eq!(scripted.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_document_is_not_salvaged() {
+        // Half a document is never returned as if it were whole, on any
+        // attempt.
+        let truncated = truncated_response("{\"rows\": [{\"id\": \"a\"}");
+        let scripted = spawn_scripted(vec![truncated.clone(), truncated.clone(), truncated]).await;
+        let error = fast_fetcher()
+            .get(&scripted.url())
+            .await
+            .expect_err("every attempt is truncated");
+        let message = error.to_string();
+        assert!(message.contains("attempt 3 of 3"), "{message}");
+        assert!(message.contains("(body)"), "{message}");
+        assert!(message.contains("bytes"), "{message}");
+        assert_eq!(scripted.requests().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_client_error_is_not_retried() {
+        let scripted = spawn_scripted(vec![status_response("404 Not Found")]).await;
+        let error = fast_fetcher()
+            .get(&scripted.url())
+            .await
+            .expect_err("404 is final");
+        assert!(error.to_string().contains("404"), "{error}");
+        assert_eq!(scripted.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_reports_the_last_attempt() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind probe listener");
         let addr = listener.local_addr().expect("probe address");
         drop(listener);
 
-        let fetcher = HttpFetcher::new().expect("http client");
-        let error = fetcher
+        let error = fast_fetcher()
             .get(&format!("http://{addr}/models"))
             .await
             .expect_err("no server listens");
         let message = error.to_string();
-        assert!(message.contains("attempt 2"), "{message}");
+        assert!(message.contains("attempt 3 of 3"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_arena_page_fails_the_source_instead_of_truncating() {
+        let app = TestApp::new().await;
+        let fetcher = FixtureFetcher::new(vec![("offset=0&length=100", ARENA_PAGE_1)]);
+        let outcome = run_source(&app.state.pool, SourceId::Arena, &fetcher, false, None)
+            .await
+            .expect("run");
+        assert_eq!(outcome.status, RunStatus::Error);
+        assert_eq!(outcome.counts.failed_pages, 1);
+        let error = outcome.error.expect("error text");
+        assert!(error.contains("offset 3"), "{error}");
+
+        let stored: (i64, i64) = sqlx::query_as(
+            "SELECT failed_pages, published FROM benchmark_sync_runs WHERE source = 'arena'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("run row");
+        assert_eq!(stored, (1, 0), "the failed page is recorded, not hidden");
+    }
+
+    #[tokio::test]
+    async fn one_benchmark_row_attaches_to_every_model_of_its_identity() {
+        let app = TestApp::new().await;
+        let uid = admin(&app).await;
+        let sail = seed_model(&app, &uid, "deepseek-ai/DeepSeek-V4.1-Flash-1017").await;
+        let openrouter = seed_model(&app, &uid, "deepseek/deepseek-v4.1-flash").await;
+        let fetcher = FixtureFetcher::new(vec![(
+            "directory-data/models.json",
+            r#"{"rows": [
+                {"id": "deepseek-v4.1-flash", "capability_score": 88.0},
+                {"id": "no-such-model", "capability_score": 60.0}
+            ]}"#,
+        )]);
+        let outcome = run_source(
+            &app.state.pool,
+            SourceId::BenchmarkList,
+            &fetcher,
+            false,
+            None,
+        )
+        .await
+        .expect("sync");
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert_eq!(outcome.counts.published, 2);
+        assert_eq!(outcome.counts.matched_hints, 1);
+        assert_eq!(outcome.counts.matched, 2, "one row per model");
+        assert_eq!(outcome.counts.skipped_unknown, 1);
+        assert_eq!(outcome.counts.inserted, 2);
+
+        let rows: Vec<(String, f64, String)> = sqlx::query_as(
+            "SELECT model_id, score, scale FROM benchmarks WHERE source = 'benchmarklist' \
+             ORDER BY model_id",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("rows");
+        assert_eq!(rows.len(), 2);
+        let ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(ids.contains(&openrouter.as_str()), "{ids:?}");
+        assert!(ids.contains(&sail.as_str()), "{ids:?}");
+        assert!(
+            rows.iter()
+                .all(|(_, score, scale)| *score == 88.0 && scale == "capability")
+        );
+
+        let run: (i64, i64, i64) = sqlx::query_as(
+            "SELECT matched, matched_hints, failed_pages FROM benchmark_sync_runs \
+             WHERE source = 'benchmarklist'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("run row");
+        assert_eq!(run, (2, 1, 0));
     }
 }

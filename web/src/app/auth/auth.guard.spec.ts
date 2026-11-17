@@ -7,7 +7,7 @@ import {
   provideRouter,
 } from '@angular/router';
 import { FetchMock, errorResponse, jsonResponse } from '../../testing/fetch-mock';
-import { authGuard, loginGuard } from './auth.guard';
+import { authGuard, loginGuard, setupGuard, setupPageGuard } from './auth.guard';
 
 const session = {
   user: {
@@ -20,6 +20,16 @@ const session = {
   csrf_token: 'csrf-1',
 };
 
+const setupStatus = {
+  mode: 'setup' as const,
+  bind: '127.0.0.1:8081',
+  is_local: true,
+  setup_required: true,
+  warning: null,
+  tls: { enabled: false, domain: null },
+  master_key_source: 'file' as const,
+};
+
 const rotationSession = {
   user: { ...session.user, must_change_password: true },
   csrf_token: 'csrf-1',
@@ -28,6 +38,18 @@ const rotationSession = {
 function runGuard(url: string): ReturnType<typeof authGuard> {
   return TestBed.runInInjectionContext(() =>
     authGuard({} as ActivatedRouteSnapshot, { url } as RouterStateSnapshot),
+  );
+}
+
+function runSetupGuard(): ReturnType<typeof setupGuard> {
+  return TestBed.runInInjectionContext(() =>
+    setupGuard({} as ActivatedRouteSnapshot, { url: '/' } as RouterStateSnapshot),
+  );
+}
+
+function runSetupPageGuard(): ReturnType<typeof setupPageGuard> {
+  return TestBed.runInInjectionContext(() =>
+    setupPageGuard({} as ActivatedRouteSnapshot, { url: '/setup' } as RouterStateSnapshot),
   );
 }
 
@@ -115,5 +137,64 @@ describe('authGuard', () => {
 
     await expect(runLoginGuard()).resolves.toBe(true);
     expect(createUrlTree).not.toHaveBeenCalled();
+  });
+
+  describe('setup guards', () => {
+    it('sends the first visit to the wizard while no account exists', async () => {
+      fetchMock.respond(jsonResponse(200, setupStatus));
+
+      const result = await runSetupGuard();
+
+      expect(result).toBeInstanceOf(UrlTree);
+      if (result instanceof UrlTree) {
+        expect(result.toString()).toBe('/setup');
+      }
+    });
+
+    it('lets a protected or already-skipped gateway through to the console', async () => {
+      fetchMock.respond(
+        jsonResponse(200, { ...setupStatus, mode: 'unprotected', setup_required: false }),
+      );
+
+      await expect(runSetupGuard()).resolves.toBe(true);
+    });
+
+    it('falls through when the status cannot be read', async () => {
+      fetchMock.respond(errorResponse(500, 'internal', 'boom'));
+
+      await expect(runSetupGuard()).resolves.toBe(true);
+    });
+
+    it('keeps /setup reachable while setup is required', async () => {
+      fetchMock.respond(jsonResponse(200, setupStatus));
+
+      await expect(runSetupPageGuard()).resolves.toBe(true);
+    });
+
+    it('moves /setup to /login once protected', async () => {
+      fetchMock.respond(
+        jsonResponse(200, { ...setupStatus, mode: 'protected', setup_required: false }),
+      );
+
+      const result = await runSetupPageGuard();
+
+      expect(result).toBeInstanceOf(UrlTree);
+      if (result instanceof UrlTree) {
+        expect(result.toString()).toBe('/login');
+      }
+    });
+
+    it('moves /setup to the console when setup was skipped', async () => {
+      fetchMock.respond(
+        jsonResponse(200, { ...setupStatus, mode: 'unprotected', setup_required: false }),
+      );
+
+      const result = await runSetupPageGuard();
+
+      expect(result).toBeInstanceOf(UrlTree);
+      if (result instanceof UrlTree) {
+        expect(result.toString()).toBe('/');
+      }
+    });
   });
 });

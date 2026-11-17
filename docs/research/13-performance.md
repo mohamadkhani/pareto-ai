@@ -450,3 +450,56 @@ The UI half of `just check` was not run because `web/` is being edited
 concurrently. No behaviour changed for grants, budgets, the ledger, or auth
 decisions.
 
+
+## 13. Password hashing and login latency (D39, 2026-11-17)
+
+The login path was measured on this machine (release, `lto = "thin"`, `strip`)
+because a login took ~330 ms and the earlier demo ran a **debug** build where
+it was seconds. Two changes: Argon2id replaces PBKDF2 (D15's revisit clause),
+and the derivation runs on `tokio::task::spawn_blocking` so it never stalls the
+async runtime.
+
+Parameters: Argon2id `m = 64 MiB`, `t = 3`, `p = 4`, 32-byte output; PBKDF2
+rows keep their stored count (600k) and are verified as-is.
+
+### 13.1 Hash cost (p50 of 5, `perf_bench::password_hash_probe`)
+
+| Operation | Release | Debug |
+| --- | ---: | ---: |
+| Argon2id hash | 111.9 ms | 1 956.7 ms |
+| Argon2id verify | 111.4 ms | 1 953.3 ms |
+| PBKDF2-SHA256 600k hash | 317.9 ms | 6 563.2 ms |
+
+### 13.2 End-to-end login (POST /api/auth/login over TCP, release binary)
+
+| Row | Before (PBKDF2) | After (Argon2id) |
+| --- | ---: | ---: |
+| Argon2id account | — | **112.7 ms** (5 samples: 112.2–113.7) |
+| PBKDF2 account, first login (verify + rehash) | 328 ms | 427.6 ms once |
+| PBKDF2 account, after the upgrade | 328 ms | 112.8 ms |
+| Debug build, Argon2id account | n/a | 1 951.5 ms |
+
+Before: `login 0.324669s / 0.327833s / 0.329291s / 0.329964s / 0.323244s`
+(curl against the pre-change release binary, same machine, same database
+shape). After: `0.113662 / 0.112785 / 0.112706 / 0.112227 / 0.112262` seconds.
+
+Target was ≤ 150 ms; 112.7 ms leaves ~25% headroom. The 3x difference matches
+the hash-cost ratio, so the remaining ~1 ms is the session/audit transaction,
+not the derivation. The first login of a pre-migration row is deliberately
+slower once: it verifies PBKDF2 and writes the Argon2id hash.
+
+### 13.3 Debug builds
+
+Unoptimized Argon2id is ~17x slower than release and PBKDF2 follows the same
+ratio, so a `cargo run` demo pays 2 s per login (8 s for the one-time upgrade).
+That is expected for a deliberately expensive KDF; `just build` uses release.
+`spawn_blocking` still keeps the runtime responsive in either build: a 400 ms
+artificial hash does not delay a concurrent `/health` request (test:
+`routes::auth::tests::a_slow_password_hash_does_not_stall_a_concurrent_request`).
+
+### 13.4 Reproduce
+
+```bash
+just bench password_hash_probe
+# release + debug comparison: run the same probe with and without --release
+```

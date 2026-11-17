@@ -17,6 +17,15 @@ Living notes about the build environment, dated. Instructions for agents are in
   `chacha20poly1305`, `aead`, `orion`, `sodiumoxide` are not.
 - Consequence: credential encryption uses `ring::aead` AES-256-GCM (D16).
 
+## 2026-11-18 — network is intermittent
+
+- crates.io was reachable again (index 200; `cargo search` works), then provider
+  hosts went down (TLS eof/timeout) an hour later, then came back. Treat network
+  access as variable: try online, fall back to `--offline`/fixtures, and never
+  encode a permanent "blocked" assumption.
+- This is why `Argon2id` (`argon2` crate) and later ACME crates can be added at
+  all; earlier decisions assumed a permanently blocked registry.
+
 ## 2026-11-16 — shell tooling restricted mid-session
 
 - The shell gate became allowlist-based: `mount` is hard-denied, some commands

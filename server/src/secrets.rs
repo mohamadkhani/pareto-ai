@@ -2,7 +2,8 @@
 //!
 //! Secrets are sealed with AES-256-GCM from the `ring` crate — `aes-gcm` and
 //! `chacha20poly1305` are not in the offline cargo cache — using the 32-byte
-//! `GATEWAY_MASTER_KEY` (base64url or hex). The stored format is
+//! master key (`GATEWAY_MASTER_KEY`, or `<data>/master.key` generated on first
+//! start; see [`crate::master_key`]). The stored format is
 //! `v1:<b64url nonce>:<b64url ciphertext+tag>` with a fresh random 12-byte
 //! nonce per encryption and the credential row id as associated data, so a
 //! ciphertext moved to another row fails to open instead of leaking.
@@ -27,11 +28,6 @@ const NONCE_LEN: usize = 12;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
-    #[error(
-        "GATEWAY_MASTER_KEY is required to encrypt provider credentials; \
-         generate one with `openssl rand -base64 32 | tr '+/' '-_'` and restart"
-    )]
-    Missing,
     #[error(
         "GATEWAY_MASTER_KEY must decode to exactly 32 bytes (got {got}); \
          generate one with `openssl rand -base64 32 | tr '+/' '-_'`"
@@ -74,6 +70,12 @@ impl MasterKey {
     /// Wraps raw key bytes. The caller vouches for the length.
     pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
         Self(bytes)
+    }
+
+    /// The raw key bytes, for the one caller that must persist a generated key
+    /// (`master_key::resolve`). Never log or return them.
+    pub fn expose_bytes(&self) -> &[u8] {
+        &self.0
     }
 
     /// Parses `GATEWAY_MASTER_KEY`: base64url (padded or not) or hex,
@@ -224,17 +226,6 @@ impl SecretBox {
 impl std::fmt::Debug for SecretBox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("SecretBox(****)")
-    }
-}
-
-/// Builds the credential [`SecretBox`] from the configured master key.
-///
-/// Fails with an actionable message when `GATEWAY_MASTER_KEY` is absent, so
-/// the gateway cannot come up with credential encryption unavailable.
-pub fn require_master_key(master_key: Option<&MasterKey>) -> Result<SecretBox, SecretError> {
-    match master_key {
-        Some(key) => Ok(SecretBox::new(key.clone())),
-        None => Err(SecretError::Missing),
     }
 }
 
@@ -395,15 +386,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_master_key_fails_startup_with_an_actionable_message() {
-        let missing = require_master_key(None).expect_err("no key must fail");
-        let message = missing.to_string();
-        assert!(matches!(missing, SecretError::Missing));
-        assert!(message.contains("GATEWAY_MASTER_KEY"), "{message}");
-        assert!(message.contains("openssl rand"), "{message}");
-
+    fn a_secret_box_cannot_be_constructed_from_no_key() {
+        // A zero-length key is the only "no key" the box accepts: the
+        // generated-file path always yields 32 bytes (see `master_key`).
+        assert!(matches!(
+            MasterKey::parse(""),
+            Err(SecretError::KeyLength { got: 0 })
+        ));
         let key = key_a();
-        let built = require_master_key(Some(&key)).expect("present key builds a box");
+        let built = SecretBox::new(key);
         assert_eq!(format!("{built:?}"), "SecretBox(****)");
     }
 }

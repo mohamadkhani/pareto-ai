@@ -1,5 +1,6 @@
 import { inject } from '@angular/core';
 import { type CanActivateFn, Router } from '@angular/router';
+import { SetupService } from '../setup/setup.service';
 import { AuthService } from './auth.service';
 
 /** The forced-rotation screen; the only screen a flagged account may open. */
@@ -38,4 +39,30 @@ export const loginGuard: CanActivateFn = async () => {
   const auth = inject(AuthService);
   const router = inject(Router);
   return (await auth.loadMe()) ? router.createUrlTree(['/']) : true;
+};
+
+/**
+ * Sends a first visit to the wizard while no account exists (mode `setup`).
+ * Runs before `authGuard`, which would otherwise bounce to `/login`; a failed
+ * status read falls through so the ordinary login path still works.
+ */
+export const setupGuard: CanActivateFn = async () => {
+  const setup = inject(SetupService);
+  const router = inject(Router);
+  const status = await setup.load().catch(() => null);
+  return status?.setup_required === true ? router.createUrlTree(['/setup']) : true;
+};
+
+/**
+ * Keeps `/setup` for the first run only: a `protected` gateway sends the
+ * visitor to `/login`, an `unprotected` one (already skipped) to the console.
+ */
+export const setupPageGuard: CanActivateFn = async () => {
+  const setup = inject(SetupService);
+  const router = inject(Router);
+  const status = await setup.load(true).catch(() => null);
+  if (status === null || status.setup_required) {
+    return true;
+  }
+  return router.createUrlTree([status.mode === 'protected' ? '/login' : '/']);
 };

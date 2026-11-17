@@ -1150,3 +1150,147 @@ async fn read_pragmas(pool: &sqlx::SqlitePool) -> Vec<(String, String)> {
         ("pool max_connections".to_string(), "8".to_string()),
     ]
 }
+
+// ---------------------------------------------------------------------------
+// Password hashing (D39)
+// ---------------------------------------------------------------------------
+
+/// Measures Argon2id vs the pre-migration PBKDF2 cost and the end-to-end login
+/// latency through the real router. Numbers only; nothing asserts on them.
+///
+/// Run with `just bench password_hash_probe`.
+#[tokio::test]
+#[ignore = "performance probe; run with `just bench password_hash_probe`"]
+async fn password_hash_probe() {
+    use crate::password;
+
+    let mut rows: Vec<(String, f64, String)> = Vec::new();
+    let sample = |run: &dyn Fn()| {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let started = Instant::now();
+            run();
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        times[2]
+    };
+
+    let argon = password::Argon2Cost::production();
+    let stored = password::hash_password_with_cost("bench-password", argon).expect("hash");
+    let argon_hash_ms = sample(&|| {
+        password::hash_password_with_cost("bench-password", argon).expect("hash");
+    });
+    let argon_verify_ms = sample(&|| {
+        password::verify_password("bench-password", &stored).expect("verify");
+    });
+    rows.push((
+        format!(
+            "argon2id m={}KiB t={} p={}",
+            argon.m_cost_kib, argon.t_cost, argon.p_cost
+        ),
+        argon_hash_ms,
+        format!("verify {argon_verify_ms:.1} ms"),
+    ));
+
+    let pbkdf2_hash_ms = sample(&|| {
+        password::hash_password_pbkdf2("bench-password", password::PBKDF2_ITERATIONS)
+            .expect("pbkdf2");
+    });
+    rows.push((
+        format!("pbkdf2-hmac-sha256 {}k", password::PBKDF2_ITERATIONS / 1000),
+        pbkdf2_hash_ms,
+        "verify ≈ hash".to_string(),
+    ));
+
+    // End-to-end logins through the router at production cost.
+    password::set_test_cost(argon.m_cost_kib, argon.t_cost, argon.p_cost);
+    let app = TestApp::new().await;
+    password::set_test_cost(argon.m_cost_kib, argon.t_cost, argon.p_cost);
+    app.create_user("argon@example.com", Role::Admin, true)
+        .await;
+
+    let legacy = password::hash_password_pbkdf2(
+        crate::test_support::TEST_PASSWORD,
+        password::PBKDF2_ITERATIONS,
+    )
+    .expect("legacy hash");
+    let legacy_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO users (id, email, display_name, password_hash, role, is_active) \
+         VALUES (?, 'legacy@example.com', 'legacy@example.com', ?, 'user', 1)",
+    )
+    .bind(&legacy_id)
+    .bind(&legacy)
+    .execute(&app.state.pool)
+    .await
+    .expect("legacy user");
+
+    let router = app.router();
+    let login = |email: &'static str| {
+        let router = router.clone();
+        async move {
+            let started = Instant::now();
+            let response = send(
+                router,
+                crate::test_support::api_request(
+                    Method::POST,
+                    "/api/auth/login",
+                    Some(json!({
+                        "email": email,
+                        "password": crate::test_support::TEST_PASSWORD,
+                    })),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+            started.elapsed().as_secs_f64() * 1000.0
+        }
+    };
+
+    // Warm the connection pool and the schema cache.
+    let _ = login("argon@example.com").await;
+    let mut argon_login = Vec::new();
+    for _ in 0..5 {
+        argon_login.push(login("argon@example.com").await);
+    }
+    argon_login.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    rows.push((
+        "login, argon2id row (end to end)".to_string(),
+        argon_login[2],
+        format!("p50 over 5; min {:.1} ms", argon_login[0]),
+    ));
+
+    // The first legacy login verifies PBKDF2 and re-hashes to Argon2id.
+    let upgrade_login = login("legacy@example.com").await;
+    rows.push((
+        "login, pbkdf2 row (verify + upgrade)".to_string(),
+        upgrade_login,
+        "first login after the migration".to_string(),
+    ));
+    let mut legacy_login = Vec::new();
+    for _ in 0..5 {
+        legacy_login.push(login("legacy@example.com").await);
+    }
+    legacy_login.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    rows.push((
+        "login, upgraded row (end to end)".to_string(),
+        legacy_login[2],
+        "subsequent logins".to_string(),
+    ));
+
+    password::set_test_cost(8 * 1024, 1, 1);
+
+    let mut out = String::from("\npassword hashing (this build, this machine)\n");
+    out.push_str(&format!(
+        "{:<44} {:>10}  {}\n",
+        "operation", "p50 ms", "note"
+    ));
+    for (label, value, note) in &rows {
+        out.push_str(&format!("{label:<44} {value:>10.1}  {note}\n"));
+    }
+    print!("{out}");
+    let _ = std::io::stdout().flush();
+}

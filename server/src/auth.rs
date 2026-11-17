@@ -8,7 +8,9 @@
 //!
 //! State-changing `/api/*` requests must also carry the session's CSRF token in
 //! the `X-CSRF-Token` header, compared in constant time. This is enforced by
-//! `routes::csrf_guard` for every unsafe method except login.
+//! `routes::csrf_guard` for every unsafe method except login and the setup
+//! mutations (there is no session yet). In `unprotected` mode a synthetic
+//! local-operator identity replaces the session entirely (`crate::setup`).
 //!
 //! Login attempts are rate limited per `(ip, email)`: five failures within
 //! fifteen minutes lock the pair out, and every further attempt doubles the
@@ -582,6 +584,12 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Unprotected mode (the operator skipped setup) acts as a trusted local
+        // operator: every admin route works without a session. The exposure
+        // warning on `/api/setup/status` keeps this state visible.
+        if state.setup.mode() == crate::setup::Mode::Unprotected {
+            return Ok(local_operator());
+        }
         let rid = request_id(&parts.headers);
         let token = session_cookie_value(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
@@ -684,6 +692,16 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
             }));
         }
 
+        // Unprotected mode (no users, setup skipped): the data plane behaves
+        // like the admin plane and trusts the local operator.
+        if state.setup.mode() == crate::setup::Mode::Unprotected {
+            return Ok(Self(DataPlaneCaller {
+                user_id: "local-operator".to_string(),
+                role: Role::Admin,
+                api_key: None,
+            }));
+        }
+
         let token = session_cookie_value(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
         let session = load_session(&state.pool, &token, &state.session_activity)
@@ -704,6 +722,23 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
             role: session.role,
             api_key: None,
         }))
+    }
+}
+
+/// The synthetic caller used while the gateway is in **unprotected** mode: a
+/// trusted local operator with admin rights and no session (the wizard allows
+/// this only for a loopback/setup context). `session_id` is empty, so
+/// session-specific actions (logout, "keep my session" password changes) have
+/// nothing to act on.
+pub fn local_operator() -> AuthUser {
+    AuthUser {
+        user_id: "local-operator".to_string(),
+        email: "local@localhost".to_string(),
+        display_name: "Local operator".to_string(),
+        role: Role::Admin,
+        session_id: String::new(),
+        csrf_token: String::new(),
+        must_change_password: false,
     }
 }
 

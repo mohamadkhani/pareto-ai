@@ -204,3 +204,9 @@
     padding: var(--space-4) var(--space-4);
   }
 }
+
+/* The security banner sits above every page and needs breathing room. */
+.content > ui-banner {
+  display: block;
+  margin-bottom: var(--space-4);
+}

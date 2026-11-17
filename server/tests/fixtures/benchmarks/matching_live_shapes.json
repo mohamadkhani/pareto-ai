@@ -1,0 +1,45 @@
+{
+  "note": "Model ids and benchmark names captured from the live sources on 2026-11-17/18 (OpenRouter /api/v1/models, SailResearch catalog, Arena WebDev rows, BenchLM directory, BenchmarkList directory). The matcher must map each hint to the models that denote the same model, skip generic or unknown hints, and refuse to guess when several distinct identities answer.",
+  "catalog": [
+    {"id": "sail-deepseek", "name": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+    {"id": "or-deepseek", "name": "deepseek/deepseek-v4.1-flash"},
+    {"id": "glm", "name": "zai-org/GLM-5"},
+    {"id": "grok", "name": "xai/grok-4.5"},
+    {"id": "kimi", "name": "moonshot/kimi-k3"},
+    {"id": "gemini", "name": "google/gemini-3.1-pro"},
+    {"id": "gpt", "name": "openai/gpt-5.4"},
+    {"id": "claude", "name": "anthropic/claude-sonnet-4.6"},
+    {"id": "qwen", "name": "qwen/qwen3-coder-2025-08-07"},
+    {"id": "base-4o", "name": "openai/gpt-4o"},
+    {"id": "free-4o", "name": "openai/gpt-4o:free"},
+    {"id": "qwen-30b-a", "name": "acme-labs/qwen3-coder-30b"},
+    {"id": "qwen-30b-b", "name": "beta-labs/coder-30b"}
+  ],
+  "expectations": [
+    {"hint": "deepseek-v4.1-flash", "matched": ["or-deepseek", "sail-deepseek"]},
+    {"hint": "DeepSeek V4.1 Flash (Thinking)", "matched": ["or-deepseek", "sail-deepseek"]},
+    {"hint": "DeepSeek-V4.1-Flash", "matched": ["or-deepseek", "sail-deepseek"]},
+    {"hint": "z-ai-glm-5", "matched": ["glm"]},
+    {"hint": "zai-org/GLM-5", "matched": ["glm"]},
+    {"hint": "x-ai-grok-4.5", "matched": ["grok"]},
+    {"hint": "moonshotai-kimi-k3", "matched": ["kimi"]},
+    {"hint": "google-ai-gemini-3.1-pro-preview", "matched": ["gemini"]},
+    {"hint": "openai-gpt-5.4", "matched": ["gpt"]},
+    {"hint": "Claude Sonnet 4.6", "matched": ["claude"]},
+    {"hint": "qwen3-coder", "matched": ["qwen"]},
+    {"hint": "GPT-4o", "matched": ["base-4o"]},
+    {"hint": "GPT-4o:free", "matched": ["free-4o"]},
+    {"hint": "flash", "skipped": true},
+    {"hint": "pro", "skipped": true},
+    {"hint": "auto", "skipped": true},
+    {"hint": "some-unknown-model", "skipped": true},
+    {"hint": "some-vendor-x-qwen3-coder-30b", "ambiguous": true}
+  ],
+  "expected_counts": {
+    "published": 18,
+    "matched_models": 11,
+    "matched_hints": 13,
+    "skipped_unknown": 4,
+    "ambiguous": 1
+  }
+}

@@ -1,9 +1,9 @@
 //! Runtime configuration, read once from the environment at startup.
 //!
-//! Secrets are accepted from the environment only; nothing secret is read from
-//! a committed file. Missing optional values fall back to safe defaults;
-//! `GATEWAY_MASTER_KEY` is required (milestone 2 encrypts credentials with it)
-//! and startup fails when it is missing or malformed.
+//! Every variable is optional: a start with no environment at all listens on
+//! `127.0.0.1:8081`, keeps its data in `./data`, and generates its credential
+//! master key on first start (`master_key.rs`). Secrets are accepted from the
+//! environment only; nothing secret is read from a committed file.
 
 use std::env;
 use std::net::SocketAddr;
@@ -12,6 +12,12 @@ use std::time::Duration;
 
 use crate::ip::IpCidr;
 use crate::secrets::{self, MasterKey};
+
+/// Bind address of a zero-configuration start (`GATEWAY_LISTEN` unset).
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
+/// Data directory of a zero-configuration start, relative to the working
+/// directory (`GATEWAY_DATA_DIR` unset).
+pub const DEFAULT_DATA_DIR: &str = "data";
 
 /// Largest request body the data plane accepts (`GATEWAY_MAX_BODY_BYTES`).
 pub const DEFAULT_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -40,8 +46,13 @@ pub struct Config {
     /// Directory that holds the SQLite database and its WAL files.
     pub data_dir: PathBuf,
     /// AEAD key for credential encryption at rest, as 32 bytes.
-    /// Startup fails when this is absent (see [`crate::secrets`]).
+    /// `None` means "generate or read `<data>/master.key`" (see
+    /// [`crate::master_key`]).
     pub master_key: Option<MasterKey>,
+    /// When true, startup may continue on a non-loopback bind while the
+    /// gateway is in setup or unprotected mode (`GATEWAY_ALLOW_PUBLIC_NO_AUTH=1`).
+    /// The exposure warning still shows.
+    pub allow_public_no_auth: bool,
     /// IANA timezone used for budget periods (day/week/month boundaries),
     /// as written by `GATEWAY_TIMEZONE`.
     pub timezone: String,
@@ -109,7 +120,7 @@ pub enum ConfigError {
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let listen = env::var("GATEWAY_LISTEN")
-            .unwrap_or_else(|_| "127.0.0.1:8081".to_string())
+            .unwrap_or_else(|_| DEFAULT_LISTEN.to_string())
             .parse::<SocketAddr>()
             .map_err(|e| ConfigError::Listen(e.to_string()))?;
 
@@ -122,7 +133,7 @@ impl Config {
                     false => env::current_dir()?.join(path),
                 }
             }
-            None => env::current_dir()?.join("data"),
+            None => env::current_dir()?.join(DEFAULT_DATA_DIR),
         };
 
         let timezone = env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
@@ -132,6 +143,7 @@ impl Config {
             listen,
             data_dir,
             master_key: parse_master_key(env::var("GATEWAY_MASTER_KEY").ok().as_deref())?,
+            allow_public_no_auth: env::var("GATEWAY_ALLOW_PUBLIC_NO_AUTH").as_deref() == Ok("1"),
             timezone,
             tz,
             insecure_cookies: env::var("GATEWAY_INSECURE_COOKIES").as_deref() == Ok("1"),
@@ -185,9 +197,10 @@ fn parse_trusted_proxies(raw: &str) -> Result<Vec<IpCidr>, ConfigError> {
         .collect()
 }
 
-/// Parses the `GATEWAY_MASTER_KEY` value: absent or empty is `None` (startup
-/// then fails with its own actionable message); a malformed value is a
-/// [`ConfigError::MasterKey`] telling the operator how to fix it.
+/// Parses the `GATEWAY_MASTER_KEY` value: absent or empty is `None`, which
+/// makes [`crate::master_key::resolve`] read or generate `<data>/master.key`;
+/// a malformed value is a [`ConfigError::MasterKey`] telling the operator how
+/// to fix it.
 fn parse_master_key(raw: Option<&str>) -> Result<Option<MasterKey>, ConfigError> {
     match raw.map(str::trim) {
         None | Some("") => Ok(None),
@@ -269,6 +282,34 @@ mod tests {
         let cfg = Config::from_env().expect("config must parse");
         assert!(cfg.database_path().ends_with("gateway.db"));
         assert!(!cfg.version.is_empty());
+    }
+
+    #[test]
+    fn the_no_configuration_start_uses_documented_defaults() {
+        // The defaults are constants, so the README, the wizard, and the
+        // binary cannot drift. The live check is conditional because the test
+        // process may carry the variables (`just dev` does not set them).
+        assert_eq!(DEFAULT_LISTEN, "127.0.0.1:8081");
+        assert_eq!(DEFAULT_DATA_DIR, "data");
+
+        let cfg = Config::from_env().expect("config must parse");
+        if env::var_os("GATEWAY_LISTEN").is_none() {
+            assert_eq!(cfg.listen.to_string(), DEFAULT_LISTEN);
+            assert!(cfg.listen.ip().is_loopback());
+        }
+        if env::var_os("GATEWAY_DATA_DIR").is_none() {
+            assert!(
+                cfg.data_dir.ends_with(DEFAULT_DATA_DIR),
+                "{:?}",
+                cfg.data_dir
+            );
+        }
+        if env::var_os("GATEWAY_MASTER_KEY").is_none() {
+            assert!(
+                cfg.master_key.is_none(),
+                "without the variable the key comes from <data>/master.key"
+            );
+        }
     }
 
     #[test]

@@ -121,7 +121,7 @@ impl UserError {
     }
 }
 
-fn validate_email(raw: &str) -> Result<String, UserError> {
+pub(crate) fn validate_email(raw: &str) -> Result<String, UserError> {
     let email = raw.trim();
     let (local, domain) = email
         .split_once('@')
@@ -134,7 +134,7 @@ fn validate_email(raw: &str) -> Result<String, UserError> {
     Ok(email.to_string())
 }
 
-fn validate_password(raw: &str) -> Result<(), UserError> {
+pub(crate) fn validate_password(raw: &str) -> Result<(), UserError> {
     if raw.chars().count() < MIN_PASSWORD_LEN {
         return Err(UserError::Invalid(format!(
             "password must be at least {MIN_PASSWORD_LEN} characters"
@@ -190,7 +190,7 @@ pub async fn create_user(
     // An admin-set initial password must be rotated unless the admin says
     // otherwise explicitly.
     let must_change = input.must_change_password.unwrap_or(true);
-    let password_hash = password::hash_password(&input.password)?;
+    let password_hash = password::hash_password_offload(input.password.clone()).await?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = ts(chrono::Utc::now());
@@ -255,7 +255,7 @@ pub async fn update_user(
         .map(validate_password)
         .transpose()?;
     let password_hash = match (&patch.password, password_hash) {
-        (Some(password), _) => Some(password::hash_password(password)?),
+        (Some(password), _) => Some(password::hash_password_offload(password.clone()).await?),
         (None, _) => None,
     };
     let must_change = match (&patch.password, patch.must_change_password) {
@@ -361,7 +361,9 @@ pub async fn change_password(
     let Some((id, password_hash)) = row else {
         return Err(UserError::NotFound("user"));
     };
-    if !password::verify_password(current_password, &password_hash)? {
+    if !password::verify_password_offload(current_password.to_string(), password_hash.clone())
+        .await?
+    {
         return Err(UserError::InvalidCredentials);
     }
     if current_password == new_password {
@@ -370,7 +372,7 @@ pub async fn change_password(
         ));
     }
     validate_password(new_password)?;
-    let new_hash = password::hash_password(new_password)?;
+    let new_hash = password::hash_password_offload(new_password.to_string()).await?;
 
     let now = ts(chrono::Utc::now());
     let mut tx = pool.begin().await?;
@@ -432,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn created_users_are_flagged_for_rotation_and_audited() {
-        password::set_test_iterations(1_000);
+        password::set_test_cost(8 * 1024, 1, 1);
         let (dir, pool) = pool().await;
         let admin = uuid::Uuid::new_v4().to_string();
         sqlx::query(
@@ -460,7 +462,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("hash");
-        assert!(hash.starts_with("pbkdf2$"));
+        assert!(hash.starts_with("$argon2id$"));
         assert!(password::verify_password("initial-password-1", &hash).expect("verify"));
 
         // Explicitly waiving rotation is honoured.
@@ -505,7 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn patch_resets_passwords_flags_rotation_and_deactivates() {
-        password::set_test_iterations(1_000);
+        password::set_test_cost(8 * 1024, 1, 1);
         let (dir, pool) = pool().await;
         let admin = uuid::Uuid::new_v4().to_string();
         sqlx::query(
@@ -598,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn change_password_requires_the_current_one_and_clears_the_flag() {
-        password::set_test_iterations(1_000);
+        password::set_test_cost(8 * 1024, 1, 1);
         let (dir, pool) = pool().await;
         let admin = uuid::Uuid::new_v4().to_string();
         sqlx::query(
@@ -708,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_password_reset_revokes_api_keys_but_self_change_keeps_them() {
-        password::set_test_iterations(1_000);
+        password::set_test_cost(8 * 1024, 1, 1);
         let (dir, pool) = pool().await;
         let admin = uuid::Uuid::new_v4().to_string();
         sqlx::query(

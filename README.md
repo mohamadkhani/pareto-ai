@@ -17,27 +17,61 @@ resource use, and stability — not feature breadth.
 
 ## Run
 
-Backend:
+With no configuration at all:
 
 ```bash
-cd server
-GATEWAY_MASTER_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
-GATEWAY_DATA_DIR=./data GATEWAY_LISTEN=127.0.0.1:8081 cargo run
+just dev            # or: cd server && cargo run
+```
+
+That listens on `127.0.0.1:8081`, keeps its database in `./data`, applies the
+migrations, and generates a credential master key. On the first visit the
+console opens the **setup wizard**: create the first administrator, or choose
+"Skip for now — local only" to run without a password on this machine. The
+choice is remembered; Settings can set a password later.
+
+Serving the production binary is the same:
+
+```bash
+just build
+./server/target/release/gateway
 curl http://127.0.0.1:8081/health
 ```
 
-`GATEWAY_MASTER_KEY` is required: it encrypts provider credentials at rest
-(decision D16), and startup fails without it.
+### Start with no configuration
 
-Frontend (development):
+| What | Where it comes from |
+| --- | --- |
+| Listen address | `127.0.0.1:8081` (`GATEWAY_LISTEN` overrides) |
+| Data | `./data/gateway.db`, created with migrations (`GATEWAY_DATA_DIR` overrides) |
+| Credential master key | `GATEWAY_MASTER_KEY` when set; otherwise generated on first start into `./data/master.key` (mode `0600`) and reused. Only the path is logged. |
+| First account | The setup wizard when no user exists (`GATEWAY_ADMIN_EMAIL` + `GATEWAY_ADMIN_PASSWORD` still create it non-interactively at startup) |
+
+Authentication modes:
+
+| Mode | Meaning | How it ends |
+| --- | --- | --- |
+| `setup` | No account exists; only the wizard and login routes answer. | Create the first admin. |
+| `unprotected` | Setup was explicitly skipped. `/api/*` and `/v1/*` act as a trusted local operator; sessions stay off. | Set a password (wizard or Settings) — creates the first admin. |
+| `protected` | At least one account exists; session auth and CSRF apply as usual. | — |
+
+Exposure rule: binding a **non-loopback** address while in `setup` or
+`unprotected` refuses to start, because every route would be reachable without
+a password. Set `GATEWAY_ALLOW_PUBLIC_NO_AUTH=1` to start anyway (not
+recommended); the console then shows a red banner until a password is set.
+Loopback peers and desktop-wrapper origins (`tauri://localhost`,
+`https://tauri.localhost`, `wails://...`) count as local for the wizard and the
+banner. With the override, setup still has to be finished **locally** (or with
+the `GATEWAY_ADMIN_*` shortcut): the wizard's writes are loopback-only, and a
+cross-site `Origin` is refused so a random web page cannot claim the first
+account.
+
+Frontend (development, proxying the API to `127.0.0.1:8081`):
 
 ```bash
 cd web
 pnpm install
 pnpm start
 ```
-
-First run creates `data/gateway.db` (SQLite, WAL) and applies migrations.
 
 ## Production build
 
@@ -72,7 +106,9 @@ file extension falls back to `index.html` so Angular routes survive a reload.
 | --- | --- | --- |
 | `GATEWAY_LISTEN` | `127.0.0.1:8081` | Bind address |
 | `GATEWAY_DATA_DIR` | `./data` | Database directory |
-| `GATEWAY_MASTER_KEY` | **required** | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). Startup fails without it. Generate: `openssl rand -base64 32 \| tr '+/' '-_'` |
+| `GATEWAY_MASTER_KEY` | generated | 32 bytes (base64url or hex) that encrypt provider credential secrets (AES-256-GCM). When absent, a key is generated on first start into `<data>/master.key` (mode `0600`) and reused; an explicit value wins. To supply one: `openssl rand -base64 32 \| tr '+/' '-_'` |
+| `GATEWAY_ADMIN_EMAIL` / `GATEWAY_ADMIN_PASSWORD` | unset | Optional non-interactive shortcut: when **both** are set and no user exists, the first admin is created at startup (flagged for password rotation). Otherwise the setup wizard runs. Half a configuration fails startup. |
+| `GATEWAY_ALLOW_PUBLIC_NO_AUTH` | unset | Set to `1` to start on a non-loopback bind while in `setup` or `unprotected` mode. Without it such a start is refused; with it the console keeps a red exposure banner. |
 | `GATEWAY_TIMEZONE` | `UTC` | IANA timezone (e.g. `Asia/Tehran`) for budget-period boundaries and usage-rollup days. Startup fails on an unknown zone. |
 | `GATEWAY_INSECURE_COOKIES` | unset | Set to `1` to send session cookies without `Secure`, so the gateway works over plain HTTP during development |
 | `GATEWAY_TRUSTED_PROXY` | unset | Comma-separated IPv4/IPv6 CIDRs of reverse proxies allowed to vouch for the client address via `X-Forwarded-For`/`X-Real-IP` (e.g. `10.0.0.0/8,127.0.0.1/32`). This decides the client IP used for login rate limiting and audit rows: when unset, the peer address is the client and those headers are ignored ([review finding 4](docs/reviews/2026-11-16-m1-backend.md)). Startup warns when listening on a non-loopback address without it. |
@@ -96,19 +132,13 @@ just verify    # just check, then the production binary
 `just` lists every recipe (`just build`, `just test`, `just dev`, `just dev-ui`,
 `just ui-test`, ...).
 
-## Network note: crates.io
+## Dependencies and the cargo cache
 
-From this network, `index.crates.io` and `static.crates.io` do not respond
-(re-checked 2026-11-16: still blocked), so cargo cannot fetch dependencies.
-`pnpm`, `git`, and GitHub are reachable. Two known workarounds:
-
-1. Build offline from the local cargo cache (what we use now): every command
-   that touches dependencies carries `--offline`, for example
-   `cargo build --offline`. Dependencies were resolved with
-   `cargo add --offline ...` against the cached index.
-2. If you add a crate that is not in the cache, either reach crates.io from
-   another network, or add a sparse mirror in `.cargo/config.toml` and drop
-   `--offline`.
+`crates.io` is reachable again (2026-11-17), so `cargo add` works normally.
+Every recipe still passes `--offline` because `server/Cargo.lock` plus the local
+cache is enough to build, which keeps the gate reproducible and network-free.
+Add a dependency with one online `cargo add`, commit the updated lockfile, and
+the offline gate keeps working.
 
 ## License
 

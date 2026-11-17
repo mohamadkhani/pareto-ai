@@ -27,3 +27,6 @@
 
 # Vendored reference repository (kept locally for research only)
 /OmniRoute/
+
+# Local runtime data (demo/dev databases)
+/.data/

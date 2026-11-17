@@ -1,0 +1,157 @@
+<div class="settings">
+  <header class="page-head">
+    <h1>Settings</h1>
+    <p class="hint">
+      Your account password, and how this gateway is exposed to the network. The security panel is
+      read-only; change exposure with <code>GATEWAY_LISTEN</code> and a restart.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <ui-empty title="Forbidden" description="Settings are restricted to administrators." />
+  } @else {
+    @if (notice(); as message) {
+      <ui-banner tone="success">{{ message }}</ui-banner>
+    }
+    @if (errorMessage(); as message) {
+      <ui-banner tone="danger">{{ message }}</ui-banner>
+    }
+
+    @if (unprotected()) {
+      <ui-card>
+        <div ui-card-header>Protect this gateway</div>
+        <p class="copy">
+          This gateway is running without a password because setup was skipped. Create the first
+          administrator here to turn authentication on; anyone who can reach it can use the console
+          and the API until you do.
+        </p>
+        <form class="form-grid" (submit)="setFirstPassword($event)" novalidate>
+          <ui-field controlId="first-email" label="Admin email" [error]="firstEmailError()">
+            <ui-input
+              type="email"
+              autocomplete="username"
+              placeholder="you@example.com"
+              [(value)]="firstEmail"
+              [disabled]="settingPassword()"
+            />
+          </ui-field>
+          <ui-field
+            controlId="first-password"
+            label="Password"
+            [hint]="'At least ' + minLength + ' characters.'"
+            [error]="firstPasswordError()"
+          >
+            <ui-input
+              type="password"
+              autocomplete="new-password"
+              [(value)]="firstPassword"
+              [disabled]="settingPassword()"
+            />
+          </ui-field>
+          <ui-field
+            controlId="first-confirm"
+            label="Confirm password"
+            [error]="firstConfirmError()"
+          >
+            <ui-input
+              type="password"
+              autocomplete="new-password"
+              [(value)]="firstConfirm"
+              [disabled]="settingPassword()"
+            />
+          </ui-field>
+          <div class="actions">
+            <ui-button type="submit" variant="primary" [loading]="settingPassword()">
+              Set password
+            </ui-button>
+          </div>
+        </form>
+      </ui-card>
+    }
+
+    <ui-card>
+      <div ui-card-header>Change password</div>
+      <p class="copy">
+        Changing your own password signs out your other sessions but keeps your API keys working;
+        only an admin password reset revokes them.
+      </p>
+      <form class="form-grid" (submit)="changePassword($event)" novalidate>
+        <ui-field
+          controlId="settings-current"
+          label="Current password"
+          [error]="currentPasswordError()"
+        >
+          <ui-input
+            type="password"
+            autocomplete="current-password"
+            [(value)]="currentPassword"
+            [disabled]="changing()"
+          />
+        </ui-field>
+        <ui-field
+          controlId="settings-new"
+          label="New password"
+          [hint]="'At least ' + minLength + ' characters.'"
+          [error]="newPasswordError()"
+        >
+          <ui-input
+            type="password"
+            autocomplete="new-password"
+            [(value)]="newPassword"
+            [disabled]="changing()"
+          />
+        </ui-field>
+        <ui-field
+          controlId="settings-confirm"
+          label="Confirm new password"
+          [error]="newConfirmError()"
+        >
+          <ui-input
+            type="password"
+            autocomplete="new-password"
+            [(value)]="newConfirm"
+            [disabled]="changing()"
+          />
+        </ui-field>
+        <div class="actions">
+          <ui-button type="submit" variant="primary" [loading]="changing()">
+            Change password
+          </ui-button>
+        </div>
+      </form>
+    </ui-card>
+
+    <ui-card>
+      <div ui-card-header>Security</div>
+      @if (status(); as facts) {
+        <dl class="facts">
+          <dt>Mode</dt>
+          <dd>{{ modeLabel() }}</dd>
+          <dt>Bind address</dt>
+          <dd>
+            <code>{{ facts.bind }}</code> ({{ facts.is_local ? 'local' : 'public' }})
+          </dd>
+          <dt>Setup</dt>
+          <dd>{{ facts.setup_required ? 'Required' : 'Complete' }}</dd>
+          <dt>TLS</dt>
+          <dd>{{ facts.tls.enabled ? (facts.tls.domain ?? 'Enabled') : 'Off — plain HTTP' }}</dd>
+          <dt>Credential master key</dt>
+          <dd>
+            {{
+              facts.master_key_source === 'env'
+                ? 'GATEWAY_MASTER_KEY environment variable'
+                : 'Generated file in the data directory (master.key)'
+            }}
+          </dd>
+        </dl>
+        @if (facts.mode === 'unprotected') {
+          <ui-banner [tone]="facts.is_local ? 'warning' : 'danger'">
+            {{ facts.warning }}
+          </ui-banner>
+        }
+      } @else {
+        <p class="copy">Loading the current exposure…</p>
+      }
+    </ui-card>
+  }
+</div>

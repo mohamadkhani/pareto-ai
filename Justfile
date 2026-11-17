@@ -1,7 +1,9 @@
 # pareto-ai — task runner. Run `just` to list recipes.
 #
-# crates.io is unreachable from this network: every cargo command runs with
-# --offline against the local cache (docs/research/09-environment.md).
+# Dependencies are pinned in server/Cargo.lock and present in the local cargo
+# cache, so every cargo command runs with --offline (reproducible, no network).
+# crates.io is reachable again, so a new dependency needs one online
+# `cargo add`; drop --offline only for that.
 # JavaScript tooling is pnpm (user preference, docs/research/11-user-preferences.md).
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
@@ -27,11 +29,11 @@ lint:
 test:
     cd server && cargo test --offline
 
-# run the backend (needs GATEWAY_MASTER_KEY; see README)
+# run the backend with no configuration: 127.0.0.1:8081, ./data, first-run
+# setup wizard (the master key is generated on first start; see README)
 dev *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${GATEWAY_MASTER_KEY:?set GATEWAY_MASTER_KEY (32 bytes, base64url or hex) — see README}"
     cd server
     exec cargo run --offline {{args}}
 

@@ -2,13 +2,15 @@ import { inject } from '@angular/core';
 import { Routes } from '@angular/router';
 import { Audit } from './audit/audit';
 import { AuthService } from './auth/auth.service';
-import { authGuard, loginGuard } from './auth/auth.guard';
+import { authGuard, loginGuard, setupGuard, setupPageGuard } from './auth/auth.guard';
 import { ChangePassword } from './change-password/change-password';
 import { Combos } from './routing/combos';
 import { Grants } from './grants/grants';
 import { Keys } from './keys/keys';
 import { Limits } from './money/limits';
 import { Login } from './login/login';
+import { Settings } from './settings/settings';
+import { Setup } from './setup/setup';
 import { Logs } from './usage/logs';
 import { Models } from './catalog/models';
 import { Providers } from './catalog/providers';
@@ -27,12 +29,17 @@ export function landingRedirect(): string {
 
 export const routes: Routes = [
   { path: 'login', canActivate: [loginGuard], component: Login },
+  // The first-run wizard is the only unauthenticated page besides login; it
+  // redirects away once an account exists (protected) or setup was skipped.
+  { path: 'setup', canActivate: [setupPageGuard], component: Setup },
   // The forced-rotation screen (review finding 7); `authGuard` holds flagged
   // accounts here and keeps everyone else out.
   { path: 'change-password', canActivate: [authGuard], component: ChangePassword },
   {
     path: '',
-    canActivate: [authGuard],
+    // `setupGuard` sends a first visit to the wizard before `authGuard` can
+    // bounce an account-less gateway to /login.
+    canActivate: [setupGuard, authGuard],
     component: Shell,
     children: [
       // Admin-only pages; the server enforces admin on every catalog call.
@@ -62,6 +69,8 @@ export const routes: Routes = [
       { path: 'users/:id/keys', component: Keys },
       { path: 'limits', component: Limits },
       { path: 'usage', component: Usage },
+      // Admin: own password, first password while unprotected, exposure facts.
+      { path: 'settings', component: Settings },
       { path: '', pathMatch: 'full', redirectTo: landingRedirect },
     ],
   },

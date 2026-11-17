@@ -44,7 +44,7 @@ pub struct UserSummary {
 }
 
 impl UserSummary {
-    fn from_record(user: &UserRecord) -> Self {
+    pub(crate) fn from_record(user: &UserRecord) -> Self {
         Self {
             id: user.id.clone(),
             email: user.email.clone(),
@@ -126,16 +126,21 @@ pub async fn login(
         .map_err(|e| ApiError::internal("looking up user", e).with_request_id(rid.clone()))?;
 
     let Some(user) = user else {
-        // Do the same password work as a real verification so an unknown email
-        // is not distinguishable from a wrong password by response timing.
-        let _ = password::hash_password(&request.password);
+        // Do the same derivation work as a real verification so an unknown
+        // email is not distinguishable from a wrong password by response
+        // timing. The work runs off the async runtime (see `password`).
+        let _ = password::hash_password_offload(request.password.clone()).await;
         state.login_limiter.record_failure(&ip.0, email, now);
         audit_login_failure(&state.pool, None, email, &ip.0, "invalid_credentials").await;
         return Err(ApiError::invalid_credentials().with_request_id(rid));
     };
 
-    let valid = password::verify_password(&request.password, &user.password_hash)
-        .map_err(|e| ApiError::internal("verifying password", e).with_request_id(rid.clone()))?;
+    let valid =
+        password::verify_password_offload(request.password.clone(), user.password_hash.clone())
+            .await
+            .map_err(|e| {
+                ApiError::internal("verifying password", e).with_request_id(rid.clone())
+            })?;
     if !valid {
         state.login_limiter.record_failure(&ip.0, email, now);
         audit_login_failure(
@@ -167,6 +172,13 @@ pub async fn login(
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
+    // Transparent upgrade (D38): a PBKDF2 row (or Argon2 with older
+    // parameters) is re-hashed with the current Argon2id cost after a
+    // successful verification. Best effort: failing to store the new hash
+    // must not fail the login.
+    if password::needs_rehash(&user.password_hash) {
+        upgrade_password_hash(&state.pool, &user.id, &request.password).await;
+    }
     // The failure budget is only cleared once the login actually completes; a
     // failure after the password matched counts and is audited like any other.
     let created = match auth::complete_login(&state.pool, &user.id, email, &ip.0, user_agent).await
@@ -285,6 +297,27 @@ pub async fn change_password(
     .await
     .map_err(|e| e.into_api_error(rid))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Re-hashes `password` with the current Argon2id cost and stores it, after a
+/// legacy row verified. Best effort: failures are logged, never propagated.
+async fn upgrade_password_hash(pool: &sqlx::SqlitePool, user_id: &str, password: &str) {
+    let hash = match password::hash_password_offload(password.to_string()).await {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not compute the upgraded password hash");
+            return;
+        }
+    };
+    match sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(&hash)
+        .bind(user_id)
+        .execute(pool)
+        .await
+    {
+        Ok(_) => tracing::info!(user_id, "upgraded a legacy password hash to Argon2id"),
+        Err(e) => tracing::warn!(error = %e, "could not store the upgraded password hash"),
+    }
 }
 
 /// Writes one `auth.login_failed` audit row; audit trouble is logged, never
@@ -917,5 +950,141 @@ mod tests {
         let (cookie, csrf) = test_support::login(&router, "user@example.com").await;
         assert!(!cookie.is_empty());
         assert!(!csrf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_legacy_pbkdf2_row_is_rehashed_with_argon2id_on_the_next_login() {
+        let app = TestApp::new().await;
+        let user_id = app
+            .create_user("legacy@example.com", Role::User, true)
+            .await;
+        // Replace the account's hash with the pre-migration PBKDF2 format.
+        let legacy = password::hash_password_pbkdf2(
+            test_support::TEST_PASSWORD,
+            password::TEST_PBKDF2_ITERATIONS,
+        )
+        .expect("legacy hash");
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(&legacy)
+            .bind(&user_id)
+            .execute(&app.state.pool)
+            .await
+            .expect("write legacy hash");
+
+        let router = app.router();
+        let (cookie, _csrf) = test_support::login(&router, "legacy@example.com").await;
+        assert!(!cookie.is_empty());
+
+        let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("hash");
+        assert!(
+            stored.starts_with("$argon2id$"),
+            "a successful login upgrades the row: {stored}"
+        );
+        assert!(
+            !password::needs_rehash(&stored),
+            "the upgraded row matches the current cost"
+        );
+
+        // The upgraded row still accepts the same password.
+        let (cookie, _csrf) = test_support::login(&router, "legacy@example.com").await;
+        assert!(!cookie.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_login_never_upgrades_a_legacy_row() {
+        let app = TestApp::new().await;
+        let user_id = app
+            .create_user("legacy@example.com", Role::User, true)
+            .await;
+        let legacy = password::hash_password_pbkdf2(
+            test_support::TEST_PASSWORD,
+            password::TEST_PBKDF2_ITERATIONS,
+        )
+        .expect("legacy hash");
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(&legacy)
+            .bind(&user_id)
+            .execute(&app.state.pool)
+            .await
+            .expect("write legacy hash");
+
+        let router = app.router();
+        let response = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/login",
+                Some(serde_json::json!({ "email": "legacy@example.com", "password": "wrong-password" })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+
+        let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(&user_id)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("hash");
+        assert_eq!(stored, legacy, "a failed attempt leaves the row alone");
+    }
+
+    /// D38: the derivation must run on the blocking pool. With a single async
+    /// worker, an inline 400 ms hash would delay the health request that is
+    /// queued behind it; `spawn_blocking` lets it answer immediately.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_slow_password_hash_does_not_stall_a_concurrent_request() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+
+        password::set_test_delay(std::time::Duration::from_millis(400));
+        let login = {
+            let router = router.clone();
+            tokio::spawn(async move {
+                send(
+                    router,
+                    api_request(
+                        Method::POST,
+                        "/api/auth/login",
+                        Some(serde_json::json!({
+                            "email": "admin@example.com",
+                            "password": password::SLOW_HASH_SENTINEL,
+                        })),
+                        None,
+                        None,
+                    ),
+                )
+                .await
+            })
+        };
+        // Let the login reach its derivation before the concurrent request.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let started = std::time::Instant::now();
+        let health = send(
+            router.clone(),
+            api_request(Method::GET, "/health", None, None, None),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        password::set_test_delay(std::time::Duration::ZERO);
+
+        assert_eq!(health.status, StatusCode::OK);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "a health request must not wait on a password hash (took {elapsed:?})"
+        );
+
+        // The login did pay the artificial cost and failed on the password.
+        let login = login.await.expect("login task");
+        assert_eq!(login.status, StatusCode::UNAUTHORIZED);
     }
 }

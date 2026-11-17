@@ -5,12 +5,11 @@ Rules for every agent working in this repository. They are enforced by
 
 ## Environment (read this first)
 
-- **crates.io is blocked from this network.** Cargo commands need `--offline`
-  (`cargo build --offline`, `cargo test --offline`, ...). Dependencies resolve
-  from the local cargo cache (~/.cargo/registry). Before adding a dependency:
-  `ls ~/.cargo/registry/cache/*/ | grep -E "^<crate>-[0-9]"`. If it is not
-  cached and you cannot reach crates.io, do not add it — pick a cached
-  alternative and record the choice in `docs/research/`.
+- **Network access is intermittent.** crates.io and provider hosts
+  (openrouter.ai, benchmarklist.com, huggingface, …) are sometimes reachable and
+  sometimes blocked. Try online first; if the index or a host is unreachable,
+  fall back to `--offline` (cached crates) or the fixture-based tests. Never
+  hard-code a "network is blocked" assumption into code or docs without a date.
 - **npm is not used here; JavaScript tooling is `pnpm`** (user preference —
   see `docs/research/11-user-preferences.md`). `cd web && pnpm install`,
   `pnpm run build`, `pnpm test`. If Angular scaffolding ever resets

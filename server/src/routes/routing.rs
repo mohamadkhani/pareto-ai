@@ -53,10 +53,21 @@ pub struct BenchmarkSyncInput {
 /// Per-source counts of one sync.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BenchmarkSyncCountsView {
+    /// Source entries the import could use.
     pub published: usize,
+    /// Catalog models that received a benchmark row (one row per model; a
+    /// hint can attach to several models of the same normalized identity).
     pub matched: usize,
+    /// Same value as `matched`, named for the model-level contract.
+    pub matched_models: usize,
+    /// Source entries that resolved to at least one model.
+    pub matched_hints: usize,
     pub skipped_unknown: usize,
+    /// Entries naming several distinct models (never guessed). Duplicate
+    /// entries for one model keep the better rank and are not counted here.
     pub ambiguous: usize,
+    /// Pages that failed after every retry before the source aborted.
+    pub failed_pages: usize,
     pub inserted: usize,
     pub updated: usize,
     pub unchanged: usize,
@@ -96,8 +107,11 @@ pub struct BenchmarkSyncRunView {
     pub duration_ms: i64,
     pub published: i64,
     pub matched: i64,
+    pub matched_models: i64,
+    pub matched_hints: i64,
     pub skipped_unknown: i64,
     pub ambiguous: i64,
+    pub failed_pages: i64,
     pub inserted: i64,
     pub updated: i64,
     pub unchanged: i64,
@@ -452,8 +466,11 @@ fn benchmark_counts_view(counts: benchmark_sync::Counts) -> BenchmarkSyncCountsV
     BenchmarkSyncCountsView {
         published: counts.published,
         matched: counts.matched,
+        matched_models: counts.matched,
+        matched_hints: counts.matched_hints,
         skipped_unknown: counts.skipped_unknown,
         ambiguous: counts.ambiguous,
+        failed_pages: counts.failed_pages,
         inserted: counts.inserted,
         updated: counts.updated,
         unchanged: counts.unchanged,
@@ -488,8 +505,11 @@ fn benchmark_run_view(row: &benchmark_sync::RunRow) -> BenchmarkSyncRunView {
         duration_ms: row.duration_ms,
         published: row.published,
         matched: row.matched,
+        matched_models: row.matched,
+        matched_hints: row.matched_hints,
         skipped_unknown: row.skipped_unknown,
         ambiguous: row.ambiguous,
+        failed_pages: row.failed_pages,
         inserted: row.inserted,
         updated: row.updated,
         unchanged: row.unchanged,
@@ -599,8 +619,11 @@ pub async fn benchmark_sync_status(
         let counts = last.as_ref().map(|row| BenchmarkSyncCountsView {
             published: row.published as usize,
             matched: row.matched as usize,
+            matched_models: row.matched as usize,
+            matched_hints: row.matched_hints as usize,
             skipped_unknown: row.skipped_unknown as usize,
             ambiguous: row.ambiguous as usize,
+            failed_pages: row.failed_pages as usize,
             inserted: row.inserted as usize,
             updated: row.updated as usize,
             unchanged: row.unchanged as usize,
@@ -1115,8 +1138,11 @@ mod tests {
             counts: BenchmarkSyncCountsView {
                 published: 1,
                 matched: 1,
+                matched_models: 1,
+                matched_hints: 1,
                 skipped_unknown: 0,
                 ambiguous: 0,
+                failed_pages: 0,
                 inserted: 1,
                 updated: 0,
                 unchanged: 0,
@@ -1239,6 +1265,55 @@ mod tests {
         .await;
         assert_eq!(conflict.status, StatusCode::CONFLICT, "{}", conflict.body);
         assert_eq!(conflict.body["error"]["code"], "conflict");
+    }
+
+    #[tokio::test]
+    async fn benchmark_sync_status_reports_match_and_page_counts() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let (cookie, _) = login(&app.router(), "admin@example.test").await;
+
+        sqlx::query(
+            "INSERT INTO benchmark_sync_runs \
+               (id, source, status, started_at, finished_at, duration_ms, published, matched, \
+                matched_hints, skipped_unknown, ambiguous, failed_pages, inserted, updated, \
+                unchanged, source_url) \
+             VALUES ('run-1', 'benchmarklist', 'error', ?, ?, 120, 10, 6, 4, 2, 1, 1, 5, 1, 0, ?)",
+        )
+        .bind("2026-11-18T00:00:00.000Z")
+        .bind("2026-11-18T00:00:00.120Z")
+        .bind(benchmark_sync::BENCHMARKLIST_ATTRIBUTION_URL)
+        .execute(&app.state.pool)
+        .await
+        .expect("run row");
+
+        let response = send(
+            app.router(),
+            api_request(
+                Method::GET,
+                "/api/benchmarks/sync/status",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        let source = &response.body["sources"][1];
+        assert_eq!(source["source"], "benchmarklist");
+        let counts = &source["counts"];
+        assert_eq!(counts["published"], 10);
+        assert_eq!(counts["matched"], 6);
+        assert_eq!(counts["matched_models"], 6);
+        assert_eq!(counts["matched_hints"], 4);
+        assert_eq!(counts["skipped_unknown"], 2);
+        assert_eq!(counts["ambiguous"], 1);
+        assert_eq!(counts["failed_pages"], 1);
+        let last_run = &source["last_run"];
+        assert_eq!(last_run["matched_models"], 6);
+        assert_eq!(last_run["matched_hints"], 4);
+        assert_eq!(last_run["failed_pages"], 1);
     }
 
     #[tokio::test]

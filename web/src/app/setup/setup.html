@@ -1,0 +1,79 @@
+<div class="auth-page">
+  <form class="auth-card" (submit)="submit($event)" novalidate>
+    <div class="auth-card__head">
+      <h1 class="auth-card__title">Pareto Gateway</h1>
+      <p class="auth-card__subtitle">
+        No account exists yet. Create the first administrator to protect the console and the
+        <code>/v1</code> API, or skip for now to keep the gateway local to this machine.
+      </p>
+    </div>
+
+    @if (!isLocal()) {
+      <ui-banner tone="danger">
+        Setup is only available from this machine (or a desktop app on it). Open the console from
+        the host that runs the gateway to finish setup.
+      </ui-banner>
+    }
+
+    @if (errorMessage(); as message) {
+      <ui-banner tone="danger">{{ message }}</ui-banner>
+    }
+
+    <ui-field controlId="setup-email" label="Admin email" [error]="emailError()">
+      <ui-input
+        type="email"
+        autocomplete="username"
+        placeholder="you@example.com"
+        [(value)]="email"
+        [disabled]="pending()"
+      />
+    </ui-field>
+
+    <ui-field
+      controlId="setup-password"
+      label="Password"
+      [hint]="'At least ' + minLength + ' characters.'"
+      [error]="passwordError()"
+    >
+      <ui-input
+        type="password"
+        autocomplete="new-password"
+        [(value)]="password"
+        [disabled]="pending()"
+      />
+    </ui-field>
+
+    <ui-field controlId="setup-confirm" label="Confirm password" [error]="confirmError()">
+      <ui-input
+        type="password"
+        autocomplete="new-password"
+        [(value)]="confirm"
+        [disabled]="pending()"
+      />
+    </ui-field>
+
+    <div class="auth-card__actions">
+      <ui-button type="submit" variant="primary" [loading]="pending()" [disabled]="!isLocal()">
+        Create admin account
+      </ui-button>
+    </div>
+
+    <div class="divider" role="separator"><span>or</span></div>
+
+    <p class="skip-note">
+      <strong>Skip for now — local only.</strong> The gateway keeps running without a password:
+      anything that can reach <code>{{ bind() }}</code> can use the console, the admin API, and
+      <code>/v1</code>. The choice is remembered across restarts, and you can set a password later
+      in Settings.
+    </p>
+
+    <ui-button
+      variant="ghost"
+      [loading]="skipping()"
+      [disabled]="!isLocal() || pending()"
+      (clicked)="skip()"
+    >
+      Skip for now — local only
+    </ui-button>
+  </form>
+</div>

@@ -17,9 +17,11 @@ use crate::{AppState, auth, db, password, routes};
 /// The password given to every [`TestApp::create_user`] account.
 pub const TEST_PASSWORD: &str = "test-password-1234";
 
-/// The single iteration count keeps password hashing fast in tests;
-/// `verify_password` honours whatever count is stored in the hash.
-const TEST_HASH_ITERATIONS: u32 = 1_000;
+/// Cheap Argon2id parameters keep password hashing fast in tests; verification
+/// honours whatever parameters are stored in the hash.
+const TEST_ARGON2_M_COST_KIB: u32 = 8 * 1024;
+const TEST_ARGON2_T_COST: u32 = 1;
+const TEST_ARGON2_P_COST: u32 = 1;
 
 /// A throwaway gateway instance backed by a temporary SQLite database.
 pub struct TestApp {
@@ -30,6 +32,14 @@ pub struct TestApp {
 impl TestApp {
     pub async fn new() -> Self {
         Self::with_config(|_| {}).await
+    }
+
+    /// A throwaway gateway that has skipped setup: every `/api` and `/v1`
+    /// request acts as the trusted local operator.
+    pub async fn unprotected() -> Self {
+        let app = Self::new().await;
+        app.state.setup.set_mode(crate::setup::Mode::Unprotected);
+        app
     }
 
     /// Like [`TestApp::new`], with the config adjusted first (tests use this
@@ -60,18 +70,26 @@ impl TestApp {
         log_statements: bool,
     ) -> Self {
         // Test hashing is cheap hashing; production always uses the full
-        // PBKDF2 count (see `password::current_iterations`).
-        password::set_test_iterations(TEST_HASH_ITERATIONS);
+        // Argon2id cost (see `password::cost`).
+        password::set_test_cost(
+            TEST_ARGON2_M_COST_KIB,
+            TEST_ARGON2_T_COST,
+            TEST_ARGON2_P_COST,
+        );
         let database = dir.join("gateway.db");
         let pool = match log_statements {
             true => db::open_logged(&database).await,
             false => db::open(&database).await,
         }
         .expect("open test database");
+        let mode = crate::setup::resolve_mode(&pool)
+            .await
+            .expect("resolve the setup mode");
         let mut config = Config {
             listen: "127.0.0.1:0".parse().expect("static address"),
             data_dir: dir.clone(),
             master_key: Some(MasterKey::from_bytes([7u8; 32])),
+            allow_public_no_auth: false,
             timezone: "UTC".to_string(),
             tz: chrono_tz::Tz::UTC,
             insecure_cookies: true,
@@ -96,6 +114,10 @@ impl TestApp {
             config: Arc::new(config),
             pool,
             secrets: Arc::new(SecretBox::new(MasterKey::from_bytes([7u8; 32]))),
+            setup: Arc::new(crate::setup::SetupState::new(
+                mode,
+                crate::master_key::MasterKeySource::Env,
+            )),
             upstream: Arc::new(
                 crate::upstream::UpstreamClient::new(std::time::Duration::from_secs(5))
                     .expect("test upstream client"),
@@ -136,8 +158,7 @@ impl TestApp {
     /// Creates a user with [`TEST_PASSWORD`] and returns the new user id.
     pub async fn create_user(&self, email: &str, role: auth::Role, is_active: bool) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        let hash = password::hash_password_with_iterations(TEST_PASSWORD, TEST_HASH_ITERATIONS)
-            .expect("hash test password");
+        let hash = password::hash_password(TEST_PASSWORD).expect("hash test password");
         sqlx::query(
             "INSERT INTO users (id, email, display_name, password_hash, role, is_active) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -237,6 +258,26 @@ pub fn api_request(
             .expect("request"),
         None => builder.body(Body::empty()).expect("request"),
     }
+}
+
+/// [`api_request`] with a TCP peer address, so loopback-only routes (setup)
+/// see the peer they would see in production.
+pub fn api_request_from(
+    method: Method,
+    uri: &str,
+    body: Option<serde_json::Value>,
+    cookie: Option<&str>,
+    csrf: Option<&str>,
+    peer: Option<&str>,
+) -> Request<Body> {
+    let mut request = api_request(method, uri, body, cookie, csrf);
+    if let Some(peer) = peer {
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>()
+                .expect("test peer address"),
+        ));
+    }
+    request
 }
 
 /// The `gateway_session=...` pair from a response's `Set-Cookie` header, ready

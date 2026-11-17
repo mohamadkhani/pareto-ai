@@ -103,6 +103,11 @@
 </header>
 
 <main id="main" class="content" tabindex="-1">
+  @if (exposure(); as note) {
+    <ui-banner [tone]="note.tone" actionLabel="Open Settings" (actioned)="openSettings()">
+      {{ note.text }}
+    </ui-banner>
+  }
   <router-outlet />
 </main>
 

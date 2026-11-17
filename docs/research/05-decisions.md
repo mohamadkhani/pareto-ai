@@ -533,6 +533,152 @@ ids). `-1` is a **sentinel**, not USD per token.
 0 (unknown is never 0, D10); dropping the model (it is routable, just not
 price-comparable).
 
+### D38. A benchmark row attaches to every model of its normalized identity
+
+**Decision (2026-11-18, live matching finding):** a published benchmark score
+is **model-level**, so one source entry must attach to every catalog model that
+denotes the same model. Live data proves the need: BenchLM/Arena publish
+`deepseek-v4.1-flash`, the catalog holds both
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` (SailResearch) and
+`deepseek/deepseek-v4.1-flash` (OpenRouter), and the old exact-first matcher
+could not bridge them: a four-digit build suffix (`-1017`) was not stripped,
+and even when two spellings normalized alike the old matcher reported
+`ambiguous` instead of attaching the score to both.
+
+- Matching normalizes to a **tail id** (lower case, punctuation collapsed, path
+  vendor dropped), then to an **identity**: trailing tier markers
+  (`-latest`, `-preview`, `-thinking`, `-nothinking`, `-xhigh|high|medium|low`),
+  date/build stamps (`-1017`, `-0731`, `-20250807`, `-2025-08-07`) and a leading
+  hyphenated vendor token are removed. Vendor spellings are aligned for
+  matching only (`deepseek-ai`↔`deepseek`, `z-ai`↔`zai-org`, `x-ai`↔`xai`,
+  `moonshotai`↔`moonshot`, `google-ai`↔`google`); stored names are never
+  rewritten. `:free`/`:batch` remain distinct offerings.
+- A hint resolves, in order, to: the exact full id; every model sharing its
+  identity; every model sharing its vendor-stripped identity; or — only when
+  exactly one distinct identity is a hyphen-boundary suffix — that identity.
+  Several distinct candidates are `ambiguous` and are never written.
+- Consequences, accepted deliberately: two providers of one model both get the
+  row (`benchmarks` keeps `UNIQUE(model_id, source, category)`, so this is one
+  row per model); two date-stamped variants of one name share the row; the
+  counts distinguish `matched_models` from `matched_hints`.
+- A generic tail (`flash`, `pro`, `auto`, `mini`, …) is skipped unless a full id
+  matches exactly, so a benchmark row named `flash` cannot land on whichever
+  model happens to carry that word.
+- Rejected: preferring the OpenRouter variant (the score is not provider
+  specific); picking the "best" of several candidates (a guess); matching
+  `:free` rows onto the paid model (they are separate offerings).
+
+### D39. Argon2id passwords, hashed off the async runtime
+
+**Decision (2026-11-17):** new password hashes are Argon2id with `m = 64 MiB`,
+`t = 3`, `p = 4`, stored as the standard PHC string
+(`$argon2id$v=19$m=65536,t=3,p=4$...`). PBKDF2 rows from D15 are still
+verified, and a successful login re-hashes them with Argon2id
+(`password::needs_rehash`). Every derivation on a request path runs in
+`tokio::task::spawn_blocking`.
+
+**Why:** D15's revisit clause fired — crates.io is reachable, and Argon2id is
+the memory-hard standard. Measured on this machine (release): Argon2id hash
+111.9 ms vs PBKDF2 600k at 317.9 ms, and end-to-end login 112.7 ms vs 328 ms
+([13-performance.md](13-performance.md#13-password-hashing-and-login-latency-d39-2026-11-17)).
+Unoptimized, Argon2id is ~2 s per hash, which is why the runtime must not be
+blocked; a test pins that a slow hash leaves a concurrent request responsive.
+
+**Consequence:** the stored format carries the algorithm id, so both formats
+coexist without a migration; the one-time PBKDF2 upgrade costs ~428 ms on the
+next login. Parameters live in `password::Argon2Cost`; changing them flags
+every row for transparent rehash on login. `GATEWAY_PASSWORD_ITERATIONS` was
+not added: the Argon2 path is already below the 150 ms target.
+
+### D40. Zero-configuration start; setup / unprotected / protected
+
+**Decision (2026-11-17):** with no environment at all the gateway listens on
+`127.0.0.1:8081`, uses `./data`, generates a credential master key on first
+start (`<data>/master.key`, mode `0600`, reused; `GATEWAY_MASTER_KEY` still
+wins), and starts in **setup** mode instead of failing. The mode machine:
+
+| Mode | Condition | Behaviour |
+| --- | --- | --- |
+| `setup` | no user, no recorded skip | only `/health`, `/openapi.json`, `/api/setup/*`, and `/api/auth/*` |
+| `unprotected` | no user, skip recorded in `settings` | `/api/*` and `/v1/*` act as a trusted local operator; sessions stay off |
+| `protected` | at least one user | the normal session + CSRF rules |
+
+`GATEWAY_ADMIN_EMAIL` + `GATEWAY_ADMIN_PASSWORD` remain a non-interactive
+shortcut; half a configuration fails startup. The wizard's first admin is
+role admin with `must_change_password = false` (the operator chose it).
+
+**Exposure rule:** a non-loopback bind while in `setup` or `unprotected`
+refuses to start, naming `GATEWAY_ALLOW_PUBLIC_NO_AUTH=1` as the override; with
+the flag it starts and the console shows a persistent red banner. Loopback
+peers and desktop-wrapper origins (`tauri://localhost`,
+`https://tauri.localhost`, `wails://...`) count as local for the wizard and the
+banner. Setup mutations (`/api/setup/admin`, `/api/setup/skip`) are loopback
+(or wrapper) only; `/api/setup/status` is readable from anywhere because the
+console needs it to render the warning.
+
+**Why:** the user asked that `just dev` work with no preparation, and that an
+accidental network exposure be loud rather than silent. Refusing the start is
+the only way to guarantee no route is reachable without a password before the
+operator has made a decision.
+
+**Consequence:** skipping is recorded in `settings` (`setup.skipped`) so a
+restart does not silently re-open the wizard. With the override flag the
+wizard is still loopback-only, so a remote operator finishes setup locally or
+with the `GATEWAY_ADMIN_*` shortcut. Setup mutations also require a same-origin
+(or absent) `Origin`, because a browser can reach a loopback gateway from any
+page; they are not CSRF-guarded (no session exists yet). TLS is still a
+separate task; the status reports `tls: {enabled: false, domain: null}` until a
+listener exists.
+
+### D41. Provider price mapping is user-authored; no mapping means unpriced
+
+**Decision (user, 2026-11-18):** prices found in a provider's `GET /models`
+payload are ingested only through an explicit, per-provider **mapping** the
+operator writes (or a template they pick). Without a mapping the provider's
+models stay **unpriced** — we never guess a shape or silently choose one tier
+out of `asap/balanced/flex`.
+
+**Why:** the OpenAI `/models` schema has no price fields; OpenRouter,
+SailResearch, Together, DeepInfra and others each use a different shape. Hard
+coding them does not scale and mispricing is worse than "unknown".
+
+**Consequence:** `source='provider_api'` rows exist only for mapped providers;
+manual always wins. Tiered payloads require choosing the tier in the mapping,
+which becomes the billed price for that provider. Full spec:
+[../specs/price-mapping.md](../specs/price-mapping.md).
+
+### D42. Provider connectors: one declarative profile for prices, balance and health
+
+**Decision (user, 2026-11-18):** the price mapping (D41) is the first of a
+small family of per-provider **connectors** configured by the operator — same
+engine, same click-to-pick UI:
+
+- **catalog/prices** — `GET {base}/models` → prices (D41).
+- **balance** — a provider-specific URL (e.g. SailResearch
+  `/v2/usage/summary?range=30d`) + headers + pointers (`/balance`,
+  `/available`, `/period_spend`, `/burn_rate`, `/days_remaining`), stored **per
+  credential** in `balance_usd`/`balance_source='provider_api'`, refreshed on a
+  schedule (default 15 min) with backoff.
+- **health** — the endpoint used by the credential "Test" action.
+
+Rules: URL + headers are editable per provider; headers may reference the
+credential secret and are encrypted like other header values (D17); only
+`http(s)`; block link-local/metadata IPs unless explicitly allowed; timeouts and
+a small response cap; never log or store response bodies. A connector failure
+never affects prices or routing. Balance is **advisory by default (warn)**;
+hard gating is an opt-in per credential, because a provider balance can include
+other products (SailResearch shares it with sailboxes) and can be stale.
+`balance_unavailable`/`available: false` shows "unavailable", never `0`.
+
+**Balance policy (user, 2026-11-18):** warn by default — show the balance and a
+low-balance / “runs out in N days” warning, but keep routing unchanged. A hard
+gate is **opt-in per credential** (`balance_gate: warn|block`), for operators
+who trust the number; otherwise a stale or product-shared balance would refuse
+requests for no good reason.
+
+**Why:** every provider differs in path, parameters, auth headers and payload
+shape; hard-coding them does not scale and silent fallbacks misprice.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

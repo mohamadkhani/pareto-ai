@@ -93,6 +93,14 @@ export class AuthService {
       body: { email, password },
       csrfToken: this.csrfToken(),
     });
+    this.adoptSession(session);
+  }
+
+  /**
+   * Stores a session created outside the login form (the first-run setup
+   * wizard), so the guards and the shell see the signed-in account at once.
+   */
+  adoptSession(session: AuthSession): void {
     this.user.set(session.user);
     this.csrfToken.set(session.csrf_token);
     this.status.set('authenticated');
@@ -117,6 +125,17 @@ export class AuthService {
     if (user?.must_change_password) {
       this.user.set({ ...user, must_change_password: false });
     }
+  }
+
+  /**
+   * Drops the cached session state so the next [`loadMe`] asks the server.
+   * Used when something other than login changes who the caller is (skipping
+   * setup turns the visitor into the local operator).
+   */
+  forget(): void {
+    this.user.set(null);
+    this.csrfToken.set(null);
+    this.status.set('unknown');
   }
 
   /**

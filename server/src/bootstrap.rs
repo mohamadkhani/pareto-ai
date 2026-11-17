@@ -1,8 +1,13 @@
-//! First-run bootstrap: create the initial admin account.
+//! First-run bootstrap: the optional non-interactive admin shortcut.
 //!
-//! When the `users` table is empty, the admin is created from the
-//! `GATEWAY_ADMIN_EMAIL` / `GATEWAY_ADMIN_PASSWORD` environment variables and
-//! startup fails with an actionable error when they are missing or too weak.
+//! With no users, `GATEWAY_ADMIN_EMAIL` **and** `GATEWAY_ADMIN_PASSWORD` still
+//! create the first admin at startup (for container/CI provisioning) and the
+//! account starts flagged `must_change_password`. When they are absent the
+//! gateway no longer fails: it starts in **setup** mode and the wizard creates
+//! the admin instead (`crate::setup`). Half a configuration (one variable set,
+//! a blank email, a too-short password) is an operator error and fails startup
+//! with an actionable message.
+//!
 //! The password is never logged and never stored in any long-lived struct: it
 //! is read from the environment, hashed, and dropped.
 
@@ -14,13 +19,31 @@ use sqlx::SqlitePool;
 use crate::auth;
 use crate::password;
 
+/// What the startup bootstrap did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapOutcome {
+    /// The environment shortcut just created the first admin.
+    AdminCreated,
+    /// Accounts already exist; nothing to do.
+    UsersExist,
+    /// No users and no environment shortcut: the setup wizard takes over.
+    SetupRequired,
+}
+
+impl BootstrapOutcome {
+    /// True when the gateway still needs the first-run setup wizard.
+    pub fn setup_required(self) -> bool {
+        self == Self::SetupRequired
+    }
+}
+
 const MIN_ADMIN_PASSWORD_LEN: usize = 12;
 
-/// Creates the bootstrap admin when no user exists yet.
+/// Runs the environment-driven bootstrap (see the module docs).
 ///
-/// Fails startup when the table is empty and the environment does not provide
-/// a usable admin email and password (at least 12 characters).
-pub async fn ensure_admin(pool: &SqlitePool) -> Result<()> {
+/// Failure mode: an error naming the offending `GATEWAY_ADMIN_*` variable when
+/// the shortcut is half configured or its password is too short.
+pub async fn ensure_admin(pool: &SqlitePool) -> Result<BootstrapOutcome> {
     let email = env::var("GATEWAY_ADMIN_EMAIL").ok();
     let password = env::var("GATEWAY_ADMIN_PASSWORD").ok();
     ensure_admin_with(pool, email, password).await
@@ -31,21 +54,27 @@ pub async fn ensure_admin_with(
     pool: &SqlitePool,
     email: Option<String>,
     admin_password: Option<String>,
-) -> Result<()> {
+) -> Result<BootstrapOutcome> {
     let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await
         .context("counting users")?;
     if users > 0 {
-        return Ok(());
+        return Ok(BootstrapOutcome::UsersExist);
     }
 
     let email = match email {
         Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-        _ => bail!(
-            "no users exist and GATEWAY_ADMIN_EMAIL is not set; \
-             set GATEWAY_ADMIN_EMAIL and GATEWAY_ADMIN_PASSWORD to create the first admin account"
-        ),
+        _ => {
+            if admin_password.is_some_and(|value| !value.is_empty()) {
+                bail!(
+                    "GATEWAY_ADMIN_PASSWORD is set but GATEWAY_ADMIN_EMAIL is not; \
+                     set both to create the first admin non-interactively, or neither \
+                     to use the setup wizard"
+                );
+            }
+            return Ok(BootstrapOutcome::SetupRequired);
+        }
     };
     let admin_password = match admin_password {
         Some(value) if value.len() >= MIN_ADMIN_PASSWORD_LEN => value,
@@ -54,8 +83,9 @@ pub async fn ensure_admin_with(
              pick a longer password and restart"
         ),
         None => bail!(
-            "no users exist and GATEWAY_ADMIN_PASSWORD is not set; \
-             set GATEWAY_ADMIN_EMAIL and GATEWAY_ADMIN_PASSWORD to create the first admin account"
+            "GATEWAY_ADMIN_EMAIL is set but GATEWAY_ADMIN_PASSWORD is not; \
+             set both to create the first admin non-interactively, or neither \
+             to use the setup wizard"
         ),
     };
 
@@ -81,14 +111,18 @@ pub async fn ensure_admin_with(
         "auth.bootstrap_admin_created",
         Some("user"),
         Some(&user_id),
-        Some(serde_json::json!({ "email": email }).to_string().as_str()),
+        Some(
+            serde_json::json!({ "email": email, "source": "env" })
+                .to_string()
+                .as_str(),
+        ),
         None,
     )
     .await
     .context("auditing the bootstrap admin creation")?;
 
-    tracing::info!(email = %email, "created bootstrap admin account");
-    Ok(())
+    tracing::info!(email = %email, "created bootstrap admin account from the environment");
+    Ok(BootstrapOutcome::AdminCreated)
 }
 
 #[cfg(test)]
@@ -96,6 +130,7 @@ mod tests {
     use super::*;
 
     async fn test_pool() -> (std::path::PathBuf, SqlitePool) {
+        password::set_test_cost(8 * 1024, 1, 1);
         let dir = std::env::temp_dir().join(format!("gateway-bootstrap-{}", uuid::Uuid::new_v4()));
         let pool = crate::db::open(&dir.join("gateway.db"))
             .await
@@ -106,13 +141,14 @@ mod tests {
     #[tokio::test]
     async fn creates_admin_when_users_is_empty() {
         let (dir, pool) = test_pool().await;
-        ensure_admin_with(
+        let outcome = ensure_admin_with(
             &pool,
             Some("boss@example.com".to_string()),
             Some("a-long-enough-password".to_string()),
         )
         .await
         .expect("bootstrap must succeed");
+        assert_eq!(outcome, BootstrapOutcome::AdminCreated);
 
         let (email, role, active): (String, String, i64) =
             sqlx::query_as("SELECT email, role, is_active FROM users")
@@ -129,7 +165,7 @@ mod tests {
             .expect("flag");
         assert_eq!(
             must_change, 1,
-            "the bootstrap admin must rotate its password"
+            "an environment-supplied password must be rotated"
         );
 
         let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log ORDER BY id")
@@ -150,9 +186,12 @@ mod tests {
         )
         .await
         .expect("first bootstrap");
-        ensure_admin_with(&pool, None, None)
-            .await
-            .expect("second bootstrap must not need credentials");
+        assert_eq!(
+            ensure_admin_with(&pool, None, None)
+                .await
+                .expect("second bootstrap must not need credentials"),
+            BootstrapOutcome::UsersExist
+        );
 
         let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(&pool)
@@ -163,25 +202,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fails_with_actionable_error_when_credentials_missing() {
+    async fn no_credentials_means_setup_mode_instead_of_failure() {
         let (dir, pool) = test_pool().await;
-
-        let err = ensure_admin_with(&pool, None, None)
+        let outcome = ensure_admin_with(&pool, None, None)
             .await
-            .expect_err("must fail without credentials");
-        let message = err.to_string();
-        assert!(message.contains("GATEWAY_ADMIN_EMAIL"), "{message}");
-        assert!(message.contains("GATEWAY_ADMIN_PASSWORD"), "{message}");
+            .expect("no configuration must start in setup mode");
+        assert!(outcome.setup_required());
+        assert!(
+            ensure_admin_with(&pool, Some("   ".to_string()), Some(String::new()))
+                .await
+                .expect("blank values count as unset")
+                .setup_required()
+        );
+
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&pool)
+            .await
+            .expect("count users");
+        assert_eq!(users, 0, "setup mode creates no account");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn half_a_configuration_fails_with_an_actionable_error() {
+        let (dir, pool) = test_pool().await;
 
         let err = ensure_admin_with(&pool, Some("boss@example.com".to_string()), None)
             .await
-            .expect_err("must fail without password");
-        assert!(err.to_string().contains("GATEWAY_ADMIN_PASSWORD"));
+            .expect_err("email without password must fail");
+        assert!(err.to_string().contains("GATEWAY_ADMIN_PASSWORD"), "{err}");
 
-        let err = ensure_admin_with(&pool, Some("  ".to_string()), None)
+        let err = ensure_admin_with(&pool, None, Some("a-long-enough-password".to_string()))
             .await
-            .expect_err("blank email is missing");
-        assert!(err.to_string().contains("GATEWAY_ADMIN_EMAIL"));
+            .expect_err("password without email must fail");
+        assert!(err.to_string().contains("GATEWAY_ADMIN_EMAIL"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

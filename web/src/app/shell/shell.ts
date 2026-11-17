@@ -10,7 +10,9 @@ import {
 import { NgTemplateOutlet } from '@angular/common';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
+import { SetupService } from '../setup/setup.service';
 import { UiBadge } from '../ui/badge';
+import { UiBanner, type BannerTone } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiIconButton } from '../ui/icon-button';
 import { ThemeService } from '../ui/theme.service';
@@ -65,10 +67,20 @@ const NAV_SECTIONS: readonly NavSection[] = [
     ],
   },
   {
+    label: 'Account',
+    links: [{ label: 'Settings', path: '/settings', adminOnly: true }],
+  },
+  {
     label: 'Development',
     links: [{ label: 'Styleguide', path: '/styleguide', adminOnly: true }],
   },
 ];
+
+/** The persistent exposure note shown above every page. */
+interface ExposureNote {
+  readonly tone: BannerTone;
+  readonly text: string;
+}
 
 /** Layout shell around every authenticated route: nav, theme, user info, sign out. */
 @Component({
@@ -79,6 +91,7 @@ const NAV_SECTIONS: readonly NavSection[] = [
     RouterLink,
     RouterLinkActive,
     UiBadge,
+    UiBanner,
     UiButton,
     UiIconButton,
   ],
@@ -90,11 +103,28 @@ const NAV_SECTIONS: readonly NavSection[] = [
 export class Shell {
   protected readonly auth = inject(AuthService);
   protected readonly theme = inject(ThemeService);
+  private readonly setup = inject(SetupService);
   private readonly router = inject(Router);
 
   protected readonly signingOut = signal(false);
   /** Whether the compact (below ~900px) navigation panel is open. */
   protected readonly menuOpen = signal(false);
+
+  /**
+   * The persistent security banner: a calm `info` note on a local machine, a
+   * red `danger` banner when the gateway is reachable from the network without
+   * a password. `null` once protected, or before the status has loaded.
+   */
+  protected readonly exposure = computed<ExposureNote | null>(() => {
+    const status = this.setup.status();
+    if (status === null || status.mode !== 'unprotected') {
+      return null;
+    }
+    return {
+      tone: status.is_local ? 'info' : 'danger',
+      text: status.warning ?? 'This gateway is running without a password.',
+    };
+  });
 
   private readonly menuButton = viewChild<ElementRef<HTMLButtonElement>>('menuButton');
 
@@ -108,6 +138,16 @@ export class Shell {
 
   /** The icon explains the effective theme; the label names the chosen mode. */
   protected readonly themeIcon = computed(() => this.theme.mode());
+
+  constructor() {
+    // Drives the exposure banner; a failure simply leaves it hidden.
+    void this.setup.load().catch(() => undefined);
+  }
+
+  /** Opens Settings from the security banner. */
+  protected openSettings(): void {
+    void this.router.navigateByUrl('/settings');
+  }
 
   protected toggleMenu(): void {
     this.menuOpen.update((open) => !open);

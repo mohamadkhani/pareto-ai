@@ -1,0 +1,570 @@
+//! First-run setup: the mode machine and the exposure rules.
+//!
+//! With no users and no `GATEWAY_ADMIN_*` environment shortcut, the gateway
+//! starts in **setup** mode instead of failing. The operator either creates the
+//! first admin through the wizard (`setup` → `protected`) or explicitly skips
+//! it for a local-only deployment (`setup` → `unprotected`). A gateway with at
+//! least one user is always `protected`.
+//!
+//! Exposure rule: setup and unprotected are local conveniences. A bind address
+//! that is not loopback refuses to start in those modes unless
+//! `GATEWAY_ALLOW_PUBLIC_NO_AUTH=1` is set; with the flag it starts and keeps
+//! the warning. Desktop-wrapper requests (`tauri://localhost`,
+//! `https://tauri.localhost`, `wails://...`) and loopback peers count as local
+//! for the wizard and the warning text.
+
+use std::net::SocketAddr;
+use std::sync::RwLock;
+
+use axum::extract::ConnectInfo;
+use axum::http::{HeaderMap, header, request::Parts};
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use utoipa::ToSchema;
+
+use crate::master_key::MasterKeySource;
+
+/// The settings key that records an explicit "skip for now". It keeps the
+/// unprotected mode across restarts while no user exists.
+pub const SETTING_SETUP_SKIPPED: &str = "setup.skipped";
+
+/// Which authentication state the gateway is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// No users; the wizard is the only way in.
+    Setup,
+    /// No users; explicitly skipped. The gateway acts as a trusted local
+    /// operator and logs the exposure warning on every start.
+    Unprotected,
+    /// At least one account exists; normal session authentication applies.
+    Protected,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Unprotected => "unprotected",
+            Self::Protected => "protected",
+        }
+    }
+
+    /// True only when authentication is enforced.
+    pub fn is_protected(self) -> bool {
+        self == Self::Protected
+    }
+}
+
+/// Read-mostly setup state shared through [`crate::AppState`].
+#[derive(Debug)]
+pub struct SetupState {
+    mode: RwLock<Mode>,
+    master_key_source: MasterKeySource,
+}
+
+impl SetupState {
+    pub fn new(mode: Mode, master_key_source: MasterKeySource) -> Self {
+        Self {
+            mode: RwLock::new(mode),
+            master_key_source,
+        }
+    }
+
+    pub fn mode(&self) -> Mode {
+        *self
+            .mode
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Moves the machine (setup → protected/unprotected, unprotected →
+    /// protected). Only `resolve_mode` and the two setup actions call this.
+    pub fn set_mode(&self, mode: Mode) {
+        *self
+            .mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+    }
+
+    pub fn master_key_source(&self) -> MasterKeySource {
+        self.master_key_source
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetupError {
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("the first admin account already exists")]
+    AlreadyComplete,
+    #[error("audit write failed: {0}")]
+    Audit(#[from] crate::auth::AuthError),
+    #[error("password hashing failed: {0}")]
+    Password(#[from] crate::password::PasswordError),
+}
+
+/// Derives the startup mode from the database: any user means protected, an
+/// explicit skip means unprotected, otherwise setup.
+pub async fn resolve_mode(pool: &SqlitePool) -> Result<Mode, sqlx::Error> {
+    if user_count(pool).await? > 0 {
+        return Ok(Mode::Protected);
+    }
+    let skipped: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+        .bind(SETTING_SETUP_SKIPPED)
+        .fetch_optional(pool)
+        .await?;
+    Ok(match skipped.as_deref() {
+        Some("1") => Mode::Unprotected,
+        _ => Mode::Setup,
+    })
+}
+
+/// Number of rows in `users`.
+pub async fn user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await
+}
+
+/// Records the explicit skip so the unprotected mode survives a restart.
+pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at, updated_by) \
+         VALUES (?, '1', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), NULL) \
+         ON CONFLICT (key) DO UPDATE SET value = '1', \
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+    )
+    .bind(SETTING_SETUP_SKIPPED)
+    .execute(&mut *tx)
+    .await?;
+    crate::auth::audit(
+        &mut *tx,
+        None,
+        "setup.skipped",
+        Some("gateway"),
+        None,
+        Some(&serde_json::json!({ "mode": "unprotected" }).to_string()),
+        Some(ip),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Creates the first admin from the wizard: role admin, active, and **not**
+/// flagged for forced rotation (the operator chose this password themselves).
+///
+/// Failure mode: [`SetupError::AlreadyComplete`] when a user exists,
+/// [`SetupError::Invalid`] for a bad email or a too-short password.
+pub async fn create_first_admin(
+    pool: &SqlitePool,
+    email: &str,
+    password: &str,
+    ip: &str,
+) -> Result<String, SetupError> {
+    if user_count(pool).await? > 0 {
+        return Err(SetupError::AlreadyComplete);
+    }
+    let email =
+        crate::users::validate_email(email).map_err(|e| SetupError::Invalid(e.to_string()))?;
+    crate::users::validate_password(password).map_err(|e| SetupError::Invalid(e.to_string()))?;
+    let password = password.to_string();
+    let password_hash = crate::password::hash_password_offload(password).await?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO users (id, email, display_name, password_hash, role, is_active, \
+                            must_change_password) \
+         VALUES (?, ?, ?, ?, 'admin', 1, 0)",
+    )
+    .bind(&id)
+    .bind(&email)
+    .bind(&email)
+    .bind(&password_hash)
+    .execute(&mut *tx)
+    .await?;
+    crate::auth::audit(
+        &mut *tx,
+        Some(&id),
+        "auth.bootstrap_admin_created",
+        Some("user"),
+        Some(&id),
+        Some(&serde_json::json!({ "email": email, "source": "setup" }).to_string()),
+        Some(ip),
+    )
+    .await?;
+    tx.commit().await?;
+    tracing::info!(email = %email, "created the first admin from the setup wizard");
+    Ok(id)
+}
+
+/// The startup exposure decision for a bind address and mode.
+///
+/// `Err` means the gateway must refuse to start; `Ok(Some(warning))` means it
+/// may start but is exposed; `Ok(None)` means nothing to report.
+pub fn exposure(
+    bind: SocketAddr,
+    mode: Mode,
+    allow_public_no_auth: bool,
+) -> Result<Option<String>, String> {
+    if mode.is_protected() || bind.ip().is_loopback() {
+        return Ok(None);
+    }
+    let warning = format!(
+        "this gateway is reachable from the network without a password \
+         (listening on {bind}, authentication {mode})",
+        mode = mode.as_str()
+    );
+    if allow_public_no_auth {
+        return Ok(Some(warning));
+    }
+    Err(format!(
+        "refusing to start: listening on {bind} (not loopback) with authentication in \
+         '{mode}' state would expose every route to the network without a password. \
+         Either bind to 127.0.0.1 and finish setup locally, or set \
+         GATEWAY_ALLOW_PUBLIC_NO_AUTH=1 to start anyway (not recommended)",
+        mode = mode.as_str()
+    ))
+}
+
+/// True when `value` is one of the desktop-wrapper origins (`tauri://...`,
+/// `https://tauri.localhost`, `wails://...`).
+pub fn is_desktop_origin(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("tauri://")
+        || value.starts_with("https://tauri.localhost")
+        || value.starts_with("wails://")
+}
+
+/// True when the request's `Origin` or `Referer` names a desktop wrapper.
+pub fn desktop_wrapper(headers: &HeaderMap) -> bool {
+    [header::ORIGIN, header::REFERER].iter().any(|name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(is_desktop_origin)
+    })
+}
+
+/// True when the request's `Origin` is absent, a desktop wrapper, or the
+/// request's own origin (`http(s)://<Host>`).
+///
+/// The setup mutations sit outside the CSRF guard (there is no session yet) and
+/// a browser can reach a loopback gateway from any web page, so an explicit
+/// cross-site `Origin` is refused. Non-browser clients send no `Origin`.
+pub fn origin_is_trusted(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    if is_desktop_origin(origin) {
+        return true;
+    }
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    origin == format!("http://{host}") || origin == format!("https://{host}")
+}
+
+/// True when the TCP peer is a loopback address.
+pub fn loopback_peer(parts: &Parts) -> bool {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback())
+}
+
+/// True when the request counts as local for the wizard and warning logic:
+/// a loopback peer or a desktop-wrapper origin.
+pub fn is_local(parts: &Parts) -> bool {
+    loopback_peer(parts) || desktop_wrapper(&parts.headers)
+}
+
+/// The warning shown for a mode, worded calmly for a local request and in
+/// danger terms for a network-reachable one.
+pub fn warning_for(mode: Mode, local: bool) -> Option<String> {
+    match (mode, local) {
+        (Mode::Protected, _) => None,
+        (Mode::Unprotected, true) => {
+            Some("Running without a password on this machine.".to_string())
+        }
+        (Mode::Unprotected, false) => Some(
+            "This gateway is reachable from the network without a password. \
+             Set one in Settings."
+                .to_string(),
+        ),
+        (Mode::Setup, true) => Some(
+            "This gateway is not protected yet. Finish setup to set an admin password.".to_string(),
+        ),
+        (Mode::Setup, false) => Some(
+            "This gateway is reachable from the network without a password. \
+             Finish setup to set an admin password."
+                .to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+
+    fn parts(peer: Option<&str>, origin: Option<&str>, referer: Option<&str>) -> Parts {
+        let mut builder = Request::builder().uri("/api/setup/status");
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        if let Some(referer) = referer {
+            builder = builder.header(header::REFERER, referer);
+        }
+        let (mut parts, ()) = builder.body(()).expect("request").into_parts();
+        if let Some(peer) = peer {
+            parts.extensions.insert(ConnectInfo(
+                peer.parse::<SocketAddr>().expect("test peer address"),
+            ));
+        }
+        parts
+    }
+
+    #[tokio::test]
+    async fn mode_derives_from_users_and_the_skip_setting() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+
+        assert_eq!(
+            resolve_mode(&app.state.pool).await.expect("mode"),
+            Mode::Setup,
+            "no users and no skip is setup"
+        );
+
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip");
+        assert_eq!(
+            resolve_mode(&app.state.pool).await.expect("mode"),
+            Mode::Unprotected,
+            "an explicit skip survives a restart"
+        );
+
+        app.create_user("admin@example.com", crate::auth::Role::Admin, true)
+            .await;
+        assert_eq!(
+            resolve_mode(&app.state.pool).await.expect("mode"),
+            Mode::Protected,
+            "any user means protected"
+        );
+
+        let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log ORDER BY id")
+            .fetch_all(&app.state.pool)
+            .await
+            .expect("audit");
+        assert_eq!(actions, ["setup.skipped"]);
+    }
+
+    #[tokio::test]
+    async fn create_first_admin_is_unflagged_audited_and_only_once() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+
+        let id = create_first_admin(
+            &app.state.pool,
+            " Boss@Example.com ",
+            "first-admin-password",
+            "127.0.0.1",
+        )
+        .await
+        .expect("create");
+
+        let (email, role, must_change): (String, String, i64) =
+            sqlx::query_as("SELECT email, role, must_change_password FROM users WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("row");
+        assert_eq!(email, "Boss@Example.com");
+        assert_eq!(role, "admin");
+        assert_eq!(must_change, 0, "the operator chose this password");
+
+        let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("hash");
+        assert!(hash.starts_with("$argon2id$"), "new hashes use Argon2id");
+        assert!(crate::password::verify_password("first-admin-password", &hash).expect("verify"));
+
+        let again = create_first_admin(
+            &app.state.pool,
+            "second@example.com",
+            "second-admin-password",
+            "127.0.0.1",
+        )
+        .await
+        .expect_err("a second first-admin must fail");
+        assert!(matches!(again, SetupError::AlreadyComplete), "{again:?}");
+
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("the skip marker is idempotent");
+    }
+
+    #[tokio::test]
+    async fn first_admin_rejects_bad_input() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+
+        assert!(matches!(
+            create_first_admin(&app.state.pool, "not-an-email", "long-enough-1", "ip").await,
+            Err(SetupError::Invalid(_))
+        ));
+        assert!(matches!(
+            create_first_admin(&app.state.pool, "a@example.com", "short", "ip").await,
+            Err(SetupError::Invalid(_))
+        ));
+        assert_eq!(user_count(&app.state.pool).await.expect("count"), 0);
+    }
+
+    #[test]
+    fn exposure_refuses_public_binds_unless_allowed() {
+        let public: SocketAddr = "0.0.0.0:8081".parse().expect("addr");
+        let loopback: SocketAddr = "127.0.0.1:8081".parse().expect("addr");
+
+        // Loopback is always fine, in every mode.
+        for mode in [Mode::Setup, Mode::Unprotected, Mode::Protected] {
+            assert_eq!(exposure(loopback, mode, false).expect("loopback"), None);
+        }
+
+        // Protected is always fine, even on a public bind.
+        assert_eq!(
+            exposure(public, Mode::Protected, false).expect("protected"),
+            None
+        );
+
+        // Setup and unprotected refuse without the flag.
+        for mode in [Mode::Setup, Mode::Unprotected] {
+            let err = exposure(public, mode, false).expect_err("must refuse");
+            assert!(err.contains("refusing to start"), "{err}");
+            assert!(err.contains("GATEWAY_ALLOW_PUBLIC_NO_AUTH=1"), "{err}");
+            assert!(err.contains(mode.as_str()), "{err}");
+        }
+
+        // With the flag they start but keep the warning.
+        for mode in [Mode::Setup, Mode::Unprotected] {
+            let warning = exposure(public, mode, true)
+                .expect("allowed")
+                .expect("warning");
+            assert!(warning.contains("without a password"), "{warning}");
+            assert!(warning.contains(mode.as_str()), "{warning}");
+        }
+    }
+
+    #[test]
+    fn local_detection_accepts_loopback_and_desktop_wrappers() {
+        assert!(is_local(&parts(Some("127.0.0.1:5555"), None, None)));
+        assert!(is_local(&parts(Some("[::1]:5555"), None, None)));
+        assert!(!is_local(&parts(Some("203.0.113.9:5555"), None, None)));
+        assert!(!is_local(&parts(None, None, None)), "no peer is not local");
+
+        for origin in [
+            "tauri://localhost",
+            "https://tauri.localhost",
+            "wails://localhost",
+            "wails://wails.localhost",
+        ] {
+            assert!(
+                is_local(&parts(Some("203.0.113.9:5555"), Some(origin), None)),
+                "origin {origin} counts as local"
+            );
+        }
+        assert!(
+            is_local(&parts(
+                Some("203.0.113.9:5555"),
+                None,
+                Some("https://tauri.localhost/console")
+            )),
+            "a referer counts as local too"
+        );
+        assert!(
+            !is_local(&parts(
+                Some("203.0.113.9:5555"),
+                Some("https://evil.example.com"),
+                None
+            )),
+            "an ordinary web origin is not local"
+        );
+    }
+
+    #[test]
+    fn a_cross_site_origin_never_passes_the_setup_gate() {
+        let origin = |origin: Option<&str>, host: Option<&str>| {
+            let mut builder = Request::builder().uri("/api/setup/admin");
+            if let Some(host) = host {
+                builder = builder.header(header::HOST, host);
+            }
+            if let Some(origin) = origin {
+                builder = builder.header(header::ORIGIN, origin);
+            }
+            let (parts, ()) = builder.body(()).expect("request").into_parts();
+            origin_is_trusted(&parts.headers)
+        };
+
+        // No Origin (curl, scripts) and same-origin (the console itself) pass.
+        assert!(origin(None, Some("127.0.0.1:8081")));
+        assert!(origin(
+            Some("http://127.0.0.1:8081"),
+            Some("127.0.0.1:8081")
+        ));
+        assert!(origin(
+            Some("https://gateway.internal"),
+            Some("gateway.internal")
+        ));
+        // Desktop wrappers pass.
+        assert!(origin(Some("tauri://localhost"), Some("127.0.0.1:8081")));
+        assert!(origin(
+            Some("https://tauri.localhost"),
+            Some("127.0.0.1:8081")
+        ));
+        // A random web page does not, even though its peer is loopback.
+        assert!(!origin(
+            Some("https://evil.example.com"),
+            Some("127.0.0.1:8081")
+        ));
+        assert!(!origin(Some("null"), Some("127.0.0.1:8081")));
+        assert!(!origin(
+            Some("http://127.0.0.1:9999"),
+            Some("127.0.0.1:8081")
+        ));
+    }
+
+    #[test]
+    fn warnings_are_calm_locally_and_loud_on_the_network() {
+        assert_eq!(warning_for(Mode::Protected, false), None);
+
+        let local = warning_for(Mode::Unprotected, true).expect("warning");
+        assert!(local.contains("on this machine"), "{local}");
+        assert!(!local.contains("network"), "{local}");
+
+        let public = warning_for(Mode::Unprotected, false).expect("warning");
+        assert!(public.contains("reachable from the network"), "{public}");
+        assert!(public.contains("Settings"), "{public}");
+
+        assert!(warning_for(Mode::Setup, true).is_some());
+        assert!(
+            warning_for(Mode::Setup, false)
+                .expect("warning")
+                .contains("reachable from the network")
+        );
+    }
+}

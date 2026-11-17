@@ -16,6 +16,7 @@ mod error;
 mod ip;
 #[cfg(test)]
 mod load_test;
+mod master_key;
 mod mix;
 mod money;
 mod openapi;
@@ -29,6 +30,7 @@ mod request_id;
 mod routes;
 mod routing;
 mod secrets;
+mod setup;
 #[cfg(feature = "embedded-ui")]
 mod static_files;
 mod supervisor;
@@ -43,20 +45,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
-use crate::secrets::{SecretBox, require_master_key};
+use crate::secrets::SecretBox;
 
 /// Shared application state. Cheap to clone; the pool is internally pooled.
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub pool: sqlx::SqlitePool,
-    /// Credential secret encryption (D16); built from `GATEWAY_MASTER_KEY`.
+    /// Credential secret encryption (D16); built from `GATEWAY_MASTER_KEY` or
+    /// the generated `<data>/master.key`.
     pub secrets: Arc<SecretBox>,
+    /// First-run mode machine and master-key provenance.
+    pub setup: Arc<setup::SetupState>,
     /// Shared HTTP client for upstream calls (M3): pooled connections.
     pub upstream: Arc<upstream::UpstreamClient>,
     pub started: Instant,
@@ -109,9 +114,21 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    // Credential encryption is required from milestone 2 on: without the key
-    // no credential can be stored safely, so the gateway refuses to start.
-    let secrets = Arc::new(require_master_key(config.master_key.as_ref())?);
+    // Credential encryption needs a key from the very first request. An
+    // explicit `GATEWAY_MASTER_KEY` wins; otherwise the key is read from (or
+    // generated into) `<data>/master.key`. Only the path is logged, never the
+    // key.
+    let resolved_key = master_key::resolve(config.master_key.as_ref(), &config.data_dir)?;
+    if let Some(path) = &resolved_key.path {
+        tracing::info!(
+            path = %path.display(),
+            source = resolved_key.source.as_str(),
+            "credential master key loaded from the data directory"
+        );
+    }
+    let secrets = Arc::new(master_key::secret_box(&resolved_key));
+    let master_key_source = resolved_key.source;
+
     let upstream = Arc::new(
         upstream::UpstreamClient::new(config.timeout_connect)
             .context("building the upstream HTTP client")?,
@@ -129,7 +146,36 @@ async fn main() -> Result<()> {
         .await
         .context("starting database")?;
 
-    bootstrap::ensure_admin(&pool).await?;
+    let bootstrap = bootstrap::ensure_admin(&pool).await?;
+    let mode = setup::resolve_mode(&pool)
+        .await
+        .context("resolving setup mode")?;
+    if bootstrap.setup_required() != (mode == setup::Mode::Setup) {
+        // Defensive: the two derive from the same table and setting; a
+        // disagreement means something changed under us mid-start.
+        tracing::warn!(?bootstrap, mode = mode.as_str(), "setup mode mismatch");
+    }
+
+    // Exposure rule: setup and unprotected are local conveniences. Binding a
+    // network interface in those modes would publish every route without a
+    // password, so it refuses to start unless the operator insists.
+    match setup::exposure(config.listen, mode, config.allow_public_no_auth) {
+        Err(message) => bail!(message),
+        Ok(Some(warning)) => tracing::warn!(%warning, "gateway is exposed"),
+        Ok(None) => {}
+    }
+    match mode {
+        setup::Mode::Setup => tracing::warn!(
+            bind = %config.listen,
+            "no users exist: open the console to run the first-run setup wizard, or send \
+             POST /api/setup/skip to run without a password on this machine"
+        ),
+        setup::Mode::Unprotected => tracing::warn!(
+            bind = %config.listen,
+            "running without a password (setup was skipped); open Settings to set one"
+        ),
+        setup::Mode::Protected => {}
+    }
 
     let breaker_threshold = config.breaker_threshold;
     let breaker_cooldown = config.breaker_cooldown;
@@ -137,6 +183,7 @@ async fn main() -> Result<()> {
         config,
         pool,
         secrets,
+        setup: Arc::new(setup::SetupState::new(mode, master_key_source)),
         upstream,
         started: Instant::now(),
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),

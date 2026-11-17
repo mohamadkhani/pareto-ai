@@ -8,8 +8,10 @@
 //! OpenAI-compatible data plane (bearer API keys or an admin session).
 //! Everything under `/api/` goes through [`csrf_guard`]: state-changing
 //! methods must carry the session's CSRF token in `X-CSRF-Token`, except for
-//! login, which is mounted outside the guard because the caller has no
-//! session yet. `/v1/*` is exempt from the guard because OpenAI-SDK clients
+//! login and the first-run setup mutations, which are mounted outside the
+//! guard because the caller has no session yet. Setup mutations are
+//! loopback-only (see [`setup`]). While the gateway is in `unprotected` mode
+//! (`setup.rs`), the admin and data planes act as a trusted local operator. `/v1/*` is exempt from the guard because OpenAI-SDK clients
 //! never send `X-CSRF-Token`. Cookie-authenticated `/v1` calls are safe only
 //! while the `gateway_session` cookie stays `SameSite=Strict`
 //! ([`crate::auth::session_cookie`]): a cross-site request then never carries
@@ -30,6 +32,7 @@ pub(crate) mod money;
 pub(crate) mod openapi;
 pub(crate) mod providers;
 pub(crate) mod routing;
+pub(crate) mod setup;
 pub(crate) mod sync;
 pub(crate) mod usage;
 pub(crate) mod users;
@@ -223,6 +226,12 @@ fn api_surface(state: AppState) -> Router<AppState> {
 
     Router::new()
         .route("/auth/login", axum::routing::post(auth::login))
+        // First-run setup: status is readable from anywhere (the console needs
+        // it for the exposure banner); the two mutations are loopback-only and
+        // mounted outside the CSRF guard because there is no session yet.
+        .route("/setup/status", get(setup::status))
+        .route("/setup/admin", axum::routing::post(setup::create_admin))
+        .route("/setup/skip", axum::routing::post(setup::skip))
         // A preview is a read-like computation (no writes), so it is mounted
         // outside the CSRF guard like login; the handler still requires an
         // admin session.
