@@ -8,6 +8,7 @@ import {
 } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { Model } from '../catalog/catalog.types';
+import type { ApiKeyView } from '../keys/keys.types';
 import type { UserView } from '../users/users.types';
 import type { GrantView } from './grants.types';
 import { Grants } from './grants';
@@ -67,6 +68,24 @@ function grantFixture(overrides: Partial<GrantView> = {}): GrantView {
     mode: 'allow',
     created_by: 'u1',
     created_at: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function keyFixture(overrides: Partial<ApiKeyView> = {}): ApiKeyView {
+  return {
+    id: 'k1',
+    user_id: 'u2',
+    name: 'Laptop',
+    prefix: 'pk_live_ab12',
+    scopes: null,
+    expires_at: null,
+    revoked_at: null,
+    last_used_at: null,
+    rate_limit_rpm: null,
+    rate_limit_tpm: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -212,7 +231,9 @@ describe('Grants', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(root.querySelector('.banner.error')?.textContent ?? '').toContain('Duplicate grant');
+    expect(root.querySelector('.ui-banner.tone-danger')?.textContent ?? '').toContain(
+      'Duplicate grant',
+    );
     expect(root.querySelector('form')).not.toBeNull();
   });
 
@@ -234,5 +255,32 @@ describe('Grants', () => {
     expect(fetchMock.requests[5].method).toBe('DELETE');
     expect(fetchMock.requests[5].url).toBe('/api/grants/g1');
     expect(root.textContent).toContain('No grants yet');
+  });
+
+  it('resolves an API-key subject to its name, prefix, and owner', async () => {
+    queueLoad(
+      fetchMock,
+      [grantFixture({ subject_type: 'api_key', subject_id: 'k1' })],
+      [userFixture()],
+    );
+    fetchMock.respond(jsonResponse(200, [keyFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Laptop (pk_live_ab12) · user@example.com');
+    expect(root.textContent).not.toContain('api_key k1');
+  });
+
+  it('degrades to a readable placeholder when the key was deleted', async () => {
+    queueLoad(
+      fetchMock,
+      [grantFixture({ subject_type: 'api_key', subject_id: 'k-deleted-1234' })],
+      [userFixture()],
+    );
+    fetchMock.respond(jsonResponse(200, []));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('deleted key k-delete…');
   });
 });

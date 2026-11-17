@@ -1,0 +1,55 @@
+-- 0013_discovery_state: persist the last applied model discovery per provider.
+--
+-- The providers page used to keep the result of "Load models" in browser
+-- memory only, so "Last load" read "never" after a reload. These three columns
+-- are written by `discovery::apply` on an **apply** run only (a dry run
+-- computes the same summary inside a rolled-back transaction and writes
+-- nothing here). `last_discovery_created` counts `models` rows inserted and
+-- `last_discovery_unchanged` counts offerings that already matched; the
+-- timestamp is UTC ISO-8601 with milliseconds and a trailing Z, like every
+-- other timestamp in this schema.
+--
+-- They are exposed read-only on `GET /api/providers` as
+-- `last_discovery_at`, `last_discovery_created`, `last_discovery_unchanged`.
+--
+-- Known duplicate cleanup (documented, **not** run automatically):
+-- discoveries used to match `models.canonical_name` case-sensitively, so
+-- `moonshotai/Kimi-K3.1-Pro` (Sail) and `moonshotai/kimi-k3.1-pro`
+-- (OpenRouter) became two rows and made benchmark hints ambiguous. New
+-- discoveries and creates now reuse a case-insensitive match. Existing pairs
+-- need one pass; keep the oldest rows, repoint every offering, and delete the
+-- duplicate (run inside a transaction, after a backup):
+--
+--   BEGIN;
+--   CREATE TEMP TABLE model_dedupe AS
+--     SELECT drop_id, keep_id FROM (
+--       SELECT id AS drop_id,
+--              FIRST_VALUE(id) OVER (
+--                PARTITION BY lower(canonical_name) ORDER BY created_at, id
+--              ) AS keep_id
+--       FROM models
+--     ) WHERE drop_id != keep_id;
+--   UPDATE offerings SET model_id = (SELECT keep_id FROM model_dedupe
+--                                    WHERE drop_id = offerings.model_id)
+--    WHERE model_id IN (SELECT drop_id FROM model_dedupe);
+--   -- A benchmark row cannot move onto a (model, source, category) the
+--   -- keeper already has; drop the duplicate's copy first.
+--   DELETE FROM benchmarks
+--    WHERE model_id IN (SELECT drop_id FROM model_dedupe)
+--      AND (source, category) IN (
+--            SELECT source, category FROM benchmarks
+--             WHERE model_id IN (SELECT keep_id FROM model_dedupe));
+--   UPDATE benchmarks SET model_id = (SELECT keep_id FROM model_dedupe
+--                                     WHERE drop_id = benchmarks.model_id)
+--    WHERE model_id IN (SELECT drop_id FROM model_dedupe);
+--   DELETE FROM models WHERE id IN (SELECT drop_id FROM model_dedupe);
+--   DROP TABLE model_dedupe;
+--   COMMIT;
+--
+-- (`model_quality_overrides` and `prices` cascade through the offering or
+-- model rows they belong to; check the current schema before running this on
+-- a database newer than 0013.)
+
+ALTER TABLE providers ADD COLUMN last_discovery_at TEXT;
+ALTER TABLE providers ADD COLUMN last_discovery_created INTEGER;
+ALTER TABLE providers ADD COLUMN last_discovery_unchanged INTEGER;

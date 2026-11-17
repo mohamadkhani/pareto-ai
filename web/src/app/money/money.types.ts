@@ -50,9 +50,3 @@ export interface BudgetInput {
 export interface TokenCapInput {
   limit_tokens: number;
 }
-
-/** The data-plane refusal codes these limits cause, for help text. */
-export const LIMIT_REFUSAL_CODES = {
-  budget: 'budget_exceeded',
-  tokenCap: 'token_cap_exceeded',
-} as const;

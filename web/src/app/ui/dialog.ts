@@ -1,0 +1,97 @@
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  effect,
+  input,
+  model,
+  output,
+  viewChild,
+} from '@angular/core';
+
+let nextDialogId = 0;
+
+/**
+ * Modal built on native `<dialog>`. `open` is two-way bindable; `show()` and
+ * `close()` are the imperative API. ESC closes and returns focus to the
+ * previously focused element (native behavior); backdrop click is optional.
+ * `title` names the dialog via `aria-labelledby` when present.
+ */
+@Component({
+  selector: 'ui-dialog',
+  templateUrl: './dialog.html',
+  styleUrl: './dialog.css',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class UiDialog {
+  readonly open = model(false);
+  readonly title = input<string>('');
+  readonly closeOnBackdrop = input(true);
+  /** Accessible name when no visible title is rendered. */
+  readonly ariaLabel = input<string>('');
+
+  readonly closed = output<void>();
+
+  readonly titleId = `ui-dialog-title-${++nextDialogId}`;
+  private readonly dialogEl = viewChild<ElementRef<HTMLDialogElement>>('dialog');
+
+  constructor() {
+    effect(() => {
+      const el = this.dialogEl()?.nativeElement;
+      if (el === undefined) {
+        return;
+      }
+      if (this.open()) {
+        if (!el.open) {
+          this.showNative(el);
+        }
+      } else if (el.open) {
+        this.closeNative(el);
+      }
+    });
+  }
+
+  show(): void {
+    this.open.set(true);
+  }
+
+  close(): void {
+    this.open.set(false);
+  }
+
+  protected onCancel(event: Event): void {
+    event.preventDefault();
+    this.close();
+  }
+
+  protected onClose(): void {
+    if (this.open()) {
+      this.open.set(false);
+    }
+    this.closed.emit();
+  }
+
+  protected onDialogClick(event: MouseEvent): void {
+    if (this.closeOnBackdrop() && event.target === event.currentTarget) {
+      this.close();
+    }
+  }
+
+  /** jsdom lacks `showModal`; the `open` attribute keeps non-modal fallbacks working. */
+  private showNative(el: HTMLDialogElement): void {
+    if (typeof el.showModal === 'function') {
+      el.showModal();
+    } else {
+      el.setAttribute('open', '');
+    }
+  }
+
+  private closeNative(el: HTMLDialogElement): void {
+    if (typeof el.close === 'function') {
+      el.close();
+    } else {
+      el.removeAttribute('open');
+      this.closed.emit();
+    }
+  }
+}

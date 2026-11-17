@@ -35,13 +35,39 @@ impl TestApp {
     /// Like [`TestApp::new`], with the config adjusted first (tests use this
     /// to shorten timeout budgets).
     pub async fn with_config(mutate: impl FnOnce(&mut Config)) -> Self {
+        Self::build(mutate, false).await
+    }
+
+    /// Like [`TestApp::with_config`], with every SQL statement logged at
+    /// `TRACE` (the performance harness counts them) and on an explicit data
+    /// directory — so the harness can pick a real filesystem or `/tmp` (which
+    /// may be tmpfs).
+    pub async fn with_config_logging_at(
+        dir: std::path::PathBuf,
+        mutate: impl FnOnce(&mut Config),
+    ) -> Self {
+        Self::build_at(dir, mutate, true).await
+    }
+
+    async fn build(mutate: impl FnOnce(&mut Config), log_statements: bool) -> Self {
+        let dir = std::env::temp_dir().join(format!("gateway-routes-{}", uuid::Uuid::new_v4()));
+        Self::build_at(dir, mutate, log_statements).await
+    }
+
+    async fn build_at(
+        dir: std::path::PathBuf,
+        mutate: impl FnOnce(&mut Config),
+        log_statements: bool,
+    ) -> Self {
         // Test hashing is cheap hashing; production always uses the full
         // PBKDF2 count (see `password::current_iterations`).
         password::set_test_iterations(TEST_HASH_ITERATIONS);
-        let dir = std::env::temp_dir().join(format!("gateway-routes-{}", uuid::Uuid::new_v4()));
-        let pool = db::open(&dir.join("gateway.db"))
-            .await
-            .expect("open test database");
+        let database = dir.join("gateway.db");
+        let pool = match log_statements {
+            true => db::open_logged(&database).await,
+            false => db::open(&database).await,
+        }
+        .expect("open test database");
         let mut config = Config {
             listen: "127.0.0.1:0".parse().expect("static address"),
             data_dir: dir.clone(),
@@ -58,6 +84,7 @@ impl TestApp {
             telemetry_refresh: crate::config::DEFAULT_TELEMETRY_REFRESH,
             breaker_threshold: crate::config::DEFAULT_BREAKER_THRESHOLD,
             breaker_cooldown: crate::config::DEFAULT_BREAKER_COOLDOWN,
+            token_mix_profile: None,
             version: "test".to_string(),
         };
         mutate(&mut config);
@@ -76,8 +103,12 @@ impl TestApp {
             started: Instant::now(),
             login_limiter: Arc::new(LoginRateLimiter::new()),
             key_limiter: Arc::new(crate::api_keys::KeyRateLimiter::new()),
+            key_usage_stamps: Arc::new(crate::api_keys::KeyUsageStamps::new()),
+            session_activity: Arc::new(crate::auth::SessionActivity::new()),
+            mix_profiles: Arc::new(crate::mix::MixProfileCache::new()),
             telemetry: Arc::new(crate::telemetry::TelemetryStore::new()),
             breaker: Arc::new(crate::breaker::BreakerRegistry::new(breaker_config)),
+            benchmark_sync: Arc::new(tokio::sync::Mutex::new(())),
         };
         Self { state, dir }
     }
@@ -94,6 +125,12 @@ impl TestApp {
         #[cfg(feature = "embedded-ui")]
         let app = app.fallback(crate::static_files::serve);
         app.with_state(self.state.clone())
+    }
+
+    /// The throwaway data directory (the performance harness measures the
+    /// WAL file next to the database).
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.dir
     }
 
     /// Creates a user with [`TEST_PASSWORD`] and returns the new user id.
@@ -288,4 +325,21 @@ pub async fn spawn_static_server(
         }
     });
     (addr, seen)
+}
+
+/// Accepts connections but never answers, so callers exercise their timeout
+/// path without waiting on a real provider.
+pub async fn spawn_hanging_server() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind hanging listener");
+    let addr = listener.local_addr().expect("hanging listener address");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            // Hold the connection open for the life of the test process.
+            held.push(stream);
+        }
+    });
+    addr
 }

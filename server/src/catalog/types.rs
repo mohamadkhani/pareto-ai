@@ -44,6 +44,12 @@ pub struct ProviderRow {
     pub enabled: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// When the last **applied** discovery finished; `None` before the first.
+    pub last_discovery_at: Option<String>,
+    /// `models` rows the last applied discovery inserted.
+    pub last_discovery_created: Option<i64>,
+    /// Offerings the last applied discovery found already matching.
+    pub last_discovery_unchanged: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -147,7 +153,7 @@ impl std::fmt::Debug for OfferingRow {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 pub struct PriceRow {
     pub offering_id: String,
     pub input_per_m: Option<f64>,
@@ -156,6 +162,9 @@ pub struct PriceRow {
     pub cache_write_per_m: Option<f64>,
     pub reasoning_per_m: Option<f64>,
     pub request_fee: Option<f64>,
+    /// The source published a negative ("variable price") component: it is
+    /// stored as NULL and this flag is 1. Never a price, never ranked.
+    pub variable_price: i64,
     pub currency: String,
     pub source: String,
     pub source_url: Option<String>,
@@ -179,6 +188,11 @@ pub struct ProviderView {
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// The last applied model discovery, or `null` before the first one
+    /// (a dry run never writes these).
+    pub last_discovery_at: Option<String>,
+    pub last_discovery_created: Option<i64>,
+    pub last_discovery_unchanged: Option<i64>,
 }
 
 impl From<&ProviderRow> for ProviderView {
@@ -191,6 +205,9 @@ impl From<&ProviderRow> for ProviderView {
             enabled: row.enabled != 0,
             created_at: row.created_at.clone(),
             updated_at: row.updated_at.clone(),
+            last_discovery_at: row.last_discovery_at.clone(),
+            last_discovery_created: row.last_discovery_created,
+            last_discovery_unchanged: row.last_discovery_unchanged,
         }
     }
 }
@@ -325,6 +342,10 @@ pub struct PriceView {
     pub reasoning_per_m: Option<f64>,
     /// Flat USD fee per request, when the source prices per request.
     pub request_fee: Option<f64>,
+    /// True when the source could not state a fixed price for a component
+    /// (the `"-1"` sentinel): the affected components are NULL and the
+    /// offering is treated like an unpriced one for routing and sorting.
+    pub variable_price: bool,
     pub currency: String,
     /// `manual`, `openrouter`, `models_dev`, or `custom_api`.
     pub source: String,
@@ -345,6 +366,7 @@ impl From<&PriceRow> for PriceView {
             cache_write_per_m: row.cache_write_per_m,
             reasoning_per_m: row.reasoning_per_m,
             request_fee: row.request_fee,
+            variable_price: row.variable_price != 0,
             currency: row.currency.clone(),
             source: row.source.clone(),
             source_url: row.source_url.clone(),

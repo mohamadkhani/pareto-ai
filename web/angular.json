@@ -2,7 +2,7 @@
   "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
   "version": 1,
   "cli": {
-    "packageManager": "npm"
+    "packageManager": "pnpm"
   },
   "newProjectRoot": "projects",
   "projects": {
@@ -33,7 +33,12 @@
               "budgets": [
                 {
                   "type": "initial",
-                  "maximumWarning": "500kB",
+                  // 700 kB: the initial total (~611 kB) includes the design
+                  // system's fonts (`@fontsource-variable`), the global token
+                  // and primitive CSS, and the shared primitive chunk. The
+                  // `/styleguide` route itself is lazy-loaded and no longer
+                  // part of this number.
+                  "maximumWarning": "700kB",
                   "maximumError": "1MB"
                 },
                 {

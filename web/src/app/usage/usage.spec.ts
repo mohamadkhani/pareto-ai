@@ -144,7 +144,7 @@ describe('Usage', () => {
     expect(text).toContain('$0.25');
     expect(text).toContain('100');
     // Row counters surface unpriced requests as badges too.
-    expect(root.querySelectorAll('.badge.error').length).toBeGreaterThanOrEqual(1);
+    expect(root.querySelectorAll('ui-badge.tone-danger').length).toBeGreaterThanOrEqual(1);
   });
 
   it('renders refused requests in the totals row', async () => {
@@ -171,7 +171,7 @@ describe('Usage', () => {
     expect(row).toBeDefined();
     const cells = row?.querySelectorAll('td');
     expect(cells?.[1]?.textContent?.trim()).toBe('7');
-    expect(row?.querySelector('.badge.warn')?.textContent?.trim()).toBe('4');
+    expect(row?.querySelector('ui-badge.tone-warning')?.textContent?.trim()).toBe('4');
   });
 
   it('sends the date range when applying', async () => {
@@ -208,7 +208,7 @@ describe('Usage', () => {
     expect(aggregateUrl.pathname).toBe('/api/usage');
     expect(aggregateUrl.searchParams.get('user')).toBeNull();
 
-    selectInto(root, '#usage-group', 'offering');
+    buttonByText(root, 'Offering').click();
     await fixture.whenStable();
     fixture.detectChanges();
 

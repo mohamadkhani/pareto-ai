@@ -1,6 +1,11 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
+import {
+  FetchMock,
+  errorResponse,
+  jsonResponse,
+  noContentResponse,
+} from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { Model } from '../catalog/catalog.types';
 import type { UserView } from '../users/users.types';
@@ -79,15 +84,19 @@ function modelFixture(overrides: Partial<Model> = {}): Model {
   };
 }
 
-/** Queues the three GETs `reload()` issues: budgets, token caps, models. */
-function queueReload(
+/** The two GETs every `reload()` issues: the caller's budgets and token caps. */
+function queueLimits(
   fetchMock: FetchMock,
   budgets: BudgetView[] = [],
   caps: TokenCapView[] = [],
 ): void {
   fetchMock.respond(jsonResponse(200, budgets));
   fetchMock.respond(jsonResponse(200, caps));
-  fetchMock.respond(jsonResponse(200, [modelFixture()]));
+}
+
+/** The admin-only model catalog that follows the limits reads. */
+function queueModels(fetchMock: FetchMock, models: Model[] = [modelFixture()]): void {
+  fetchMock.respond(jsonResponse(200, models));
 }
 
 function typeInto(root: HTMLElement, selector: string, value: string): void {
@@ -144,7 +153,8 @@ describe('Limits', () => {
   /** The admin constructor also loads the account list first. */
   function queueAdminLoad(budgets: BudgetView[] = [], caps: TokenCapView[] = []): void {
     fetchMock.respond(jsonResponse(200, [userFixture()]));
-    queueReload(fetchMock, budgets, caps);
+    queueLimits(fetchMock, budgets, caps);
+    queueModels(fetchMock);
   }
 
   it('renders budgets with usage, limits, and reset times', async () => {
@@ -183,7 +193,8 @@ describe('Limits', () => {
   it('saves an edited budget with a CSRF-protected PUT', async () => {
     queueAdminLoad([budgetFixture()]);
     fetchMock.respond(jsonResponse(200, budgetFixture({ limit_usd: 25 })));
-    queueReload(fetchMock, [budgetFixture({ limit_usd: 25 })]);
+    queueLimits(fetchMock, [budgetFixture({ limit_usd: 25 })]);
+    queueModels(fetchMock);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
@@ -203,7 +214,8 @@ describe('Limits', () => {
   it('removes a budget only after confirmation', async () => {
     queueAdminLoad([budgetFixture()]);
     fetchMock.respond(noContentResponse());
-    queueReload(fetchMock);
+    queueLimits(fetchMock);
+    queueModels(fetchMock);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
@@ -222,7 +234,8 @@ describe('Limits', () => {
   it('creates a token cap for a model and period', async () => {
     queueAdminLoad();
     fetchMock.respond(jsonResponse(200, capFixture({ limit_tokens: 5000 })));
-    queueReload(fetchMock, [], [capFixture({ limit_tokens: 5000 })]);
+    queueLimits(fetchMock, [], [capFixture({ limit_tokens: 5000 })]);
+    queueModels(fetchMock);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
@@ -246,15 +259,50 @@ describe('Limits', () => {
   });
 
   it('shows a read-only view for non-admins without edit controls', async () => {
-    fetchMock.respond(jsonResponse(200, [budgetFixture()]));
-    fetchMock.respond(jsonResponse(200, []));
-    fetchMock.respond(jsonResponse(200, [modelFixture()]));
+    queueLimits(fetchMock, [budgetFixture()], [capFixture()]);
     const fixture = await create('user');
     const root = fixture.nativeElement as HTMLElement;
 
     expect(root.textContent).toContain('Limits are managed by an administrator.');
     expect(root.querySelector('input[aria-label="USD limit for day"]')).toBeNull();
     expect(root.textContent).not.toContain('New cap');
-    expect(fetchMock.requests).toHaveLength(3);
+    // Budgets and caps only: no admin-only catalog request.
+    expect(fetchMock.requests).toHaveLength(2);
+    expect(fetchMock.requests.map((call) => call.url)).not.toContain('/api/models');
+  });
+
+  it('shows a non-admin own budgets and caps instead of a forbidden banner', async () => {
+    queueLimits(fetchMock, [budgetFixture()], [capFixture()]);
+    const fixture = await create('user');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('$2.50 of $10.00');
+    expect(root.textContent).toContain('2,500 of 100,000 tokens');
+    expect(root.textContent).not.toContain('You may only read budgets and token caps');
+  });
+
+  it('keeps the limits when the admin-only model list fails', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    queueLimits(fetchMock, [budgetFixture()]);
+    fetchMock.respond(errorResponse(403, 'forbidden', 'admin only'));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('$2.50 of $10.00');
+    expect(root.textContent).toContain('The model catalog is restricted to administrators.');
+    expect(root.textContent).not.toContain('You may only read budgets and token caps');
+  });
+
+  it('names the forbidden limits state accurately when the budgets read fails', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    fetchMock.respond(errorResponse(403, 'forbidden', 'not your account'));
+    fetchMock.respond(jsonResponse(200, []));
+    queueModels(fetchMock);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain(
+      'You may only read budgets and token caps for your own account.',
+    );
   });
 });

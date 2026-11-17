@@ -16,16 +16,18 @@
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::{self, ClientIp, RequireAdmin};
+use crate::benchmark_sync::{self, HttpFetcher, SourceId};
 use crate::benchmarks::{self, BenchmarkScoreRow, QualityOverrideRow};
 use crate::catalog::Actor;
-use crate::combos::{self, ComboInput, ComboView};
+use crate::chat;
+use crate::combos::{self, ComboInput, ComboView, PreviewResult};
 use crate::error::{self, ApiError, ErrorBody};
 use crate::routes::bad_body;
 
@@ -37,6 +39,98 @@ pub struct ImportOutcomeView {
     pub unchanged: usize,
     /// Entries whose model matched no catalog model.
     pub skipped_unknown_model: usize,
+}
+
+/// `POST /api/benchmarks/sync` body.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BenchmarkSyncInput {
+    /// Sources to sync; omitted or empty means all three.
+    pub sources: Option<Vec<String>>,
+    /// Report the counts without writing benchmarks or run rows.
+    pub dry_run: Option<bool>,
+}
+
+/// Per-source counts of one sync.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSyncCountsView {
+    pub published: usize,
+    pub matched: usize,
+    pub skipped_unknown: usize,
+    pub ambiguous: usize,
+    pub inserted: usize,
+    pub updated: usize,
+    pub unchanged: usize,
+}
+
+/// One source's result in a sync response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSyncResultView {
+    pub source: String,
+    /// `success` or `error`.
+    pub status: String,
+    pub dry_run: bool,
+    pub counts: BenchmarkSyncCountsView,
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: i64,
+    /// The attribution URL stored on this source's rows.
+    pub source_url: String,
+    pub error: Option<String>,
+}
+
+/// The sync response: one result per requested source.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSyncResponse {
+    pub dry_run: bool,
+    pub results: Vec<BenchmarkSyncResultView>,
+}
+
+/// One recorded benchmark sync run, as shown by the status endpoint.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSyncRunView {
+    pub id: String,
+    pub source: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub duration_ms: i64,
+    pub published: i64,
+    pub matched: i64,
+    pub skipped_unknown: i64,
+    pub ambiguous: i64,
+    pub inserted: i64,
+    pub updated: i64,
+    pub unchanged: i64,
+    pub source_url: Option<String>,
+    pub error: Option<String>,
+}
+
+/// One source's last-run status. The scalar fields mirror `last_run` at the
+/// top level so the Models toolbar can read one object per source; `last_run`
+/// keeps the full run row for a detail view.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSourceStatusView {
+    pub source: String,
+    pub license: String,
+    /// The attribution URL the UI shows next to the scores.
+    pub attribution_url: String,
+    /// Whether the last success is inside the 5 h TTL.
+    pub fresh: bool,
+    /// `success`, `error`, or `never` before the first run.
+    pub status: String,
+    pub counts: Option<BenchmarkSyncCountsView>,
+    pub error: Option<String>,
+    pub finished_at: Option<String>,
+    /// The last run's stored attribution URL (the source's for `never`).
+    pub source_url: Option<String>,
+    pub last_run: Option<BenchmarkSyncRunView>,
+}
+
+/// `GET /api/benchmarks/sync/status`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BenchmarkSyncStatusView {
+    pub ttl_hours: i64,
+    pub sources: Vec<BenchmarkSourceStatusView>,
 }
 
 /// The operator's quality override for a model.
@@ -183,6 +277,94 @@ pub async fn delete_combo(
     }
 }
 
+/// A draft combo plus the preview limit (default 25, max 100).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ComboPreviewInput {
+    #[serde(flatten)]
+    pub config: ComboInput,
+    pub limit: Option<usize>,
+}
+
+/// Optional query for a saved combo's preview.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ComboPreviewQuery {
+    /// An `X-Session-Id`-shaped key to show the current pin for.
+    pub session_key: Option<String>,
+    /// Candidate limit (default 25, max 100).
+    pub limit: Option<usize>,
+}
+
+/// Previews a draft combo without saving it: the ranked candidates and the
+/// exclusions, computed by the same engine the runtime uses. Admin only. This
+/// is a read-like computation, so it is mounted **outside** the CSRF guard
+/// (like login) and writes nothing — no audit row, no pin.
+#[utoipa::path(
+    post,
+    path = "/api/combos/preview",
+    tag = "routing",
+    request_body = ComboPreviewInput,
+    responses(
+        (status = 200, description = "ranked candidates and exclusions", body = PreviewResult),
+        (status = 400, description = "invalid combo", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn preview_combo(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    headers: HeaderMap,
+    body: Result<Json<ComboPreviewInput>, JsonRejection>,
+) -> Result<Json<PreviewResult>, ApiError> {
+    let rid = error::request_id(&headers);
+    let Json(input) = bad_body(body, "combo preview", &rid)?;
+    let limit = input.limit.unwrap_or(25).clamp(1, 100);
+    let combo = combos::validate_config(&state.pool, &input.config)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    let preview = chat::preview_combo(&state, &combo, None, limit)
+        .await
+        .map_err(|e| e.into_api_error(rid))?;
+    Ok(Json(preview))
+}
+
+/// Previews a saved combo (GET, so no CSRF token). For a sticky combo the
+/// response includes the current pin when `session_key` is supplied.
+#[utoipa::path(
+    get,
+    path = "/api/combos/{id}/preview",
+    tag = "routing",
+    params(
+        ("id" = String, Path, description = "combo id"),
+        ("session_key" = Option<String>, Query, description = "session key to show the current pin for"),
+        ("limit" = Option<usize>, Query, description = "candidate limit (default 25, max 100)")
+    ),
+    responses(
+        (status = 200, description = "ranked candidates, exclusions, and the current pin", body = PreviewResult),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody),
+        (status = 404, description = "no such combo", body = ErrorBody)
+    )
+)]
+pub async fn preview_saved_combo(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    Path(id): Path<String>,
+    Query(query): Query<ComboPreviewQuery>,
+    headers: HeaderMap,
+) -> Result<Json<PreviewResult>, ApiError> {
+    let rid = error::request_id(&headers);
+    let combo = combos::get(&state.pool, &id)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?
+        .ok_or_else(|| ApiError::not_found("combo").with_request_id(rid.clone()))?;
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let preview = chat::preview_combo(&state, &combo, query.session_key.as_deref(), limit)
+        .await
+        .map_err(|e| e.into_api_error(rid))?;
+    Ok(Json(preview))
+}
+
 /// Lists every imported benchmark score with its model's name, newest first
 /// (`fetched_at` descending; ties — rows of one imported document — break
 /// deterministically on `model_id`, then `category`; see
@@ -266,8 +448,189 @@ pub async fn import_benchmarks(
     }))
 }
 
-/// Lists every stored quality override with its model's name, newest first
-/// (`updated_at` descending; ties break on `model_id`; see
+fn benchmark_counts_view(counts: benchmark_sync::Counts) -> BenchmarkSyncCountsView {
+    BenchmarkSyncCountsView {
+        published: counts.published,
+        matched: counts.matched,
+        skipped_unknown: counts.skipped_unknown,
+        ambiguous: counts.ambiguous,
+        inserted: counts.inserted,
+        updated: counts.updated,
+        unchanged: counts.unchanged,
+    }
+}
+
+fn benchmark_result_view(outcome: &benchmark_sync::SourceOutcome) -> BenchmarkSyncResultView {
+    BenchmarkSyncResultView {
+        source: outcome.source.as_str().to_string(),
+        status: outcome.status.as_str().to_string(),
+        dry_run: outcome.dry_run,
+        counts: benchmark_counts_view(outcome.counts),
+        started_at: outcome.started_at.clone(),
+        finished_at: outcome.finished_at.clone(),
+        duration_ms: outcome.duration_ms,
+        source_url: outcome.source_url.clone(),
+        error: outcome.error.clone(),
+    }
+}
+
+fn every_source_failed(dry_run: bool, results: &[BenchmarkSyncResultView]) -> bool {
+    !dry_run && !results.is_empty() && results.iter().all(|result| result.status == "error")
+}
+
+fn benchmark_run_view(row: &benchmark_sync::RunRow) -> BenchmarkSyncRunView {
+    BenchmarkSyncRunView {
+        id: row.id.clone(),
+        source: row.source.clone(),
+        status: row.status.clone(),
+        started_at: row.started_at.clone(),
+        finished_at: row.finished_at.clone(),
+        duration_ms: row.duration_ms,
+        published: row.published,
+        matched: row.matched,
+        skipped_unknown: row.skipped_unknown,
+        ambiguous: row.ambiguous,
+        inserted: row.inserted,
+        updated: row.updated,
+        unchanged: row.unchanged,
+        source_url: row.source_url.clone(),
+        error: row.error.clone(),
+    }
+}
+
+/// Downloads benchmark scores from the requested sources (all three by
+/// default). Admin only, audited per source as `sync.benchmark_sources`.
+///
+/// One source failing never stops the others: its run row has
+/// `status = "error"` and the response still lists every result. The request
+/// itself only fails with `502` when *every* requested source failed. A run
+/// overlapping the background job (or another trigger) is rejected with
+/// `409`. `dry_run` writes nothing — no benchmarks, run rows, or audits.
+#[utoipa::path(
+    post,
+    path = "/api/benchmarks/sync",
+    tag = "routing",
+    request_body = BenchmarkSyncInput,
+    responses(
+        (status = 200, description = "per-source sync results", body = BenchmarkSyncResponse),
+        (status = 400, description = "unknown source name", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
+        (status = 409, description = "another sync is running", body = ErrorBody),
+        (status = 502, description = "every requested source failed", body = ErrorBody)
+    )
+)]
+pub async fn sync_benchmarks(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    ip: ClientIp,
+    headers: HeaderMap,
+    body: Result<Json<BenchmarkSyncInput>, JsonRejection>,
+) -> Result<Json<BenchmarkSyncResponse>, ApiError> {
+    let rid = error::request_id(&headers);
+    let Json(input) = bad_body(body, "benchmark sync", &rid)?;
+
+    let mut sources = Vec::new();
+    for raw in input.sources.unwrap_or_default() {
+        let source = SourceId::parse(&raw).ok_or_else(|| {
+            ApiError::bad_request(format!("unknown benchmark source {raw:?}"))
+                .with_request_id(rid.clone())
+        })?;
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    if sources.is_empty() {
+        sources.extend(SourceId::ALL);
+    }
+    let dry_run = input.dry_run.unwrap_or(false);
+
+    let _guard = state.benchmark_sync.try_lock().map_err(|_| {
+        ApiError::conflict("another benchmark sync is already running").with_request_id(rid.clone())
+    })?;
+
+    let fetcher = HttpFetcher::new().map_err(|e| {
+        ApiError::internal("building the benchmark sync client", e).with_request_id(rid.clone())
+    })?;
+    let actor = Actor {
+        user_id: &admin.user_id,
+        ip: &ip.0,
+    };
+    let outcomes =
+        benchmark_sync::run_sources(&state.pool, &sources, &fetcher, dry_run, Some(&actor)).await;
+    let results: Vec<BenchmarkSyncResultView> =
+        outcomes.iter().map(benchmark_result_view).collect();
+
+    if every_source_failed(dry_run, &results) {
+        return Err(
+            ApiError::bad_gateway("every requested benchmark source failed").with_request_id(rid),
+        );
+    }
+    Ok(Json(BenchmarkSyncResponse { dry_run, results }))
+}
+
+/// The last run per benchmark source, with each source's licence and the 5 h
+/// freshness flag. Admin only, read-only (not audited).
+#[utoipa::path(
+    get,
+    path = "/api/benchmarks/sync/status",
+    tag = "routing",
+    responses(
+        (status = 200, description = "last run per source and freshness", body = BenchmarkSyncStatusView),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn benchmark_sync_status(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    headers: HeaderMap,
+) -> Result<Json<BenchmarkSyncStatusView>, ApiError> {
+    let rid = error::request_id(&headers);
+    let now = chrono::Utc::now();
+    let mut sources = Vec::with_capacity(SourceId::ALL.len());
+    for source in SourceId::ALL {
+        let last = benchmark_sync::last_run(&state.pool, source)
+            .await
+            .map_err(|e| e.into_api_error(rid.clone()))?;
+        let last_success = benchmark_sync::last_success_at(&state.pool, source)
+            .await
+            .map_err(|e| e.into_api_error(rid.clone()))?;
+        let counts = last.as_ref().map(|row| BenchmarkSyncCountsView {
+            published: row.published as usize,
+            matched: row.matched as usize,
+            skipped_unknown: row.skipped_unknown as usize,
+            ambiguous: row.ambiguous as usize,
+            inserted: row.inserted as usize,
+            updated: row.updated as usize,
+            unchanged: row.unchanged as usize,
+        });
+        sources.push(BenchmarkSourceStatusView {
+            source: source.as_str().to_string(),
+            license: source.license().to_string(),
+            attribution_url: source.source_url().to_string(),
+            fresh: benchmark_sync::is_fresh(last_success.as_deref(), &now),
+            status: last
+                .as_ref()
+                .map_or_else(|| "never".to_string(), |row| row.status.clone()),
+            counts,
+            error: last.as_ref().and_then(|row| row.error.clone()),
+            finished_at: last.as_ref().map(|row| row.finished_at.clone()),
+            source_url: Some(
+                last.as_ref()
+                    .and_then(|row| row.source_url.clone())
+                    .unwrap_or_else(|| source.source_url().to_string()),
+            ),
+            last_run: last.as_ref().map(benchmark_run_view),
+        });
+    }
+    Ok(Json(BenchmarkSyncStatusView {
+        ttl_hours: (benchmark_sync::SYNC_TTL.as_secs() / 3600) as i64,
+        sources,
+    }))
+}
+
+/// Lists every stored quality override with its model's name, newest first/// (`updated_at` descending; ties break on `model_id`; see
 /// [`benchmarks::list_overrides`]). Admin only. Reading the list is itself
 /// audited (`quality.override_read`, like `GET /api/audit`'s `audit.read`),
 /// and an audit failure fails the request rather than returning unaudited
@@ -670,7 +1033,7 @@ mod tests {
         for row in rows {
             assert_eq!(
                 row.as_object().expect("object").len(),
-                10,
+                11,
                 "exact row shape: {row}"
             );
         }
@@ -681,6 +1044,7 @@ mod tests {
         assert_eq!(gemini["id"].as_str().expect("id").len(), 36);
         assert_eq!(gemini["model_id"], models["gemini-2.5-pro"].as_str());
         assert_eq!(gemini["source"], "lmarena");
+        assert_eq!(gemini["scale"], "elo");
         assert_eq!(gemini["score"], 1432.5);
         assert_eq!(gemini["ci"], 45.0);
         assert_eq!(gemini["rank"], 1);
@@ -741,5 +1105,194 @@ mod tests {
             assert_eq!(response.status, StatusCode::OK, "{uri}");
             assert_eq!(response.body, json!([]), "{uri}");
         }
+    }
+
+    fn result(source: &str, status: &str) -> BenchmarkSyncResultView {
+        BenchmarkSyncResultView {
+            source: source.to_string(),
+            status: status.to_string(),
+            dry_run: false,
+            counts: BenchmarkSyncCountsView {
+                published: 1,
+                matched: 1,
+                skipped_unknown: 0,
+                ambiguous: 0,
+                inserted: 1,
+                updated: 0,
+                unchanged: 0,
+            },
+            started_at: "2026-11-16T00:00:00.000Z".to_string(),
+            finished_at: "2026-11-16T00:00:01.000Z".to_string(),
+            duration_ms: 1000,
+            source_url: "https://example.test".to_string(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn only_an_all_failed_run_maps_to_502() {
+        assert!(every_source_failed(
+            false,
+            &[result("arena", "error"), result("benchlm", "error")]
+        ));
+        assert!(
+            !every_source_failed(
+                false,
+                &[result("arena", "error"), result("benchlm", "success")]
+            ),
+            "one success keeps the response a 200"
+        );
+        assert!(
+            !every_source_failed(true, &[result("arena", "error")]),
+            "a dry run reports the failure in the body, not as 502"
+        );
+        assert!(!every_source_failed(false, &[]), "no request, no 502");
+    }
+
+    #[tokio::test]
+    async fn benchmark_sync_requires_admin_csrf_and_known_sources() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        app.create_user("user@example.test", Role::User, true).await;
+        let router = app.router();
+
+        let anonymous = send(
+            router.clone(),
+            api_request(Method::POST, "/api/benchmarks/sync", None, None, None),
+        )
+        .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+
+        let (user_cookie, user_csrf) = login(&router, "user@example.test").await;
+        let non_admin = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/benchmarks/sync",
+                Some(json!({"sources": ["arena"]})),
+                Some(&user_cookie),
+                Some(&user_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(non_admin.status, StatusCode::FORBIDDEN);
+
+        let (admin_cookie, admin_csrf) = login(&router, "admin@example.test").await;
+        let no_csrf = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/benchmarks/sync",
+                Some(json!({"sources": ["arena"]})),
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+
+        // Unknown names are rejected before any fetch happens.
+        let unknown = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/benchmarks/sync",
+                Some(json!({"sources": ["nope"]})),
+                Some(&admin_cookie),
+                Some(&admin_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "{}", unknown.body);
+        assert!(
+            unknown.body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("nope")),
+            "{}",
+            unknown.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_running_sync_rejects_a_second_trigger() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let (cookie, csrf) = login(&app.router(), "admin@example.test").await;
+
+        let _guard = app
+            .state
+            .benchmark_sync
+            .try_lock()
+            .expect("the gate starts free");
+        let conflict = send(
+            app.router(),
+            api_request(
+                Method::POST,
+                "/api/benchmarks/sync",
+                Some(json!({"sources": ["arena"], "dry_run": true})),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(conflict.status, StatusCode::CONFLICT, "{}", conflict.body);
+        assert_eq!(conflict.body["error"]["code"], "conflict");
+    }
+
+    #[tokio::test]
+    async fn benchmark_sync_status_lists_every_source_and_the_ttl() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        app.create_user("user@example.test", Role::User, true).await;
+        let router = app.router();
+
+        let (user_cookie, _) = login(&router, "user@example.test").await;
+        let non_admin = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/benchmarks/sync/status",
+                None,
+                Some(&user_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(non_admin.status, StatusCode::FORBIDDEN);
+
+        let (cookie, _) = login(&router, "admin@example.test").await;
+        let response = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/benchmarks/sync/status",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        assert_eq!(response.body["ttl_hours"], 5);
+        let sources = response.body["sources"].as_array().expect("sources");
+        assert_eq!(sources.len(), 3);
+        let names: Vec<&str> = sources
+            .iter()
+            .map(|source| source["source"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, ["arena", "benchmarklist", "benchlm"]);
+        let arena = &sources[0];
+        assert_eq!(arena["license"], "CC BY 4.0");
+        assert_eq!(
+            arena["attribution_url"],
+            benchmark_sync::ARENA_ATTRIBUTION_URL
+        );
+        assert_eq!(arena["fresh"], false, "nothing downloaded yet");
+        assert_eq!(arena["status"], "never");
+        assert!(arena["counts"].is_null());
+        assert!(arena["last_run"].is_null());
     }
 }

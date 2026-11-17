@@ -1105,6 +1105,7 @@ mod tests {
             cache_write_per_m: None,
             reasoning_per_m: None,
             request_fee: None,
+            variable_price: 0,
             currency: "USD".to_string(),
             source: "manual".to_string(),
             source_url: None,

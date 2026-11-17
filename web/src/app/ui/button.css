@@ -1,0 +1,86 @@
+:host {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+:host(.size-sm) .button {
+  min-height: var(--control-height-sm);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-small);
+}
+
+:host(.size-md) .button {
+  min-height: var(--control-height-md);
+  padding: var(--space-2) var(--space-4);
+}
+
+.button:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+:host(.variant-primary) .button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+:host(.variant-primary) .button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+:host(.variant-secondary) .button {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+:host(.variant-secondary) .button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+:host(.variant-ghost) .button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+
+:host(.variant-ghost) .button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+:host(.variant-danger) .button {
+  background: var(--surface);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+:host(.variant-danger) .button:hover:not(:disabled) {
+  background: var(--danger-soft);
+}

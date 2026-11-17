@@ -1,19 +1,78 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
 import { CatalogService } from './catalog.service';
 import { Credentials } from './credentials';
-import { DeleteConfirm } from './delete-confirm';
 import { describeError, isForbidden } from './errors';
-import type { Provider, ProviderKind, ProviderPatch } from './catalog.types';
-import { httpUrl } from './validators';
+import { formatAge } from './format';
+import type {
+  Credential,
+  DiscoverySummary,
+  Provider,
+  ProviderInput,
+  ProviderKind,
+  ProviderPatch,
+} from './catalog.types';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiDialog } from '../ui/dialog';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
+import { UiSelect } from '../ui/select';
+import { UiSwitch } from '../ui/switch';
+import { UiTable } from '../ui/table';
+
+/** The provider form's editable fields. */
+interface ProviderDraft {
+  name: string;
+  base_url: string;
+  kind: ProviderKind;
+  enabled: boolean;
+}
+
+/** One run of the Load models dialog. */
+interface DiscoveryState {
+  provider: Provider;
+  credentials: Credential[];
+  credentialId: string;
+  /** Result of the last dry run; Apply stays disabled until it exists. */
+  preview: DiscoverySummary | null;
+  /** Result of the applied run, when Apply has succeeded. */
+  applied: DiscoverySummary | null;
+  error: string | null;
+  running: 'preview' | 'apply' | null;
+}
 
 type FormState = { mode: 'create' } | { mode: 'edit'; provider: Provider };
 
-/** Providers list plus the credentials nested under the selected provider. */
+function emptyDraft(): ProviderDraft {
+  return { name: '', base_url: '', kind: 'openai_compatible', enabled: true };
+}
+
+/**
+ * Providers: register upstreams, manage their credentials inline, and load
+ * each provider's models through a preview-then-apply dialog (D31). The list
+ * shows counts and the last applied discovery so the catalogue state is
+ * visible without opening a provider.
+ */
 @Component({
   selector: 'app-providers',
-  imports: [ReactiveFormsModule, Credentials, DeleteConfirm],
+  imports: [
+    RouterLink,
+    Credentials,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiDialog,
+    UiEmpty,
+    UiField,
+    UiInput,
+    UiSelect,
+    UiSwitch,
+    UiTable,
+  ],
   templateUrl: './providers.html',
   styleUrl: './providers.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -27,24 +86,35 @@ export class Providers {
   protected readonly loadError = signal<string | null>(null);
   protected readonly forbidden = signal(false);
   protected readonly actionError = signal<string | null>(null);
+  protected readonly notice = signal<string | null>(null);
+
+  protected readonly selectedId = signal<string | null>(null);
+  protected readonly togglingId = signal<string | null>(null);
+
   protected readonly formState = signal<FormState | null>(null);
+  protected readonly draft = signal<ProviderDraft>(emptyDraft());
   protected readonly attempted = signal(false);
   protected readonly saving = signal(false);
-  protected readonly togglingId = signal<string | null>(null);
-  protected readonly deletingId = signal<string | null>(null);
-  protected readonly selected = signal<Provider | null>(null);
+  protected readonly formError = signal<string | null>(null);
 
-  protected readonly form = new FormGroup({
-    name: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
-    base_url: new FormControl('', {
-      nonNullable: true,
-      validators: [Validators.required, httpUrl],
-    }),
-    kind: new FormControl<ProviderKind>('openai_compatible', {
-      nonNullable: true,
-      validators: [Validators.required],
-    }),
+  protected readonly deleting = signal<Provider | null>(null);
+  protected readonly deletePending = signal(false);
+
+  protected readonly discovery = signal<DiscoveryState | null>(null);
+
+  private readonly credentialsByProvider = signal<ReadonlyMap<string, Credential[]>>(new Map());
+  private readonly offeringCounts = signal<ReadonlyMap<string, number>>(new Map());
+
+  protected readonly errors = computed<Partial<Record<'name' | 'base_url', string>>>(() =>
+    validateDraft(this.draft(), this.attempted()),
+  );
+
+  protected readonly formTitle = computed(() => {
+    const state = this.formState();
+    return state?.mode === 'edit' ? `Edit ${state.provider.name}` : 'New provider';
   });
+
+  protected readonly formatAge = formatAge;
 
   constructor() {
     // Non-admins never call the API: it would answer 403 and the read is audited.
@@ -61,11 +131,33 @@ export class Providers {
     try {
       const providers = await this.catalog.listProviders();
       this.providers.set(providers);
-      // Keep the credentials panel pointed at the fresh copy of its provider.
-      const selectedId = this.selected()?.id ?? null;
-      this.selected.set(
-        selectedId === null ? null : (providers.find((p) => p.id === selectedId) ?? null),
-      );
+      // Counts come from the existing lists: one credentials read per provider
+      // and the offerings list. A count failure must not blank the page.
+      const [credentialLists, offerings] = await Promise.all([
+        Promise.all(
+          providers.map((provider) =>
+            this.catalog.listCredentials(provider.id).catch((): Credential[] => []),
+          ),
+        ),
+        this.catalog.listOfferings().catch(() => []),
+      ]);
+      const credentials = new Map<string, Credential[]>();
+      providers.forEach((provider, index) => {
+        credentials.set(provider.id, credentialLists[index] ?? []);
+      });
+      this.credentialsByProvider.set(credentials);
+
+      const counts = new Map<string, number>();
+      for (const offering of offerings) {
+        counts.set(offering.provider_id, (counts.get(offering.provider_id) ?? 0) + 1);
+      }
+      this.offeringCounts.set(counts);
+
+      // Keep the expanded panel pointed at the fresh copy of its provider.
+      const selectedId = this.selectedId();
+      if (selectedId !== null && !providers.some((provider) => provider.id === selectedId)) {
+        this.selectedId.set(null);
+      }
     } catch (err) {
       this.handleError(err);
     } finally {
@@ -73,17 +165,47 @@ export class Providers {
     }
   }
 
+  protected credentialCount(providerId: string): number {
+    return this.credentialsByProvider().get(providerId)?.length ?? 0;
+  }
+
+  protected offeringCount(providerId: string): number {
+    return this.offeringCounts().get(providerId) ?? 0;
+  }
+
+  /** "Last load" for the list: persisted on the provider, so it survives a reload. */
+  protected discoveryLabel(provider: Provider): string {
+    const at = provider.last_discovery_at;
+    if (at === null) {
+      return 'never';
+    }
+    const created = provider.last_discovery_created ?? 0;
+    const unchanged = provider.last_discovery_unchanged ?? 0;
+    return `+${created} models · ${unchanged} unchanged · ${formatAge(at)}`;
+  }
+
+  protected toggleSelected(provider: Provider): void {
+    this.selectedId.set(this.selectedId() === provider.id ? null : provider.id);
+  }
+
+  // --- provider form -------------------------------------------------------
+
   protected openCreate(): void {
-    this.form.reset({ name: '', base_url: '', kind: 'openai_compatible' });
+    this.draft.set(emptyDraft());
     this.attempted.set(false);
-    this.actionError.set(null);
+    this.formError.set(null);
     this.formState.set({ mode: 'create' });
   }
 
   protected openEdit(provider: Provider): void {
-    this.form.reset({ name: provider.name, base_url: provider.base_url, kind: provider.kind });
+    this.draft.set({
+      name: provider.name,
+      base_url: provider.base_url,
+      kind: provider.kind,
+      enabled: provider.enabled,
+    });
     this.attempted.set(false);
-    this.actionError.set(null);
+    this.formError.set(null);
     this.formState.set({ mode: 'edit', provider });
   }
 
@@ -91,36 +213,53 @@ export class Providers {
     this.formState.set(null);
   }
 
-  protected select(provider: Provider): void {
-    this.selected.set(this.selected()?.id === provider.id ? null : provider);
+  protected setName(value: string): void {
+    this.draft.update((draft) => ({ ...draft, name: value }));
   }
 
-  protected clearSelection(): void {
-    this.selected.set(null);
+  protected setBaseUrl(value: string): void {
+    this.draft.update((draft) => ({ ...draft, base_url: value }));
+  }
+
+  protected setKind(value: string): void {
+    if (value === 'openai_compatible') {
+      this.draft.update((draft) => ({ ...draft, kind: value }));
+    }
+  }
+
+  protected setEnabled(value: boolean): void {
+    this.draft.update((draft) => ({ ...draft, enabled: value }));
   }
 
   protected async save(): Promise<void> {
     this.attempted.set(true);
-    this.actionError.set(null);
+    this.formError.set(null);
     const state = this.formState();
-    if (state === null || this.form.invalid) {
+    if (state === null || Object.keys(validateDraft(this.draft(), true)).length > 0) {
       return;
     }
+    const draft = this.draft();
     this.saving.set(true);
     try {
-      const { name, base_url, kind } = this.form.getRawValue();
       if (state.mode === 'create') {
-        await this.catalog.createProvider({ name: name.trim(), base_url: base_url.trim(), kind });
+        const input: ProviderInput = {
+          name: draft.name.trim(),
+          base_url: draft.base_url.trim(),
+          kind: draft.kind,
+        };
+        await this.catalog.createProvider(input);
+        this.notice.set('Provider created.');
       } else {
-        const patch = buildPatch(state.provider, name.trim(), base_url.trim());
+        const patch = buildPatch(state.provider, draft);
         if (Object.keys(patch).length > 0) {
           await this.catalog.updateProvider(state.provider.id, patch);
+          this.notice.set('Provider saved.');
         }
       }
-      this.formState.set(null);
+      this.closeForm();
       await this.reload();
     } catch (err) {
-      this.actionError.set(describeError(err, 'Saving the provider failed.'));
+      this.formError.set(describeError(err, 'Saving the provider failed.'));
     } finally {
       this.saving.set(false);
     }
@@ -139,33 +278,110 @@ export class Providers {
     }
   }
 
-  protected async deleteProvider(provider: Provider): Promise<void> {
-    this.deletingId.set(provider.id);
+  protected askDelete(provider: Provider): void {
+    this.deleting.set(provider);
+  }
+
+  protected closeDelete(): void {
+    this.deleting.set(null);
+  }
+
+  protected async confirmDelete(): Promise<void> {
+    const provider = this.deleting();
+    if (provider === null) {
+      return;
+    }
+    this.deletePending.set(true);
     this.actionError.set(null);
     try {
       await this.catalog.deleteProvider(provider.id);
+      if (this.selectedId() === provider.id) {
+        this.selectedId.set(null);
+      }
+      this.deleting.set(null);
+      this.notice.set('Provider deleted.');
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Deleting the provider failed.'));
     } finally {
-      this.deletingId.set(null);
+      this.deletePending.set(false);
     }
   }
 
-  protected showError(field: 'name' | 'base_url' | 'kind'): boolean {
-    const control = this.form.controls[field];
-    return control.invalid && (control.touched || this.attempted());
+  // --- Load models (discovery) --------------------------------------------
+
+  protected openDiscovery(provider: Provider): void {
+    const credentials = this.credentialsByProvider().get(provider.id) ?? [];
+    this.discovery.set({
+      provider,
+      credentials,
+      credentialId: defaultCredentialId(credentials),
+      preview: null,
+      applied: null,
+      error: null,
+      running: null,
+    });
   }
 
-  protected fieldError(field: 'name' | 'base_url' | 'kind'): string {
-    const control = this.form.controls[field];
-    if (control.hasError('required')) {
-      return field === 'name' ? 'Name is required.' : 'Base URL is required.';
+  protected closeDiscovery(): void {
+    this.discovery.set(null);
+  }
+
+  protected setDiscoveryCredential(credentialId: string): void {
+    this.discovery.update((state) =>
+      state === null
+        ? state
+        : { ...state, credentialId, preview: null, applied: null, error: null },
+    );
+  }
+
+  protected async runDiscovery(dryRun: boolean): Promise<void> {
+    const state = this.discovery();
+    if (state === null || state.running !== null) {
+      return;
     }
-    if (control.hasError('httpUrl')) {
-      return 'Enter an http(s) URL, for example https://api.example.com/v1.';
+    if (state.credentialId === '') {
+      this.discovery.set({
+        ...state,
+        error: 'This provider has no credentials yet. Add one before loading models.',
+      });
+      return;
     }
-    return '';
+    this.discovery.set({
+      ...state,
+      running: dryRun ? 'preview' : 'apply',
+      error: null,
+      preview: dryRun ? null : state.preview,
+      applied: null,
+    });
+    try {
+      const summary = await this.catalog.discoverModels(state.provider.id, {
+        credential_id: state.credentialId,
+        dry_run: dryRun,
+      });
+      const current = this.discovery();
+      if (current === null) {
+        return;
+      }
+      if (dryRun) {
+        this.discovery.set({ ...current, running: null, preview: summary });
+      } else {
+        this.discovery.set({ ...current, running: null, applied: summary });
+        // Refreshes counts and the provider copy (including the persisted
+        // last-discovery fields the list renders) without closing the dialog.
+        await this.reload();
+      }
+    } catch (err) {
+      const current = this.discovery();
+      if (current !== null) {
+        // The server's message is secret-free by design; show it verbatim.
+        this.discovery.set({
+          ...current,
+          running: null,
+          error: describeError(err, 'Loading models failed.'),
+        });
+      }
+    }
   }
 
   private handleError(err: unknown): void {
@@ -177,15 +393,50 @@ export class Providers {
   }
 }
 
-/** Only the fields the admin changed. */
-function buildPatch(provider: Provider, name: string, baseUrl: string): ProviderPatch {
+/** The first active credential: ok wins, then anything not failing. */
+function defaultCredentialId(credentials: readonly Credential[]): string {
+  const active =
+    credentials.find((credential) => credential.status === 'ok') ??
+    credentials.find(
+      (credential) => credential.status !== 'error' && credential.status !== 'cooldown',
+    ) ??
+    credentials[0];
+  return active?.id ?? '';
+}
+
+function validateDraft(
+  draft: ProviderDraft,
+  attempted: boolean,
+): Partial<Record<'name' | 'base_url', string>> {
+  const errors: Partial<Record<'name' | 'base_url', string>> = {};
+  if (!attempted) {
+    return errors;
+  }
+  if (draft.name.trim() === '') {
+    errors.name = 'Name is required.';
+  }
+  const baseUrl = draft.base_url.trim();
+  if (baseUrl === '') {
+    errors.base_url = 'Base URL is required.';
+  } else if (!/^https?:\/\/[^\s]+$/.test(baseUrl)) {
+    errors.base_url = 'Enter an http(s) URL, for example https://api.example.com/v1.';
+  }
+  return errors;
+}
+
+/** Only the fields the admin changed; `kind` cannot change over the wire. */
+function buildPatch(provider: Provider, draft: ProviderDraft): ProviderPatch {
   const patch: ProviderPatch = {};
+  const name = draft.name.trim();
+  const baseUrl = draft.base_url.trim();
   if (name !== provider.name) {
     patch.name = name;
   }
   if (baseUrl !== provider.base_url) {
     patch.base_url = baseUrl;
   }
-  // `kind` cannot change over the wire; the form only offers the single kind.
+  if (draft.enabled !== provider.enabled) {
+    patch.enabled = draft.enabled;
+  }
   return patch;
 }

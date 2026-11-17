@@ -71,6 +71,19 @@ describe('Login', () => {
     expect(text).toContain('Password is required.');
   });
 
+  it('rejects an address that is not an email before calling the API', async () => {
+    const fixture = await create();
+
+    typeInto(fixture, '#login-email', 'not-an-email');
+    typeInto(fixture, '#login-password', 'change-me-please');
+    submit(fixture);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fetchMock.requests).toHaveLength(0);
+    expect(fixture.nativeElement.textContent).toContain('Enter a valid email address.');
+  });
+
   it('sends the credentials, stores the CSRF token, and navigates to the return URL', async () => {
     fetchMock.respond(
       jsonResponse(200, {
@@ -87,8 +100,8 @@ describe('Login', () => {
     const fixture = await create('/audit');
     const navigate = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
 
-    typeInto(fixture, 'input[formcontrolname="email"]', 'admin@example.com');
-    typeInto(fixture, 'input[formcontrolname="password"]', 'change-me-please');
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'change-me-please');
     submit(fixture);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -106,8 +119,8 @@ describe('Login', () => {
     fetchMock.respond(errorResponse(401, 'invalid_credentials', 'Invalid email or password.'));
     const fixture = await create();
 
-    typeInto(fixture, 'input[formcontrolname="email"]', 'admin@example.com');
-    typeInto(fixture, 'input[formcontrolname="password"]', 'wrong');
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'wrong');
     submit(fixture);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -121,14 +134,78 @@ describe('Login', () => {
     );
     const fixture = await create();
 
-    typeInto(fixture, 'input[formcontrolname="email"]', 'admin@example.com');
-    typeInto(fixture, 'input[formcontrolname="password"]', 'wrong');
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'wrong');
     submit(fixture);
     await fixture.whenStable();
     fixture.detectChanges();
 
     expect(bannerText(fixture)).toContain('Too many failed attempts.');
     expect(bannerText(fixture)).toContain('Try again in 42 seconds.');
+  });
+
+  it('focuses the email field and disables the submit button while signing in', async () => {
+    let respond: ((response: Response) => void) | undefined;
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL): Promise<Response> => {
+      calls.push(String(input));
+      return new Promise<Response>((resolve) => {
+        respond = resolve;
+      });
+    });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(root.querySelector('#login-email')).toBe(document.activeElement);
+
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'change-me-please');
+    submit(fixture);
+    fixture.detectChanges();
+
+    const button = root.querySelector('button[type="submit"]');
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error('no submit button');
+    }
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('aria-busy')).toBe('true');
+
+    // A second submit while the first is still in flight must be ignored.
+    submit(fixture);
+    expect(calls).toEqual(['/api/auth/login']);
+
+    respond?.(
+      jsonResponse(200, {
+        user: {
+          id: 'u1',
+          email: 'admin@example.com',
+          display_name: 'Admin',
+          role: 'admin',
+          must_change_password: false,
+        },
+        csrf_token: 'csrf-1',
+      }),
+    );
+    await fixture.whenStable();
+  });
+
+  it('re-enables the button after a failure so the user can retry', async () => {
+    fetchMock.respond(errorResponse(401, 'invalid_credentials', 'Invalid email or password.'));
+    const fixture = await create();
+
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'wrong');
+    submit(fixture);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const button = fixture.nativeElement.querySelector('button[type="submit"]');
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error('no submit button');
+    }
+    expect(button.disabled).toBe(false);
   });
 
   it('navigates to the app root when no return URL was requested', async () => {
@@ -147,8 +224,8 @@ describe('Login', () => {
     const fixture = await create();
     const navigate = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
 
-    typeInto(fixture, 'input[formcontrolname="email"]', 'admin@example.com');
-    typeInto(fixture, 'input[formcontrolname="password"]', 'change-me-please');
+    typeInto(fixture, '#login-email', 'admin@example.com');
+    typeInto(fixture, '#login-password', 'change-me-please');
     submit(fixture);
     await fixture.whenStable();
 

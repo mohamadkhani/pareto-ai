@@ -1,0 +1,8 @@
+<div class="banner" [attr.role]="tone() === 'danger' || tone() === 'warning' ? 'alert' : 'status'">
+  <div class="banner-text"><ng-content /></div>
+  @if (actionLabel()) {
+    <button type="button" class="banner-action" (click)="actioned.emit()">
+      {{ actionLabel() }}
+    </button>
+  }
+</div>

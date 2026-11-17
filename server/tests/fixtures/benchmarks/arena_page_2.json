@@ -1,0 +1,60 @@
+{
+  "features": [
+    {"feature_idx": 0, "name": "model_name", "type": {"dtype": "string", "_type": "Value"}},
+    {"feature_idx": 3, "name": "rating", "type": {"dtype": "float64", "_type": "Value"}},
+    {"feature_idx": 8, "name": "rank", "type": {"dtype": "int64", "_type": "Value"}},
+    {"feature_idx": 9, "name": "category", "type": {"dtype": "string", "_type": "Value"}}
+  ],
+  "rows": [
+    {
+      "row_idx": 3,
+      "row": {
+        "model_name": "Gemini 3.1 Pro",
+        "organization": "google",
+        "license": "Proprietary",
+        "rating": 1741.6,
+        "rating_lower": 1730.2,
+        "rating_upper": 1753.0,
+        "variance": 28.4,
+        "vote_count": 3800,
+        "rank": 6,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 4,
+      "row": {
+        "model_name": "A Non-Arena Category",
+        "organization": "acme",
+        "license": "Proprietary",
+        "rating": 1700.0,
+        "rating_lower": 1690.0,
+        "rating_upper": 1710.0,
+        "variance": 40.0,
+        "vote_count": 100,
+        "rank": 10,
+        "category": "data-analysis",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 5,
+      "row": {
+        "model_name": "Bare Model",
+        "organization": "acme",
+        "license": "Proprietary",
+        "rating": 1602.4,
+        "vote_count": 12,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    }
+  ],
+  "num_rows_total": 4,
+  "num_rows_per_page": 100,
+  "partial": false
+}

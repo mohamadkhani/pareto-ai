@@ -1,6 +1,11 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { ApiError } from '../api';
 import { AuthService } from '../auth/auth.service';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiEmpty } from '../ui/empty';
+import { UiTable } from '../ui/table';
 import { AuditCursor, AuditEntry, AuditPage, AuditService } from './audit.service';
 
 const PAGE_SIZE = 50;
@@ -17,6 +22,7 @@ function describeError(err: unknown): string {
 /** The audit log: every admin action, newest first. Admin only. */
 @Component({
   selector: 'app-audit',
+  imports: [UiBadge, UiBanner, UiButton, UiEmpty, UiTable],
   templateUrl: './audit.html',
   styleUrl: './audit.css',
   changeDetection: ChangeDetectionStrategy.OnPush,

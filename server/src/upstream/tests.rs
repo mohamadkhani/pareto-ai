@@ -171,7 +171,7 @@ fn classify_covers_the_taxonomy_table() {
             },
             "upstream_auth",
             StatusCode::BAD_GATEWAY,
-            false,
+            true,
         ),
         (
             UpstreamError::Http {
@@ -180,7 +180,7 @@ fn classify_covers_the_taxonomy_table() {
             },
             "upstream_auth",
             StatusCode::BAD_GATEWAY,
-            false,
+            true,
         ),
         (
             UpstreamError::Http {

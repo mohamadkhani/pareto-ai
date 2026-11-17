@@ -1,25 +1,14 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import {
-  AbstractControl,
-  FormControl,
-  FormGroup,
-  ReactiveFormsModule,
-  ValidationErrors,
-  Validators,
-} from '@angular/forms';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { ApiError } from '../api';
 import { AuthService } from '../auth/auth.service';
 import { MIN_PASSWORD_LEN } from '../users/users.types';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
 
 type Field = 'current_password' | 'new_password' | 'confirm_password';
-
-/** Requires `confirm_password` to equal `new_password`. */
-function passwordsMatch(group: AbstractControl): ValidationErrors | null {
-  const password: unknown = group.get('new_password')?.value;
-  const confirm: unknown = group.get('confirm_password')?.value;
-  return password === confirm ? null : { passwordsMismatch: true };
-}
 
 /** Turns an unknown failure into a user-facing message. */
 function describeError(err: unknown): string {
@@ -40,7 +29,7 @@ function describeError(err: unknown): string {
  */
 @Component({
   selector: 'app-change-password',
-  imports: [ReactiveFormsModule],
+  imports: [UiBanner, UiButton, UiField, UiInput],
   templateUrl: './change-password.html',
   styleUrl: './change-password.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -50,46 +39,104 @@ export class ChangePassword {
   private readonly router = inject(Router);
 
   protected readonly pending = signal(false);
+  /** The password is already changed; a second submit must not re-post it. */
+  private readonly completed = signal(false);
   protected readonly attempted = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
   protected readonly minLength = MIN_PASSWORD_LEN;
 
-  protected readonly form = new FormGroup(
-    {
-      current_password: new FormControl('', {
-        nonNullable: true,
-        validators: [Validators.required],
-      }),
-      new_password: new FormControl('', {
-        nonNullable: true,
-        validators: [Validators.required, Validators.minLength(MIN_PASSWORD_LEN)],
-      }),
-      confirm_password: new FormControl('', {
-        nonNullable: true,
-        validators: [Validators.required],
-      }),
-    },
-    { validators: passwordsMatch },
-  );
+  protected readonly currentPassword = signal('');
+  protected readonly newPassword = signal('');
+  protected readonly confirmPassword = signal('');
 
-  protected async submit(): Promise<void> {
-    this.attempted.set(true);
-    this.errorMessage.set(null);
-    if (this.form.invalid) {
+  /** Field errors returned by the server, cleared on the next submit. */
+  private readonly serverErrors = signal<Partial<Record<Field, string>>>({});
+
+  protected readonly currentPasswordError = computed(() => {
+    if (!this.attempted()) {
+      return '';
+    }
+    if (this.currentPassword().length === 0) {
+      return 'Your current password is required.';
+    }
+    return this.serverErrors().current_password ?? '';
+  });
+
+  protected readonly newPasswordError = computed(() => {
+    if (!this.attempted()) {
+      return '';
+    }
+    if (this.newPassword().length === 0) {
+      return 'A new password is required.';
+    }
+    if (this.newPassword().length < MIN_PASSWORD_LEN) {
+      return `Use at least ${MIN_PASSWORD_LEN} characters.`;
+    }
+    return this.serverErrors().new_password ?? '';
+  });
+
+  protected readonly confirmPasswordError = computed(() => {
+    if (!this.attempted()) {
+      return '';
+    }
+    if (this.confirmPassword().length === 0) {
+      return 'Confirm the new password.';
+    }
+    if (this.confirmPassword() !== this.newPassword()) {
+      return 'The two passwords do not match.';
+    }
+    return '';
+  });
+
+  /**
+   * Submits the change. The pending state ends as soon as the server confirms
+   * the change, before the session refresh and navigation: those steps can be
+   * slow or fail and must never leave the button stuck on "Changing…".
+   */
+  protected async submit(event?: Event): Promise<void> {
+    event?.preventDefault();
+    if (this.pending() || this.completed()) {
       return;
     }
-    this.pending.set(true);
-    const { current_password, new_password } = this.form.getRawValue();
-    try {
-      await this.auth.changePassword(current_password, new_password);
-      // Re-read the session: the rotation flag has cleared server-side.
-      await this.auth.loadMe(true);
-      await this.router.navigateByUrl('/');
-    } catch (err) {
-      this.errorMessage.set(describeError(err));
-    } finally {
-      this.pending.set(false);
+    this.attempted.set(true);
+    this.errorMessage.set(null);
+    this.serverErrors.set({});
+    if (
+      this.currentPasswordError() !== '' ||
+      this.newPasswordError() !== '' ||
+      this.confirmPasswordError() !== ''
+    ) {
+      return;
     }
+
+    this.pending.set(true);
+    try {
+      await this.auth.changePassword(this.currentPassword(), this.newPassword());
+    } catch (err) {
+      this.reportError(err);
+      this.pending.set(false);
+      return;
+    }
+    this.pending.set(false);
+    this.completed.set(true);
+
+    // The server cleared the flag; re-read the session so the rest of the app
+    // (role, display name, CSRF token) matches. A failed refresh must not block
+    // the user: the local user is already marked as rotated.
+    await this.auth.loadMe(true);
+    await this.router.navigateByUrl('/');
+  }
+
+  private reportError(err: unknown): void {
+    if (err instanceof ApiError && err.code === 'invalid_credentials') {
+      this.serverErrors.set({ current_password: describeError(err) });
+      return;
+    }
+    if (err instanceof ApiError && err.code === 'invalid_request') {
+      this.serverErrors.set({ new_password: err.message });
+      return;
+    }
+    this.errorMessage.set(describeError(err));
   }
 
   /** Signs out so a different account can sign in instead. */
@@ -100,31 +147,5 @@ export class ChangePassword {
       // Local session state is cleared even when the server call fails.
     }
     await this.router.navigateByUrl('/login');
-  }
-
-  protected showError(field: Field): boolean {
-    const control = this.form.controls[field];
-    return control.invalid && (control.touched || this.attempted());
-  }
-
-  protected fieldError(field: Field): string {
-    const control = this.form.controls[field];
-    if (control.hasError('required')) {
-      return field === 'current_password'
-        ? 'Your current password is required.'
-        : field === 'new_password'
-          ? 'A new password is required.'
-          : 'Confirm the new password.';
-    }
-    if (control.hasError('minlength')) {
-      return `Use at least ${MIN_PASSWORD_LEN} characters.`;
-    }
-    return '';
-  }
-
-  /** The group-level mismatch is reported under the confirm field. */
-  protected mismatch(): boolean {
-    const confirm = this.form.controls.confirm_password;
-    return this.form.hasError('passwordsMismatch') && (confirm.touched || this.attempted());
   }
 }

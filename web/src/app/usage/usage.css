@@ -1,34 +1,37 @@
-.totals-card {
-  margin-bottom: 1rem;
-}
-
 .totals-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: 0.85rem 1.1rem;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
 
-.total {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+.total-card {
+  display: block;
 }
 
 .total-label {
-  color: var(--muted);
-  font-size: 0.78rem;
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-small);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 .total-value {
-  font-size: 1.25rem;
-  font-weight: 700;
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-display);
+  font-size: var(--text-h2);
+  font-weight: var(--weight-bold);
 }
 
 .pricing-line {
   display: flex;
-  gap: 0.45rem;
-  margin: 0.85rem 0 0;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
   flex-wrap: wrap;
+}
+
+.group-tabs {
+  margin-bottom: var(--space-2);
 }

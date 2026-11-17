@@ -3,6 +3,7 @@
 mod access;
 mod api_keys;
 mod auth;
+mod benchmark_sync;
 mod benchmarks;
 mod bootstrap;
 mod breaker;
@@ -15,9 +16,12 @@ mod error;
 mod ip;
 #[cfg(test)]
 mod load_test;
+mod mix;
 mod money;
 mod openapi;
 mod password;
+#[cfg(test)]
+mod perf_bench;
 mod pricing;
 mod probe;
 mod reports;
@@ -31,6 +35,7 @@ mod supervisor;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod throttle;
 mod upstream;
 mod users;
 
@@ -59,10 +64,22 @@ pub struct AppState {
     pub login_limiter: Arc<auth::LoginRateLimiter>,
     /// Per-key RPM/TPM token buckets for the data plane (M4).
     pub key_limiter: Arc<api_keys::KeyRateLimiter>,
+    /// Meshed timestamps for the API-key `last_used_at` column (M4): the
+    /// stamp is written at most once per key per
+    /// [`api_keys::USAGE_STAMP_INTERVAL`] instead of on every request.
+    pub key_usage_stamps: Arc<api_keys::KeyUsageStamps>,
+    /// Session activity stamps (`sessions.last_seen_at`) at a slower cadence.
+    pub session_activity: Arc<auth::SessionActivity>,
+    /// Resolved token-mix profiles (D34), loaded once and invalidated by the
+    /// admin mutations.
+    pub mix_profiles: Arc<mix::MixProfileCache>,
     /// Per-offering rolling telemetry cache (M5), refreshed in the background.
     pub telemetry: Arc<telemetry::TelemetryStore>,
     /// Per-(credential, offering) circuit breaker state (M5).
     pub breaker: Arc<breaker::BreakerRegistry>,
+    /// Guard shared by the background benchmark sync and the admin trigger,
+    /// so two syncs never overlap (D31).
+    pub benchmark_sync: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[tokio::main]
@@ -124,11 +141,15 @@ async fn main() -> Result<()> {
         started: Instant::now(),
         login_limiter: Arc::new(auth::LoginRateLimiter::new()),
         key_limiter: Arc::new(api_keys::KeyRateLimiter::new()),
+        key_usage_stamps: Arc::new(api_keys::KeyUsageStamps::new()),
+        session_activity: Arc::new(auth::SessionActivity::new()),
+        mix_profiles: Arc::new(mix::MixProfileCache::new()),
         telemetry: Arc::new(telemetry::TelemetryStore::new()),
         breaker: Arc::new(breaker::BreakerRegistry::new(breaker::BreakerConfig {
             threshold: breaker_threshold,
             cooldown: breaker_cooldown,
         })),
+        benchmark_sync: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     // Warm the telemetry cache from `telemetry_snapshots` before the first
@@ -150,7 +171,12 @@ async fn main() -> Result<()> {
     // the job with exponential backoff (1 s doubling to 60 s, reset after a
     // healthy minute); the gateway keeps serving while the job is down. The
     // handles live for the lifetime of the process.
-    let _background: [tokio::task::JoinHandle<()>; 3] = [
+    // Automatic benchmark download (D31): a supervised job that syncs the
+    // sources whose last success is older than the 5 h TTL.
+    let benchmark_fetcher =
+        benchmark_sync::HttpFetcher::new().context("building the benchmark sync client")?;
+
+    let _background: [tokio::task::JoinHandle<()>; 5] = [
         supervisor::supervise("reservation reconciler", {
             let pool = state.pool.clone();
             let timeout = state.config.timeout_total;
@@ -166,6 +192,18 @@ async fn main() -> Result<()> {
             let store = state.telemetry.clone();
             let interval = state.config.telemetry_refresh;
             move || telemetry::spawn_telemetry_job(pool.clone(), store.clone(), interval)
+        }),
+        supervisor::supervise("benchmark sync", {
+            let pool = state.pool.clone();
+            let gate = state.benchmark_sync.clone();
+            let fetcher = benchmark_fetcher.clone();
+            move || benchmark_sync::spawn_sync_job(pool.clone(), fetcher.clone(), gate.clone())
+        }),
+        // D35: sticky pins expire after the combo's TTL; prune them
+        // opportunistically every minute so the table stays bounded.
+        supervisor::supervise("combo sticky prune", {
+            let pool = state.pool.clone();
+            move || combos::spawn_prune_job(pool.clone(), std::time::Duration::from_secs(60))
         }),
     ];
 

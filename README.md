@@ -110,6 +110,12 @@ From this network, `index.crates.io` and `static.crates.io` do not respond
    another network, or add a sparse mirror in `.cargo/config.toml` and drop
    `--offline`.
 
+## License
+
+**MIT** — see [`LICENSE`](LICENSE). Third-party notices (fonts under OFL,
+LMArena data under CC BY 4.0, dependency licenses) are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 ## Status
 
 Milestones M0–M5 of [`PLAN.md`](PLAN.md) are implemented and committed (10

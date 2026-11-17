@@ -202,9 +202,9 @@ period it started in.
 
 | Class | Examples | Action |
 | --- | --- | --- |
-| Auth | 401/403 upstream | Mark credential bad, alert, do not retry — except inside a combo, where the member list is the operator's explicit fallback chain and the next member is tried |
-| Quota | 402, "insufficient credits", provider quota message | Cool down credential, fail over |
-| Rate limit | 429 | Honor `Retry-After`, then fail over |
+| Auth | 401/403 upstream | Mark credential bad, cool it down, and retry the same offering with the next eligible credential; then fail over to the next offering. Never retry the credential that failed |
+| Quota | 402, "insufficient credits", provider quota message | Cool down credential, retry the next credential of the offering, then fail over |
+| Rate limit | 429 | Honor `Retry-After`, cool that credential, retry the next credential, then fail over (at most once per request) |
 | Transient | connect error, 502/503/504, reset | Retry/fail over before first byte |
 | Model | 404 model, unsupported parameter | Disable offering or strip parameter, fail over |
 | Content | 400 invalid request | Return to client, no retry |

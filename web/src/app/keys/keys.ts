@@ -3,10 +3,16 @@ import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
-import { DeleteConfirm } from '../catalog/delete-confirm';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime } from '../catalog/format';
 import { positiveInteger } from '../catalog/validators';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiDialog } from '../ui/dialog';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiTable } from '../ui/table';
 import { KeysService } from './keys.service';
 import type { ApiKeyPatch, ApiKeyView, CreatedKey } from './keys.types';
 
@@ -70,7 +76,7 @@ function buildPatch(key: ApiKeyView, raw: { name: string; expires_at: string }):
 /** The API-key page: list, issue, edit limits, revoke. Self or admin. */
 @Component({
   selector: 'app-keys',
-  imports: [ReactiveFormsModule, DeleteConfirm],
+  imports: [ReactiveFormsModule, UiBadge, UiBanner, UiButton, UiDialog, UiEmpty, UiField, UiTable],
   templateUrl: './keys.html',
   styleUrl: './keys.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -99,6 +105,8 @@ export class Keys {
   protected readonly attempted = signal(false);
   protected readonly saving = signal(false);
   protected readonly revokingId = signal<string | null>(null);
+  /** The key the revoke confirmation dialog is open for. */
+  protected readonly revokeTarget = signal<ApiKeyView | null>(null);
   /** The just-issued plaintext key, shown exactly once. */
   protected readonly createdKey = signal<ShownKey | null>(null);
   protected readonly copied = signal(false);
@@ -218,11 +226,29 @@ export class Keys {
     this.actionError.set(null);
     try {
       await this.keysService.revoke(key.id);
+      this.revokeTarget.set(null);
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Revoking the key failed.'));
     } finally {
       this.revokingId.set(null);
+    }
+  }
+
+  /** Opens the revoke confirmation for one key. */
+  protected openRevoke(key: ApiKeyView): void {
+    this.actionError.set(null);
+    this.revokeTarget.set(key);
+  }
+
+  protected closeRevoke(): void {
+    this.revokeTarget.set(null);
+  }
+
+  protected confirmRevoke(): void {
+    const key = this.revokeTarget();
+    if (key !== null) {
+      void this.revoke(key);
     }
   }
 

@@ -87,6 +87,19 @@ load-test:
 # what a release would run: the full gate, then the production binary
 verify: check build
 
+# live smoke test against real providers (needs OPENROUTER_API_KEY,
+# SAIL_API_KEY, ADMIN_PASSWORD; see docs/live-verification.md)
+live-smoke:
+    scripts/live-smoke.sh
+
+# performance probe: per-request query inventory, latency/RPS at concurrency
+# 1/10/50/200, stage microbenchmarks, and the SQLite write path. Prints tables;
+# never fails on a slow machine. See docs/research/13-performance.md.
+# `just bench` runs the whole probe; `just bench wal_growth_under_sustained_writes`
+# runs the WAL-growth probe alone.
+bench filter="perf_bench" *args:
+    cd server && cargo test --offline --release {{filter}} -- --ignored --nocapture --test-threads=1 {{args}}
+
 # ── Housekeeping ────────────────────────────────────────────────────────────
 
 # remove build outputs and local runtime data

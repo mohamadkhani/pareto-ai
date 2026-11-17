@@ -15,6 +15,25 @@ use std::time::{Duration, Instant};
 /// 15s catalog sync budget.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeout for model discovery (`GET {base_url}/models`), matching the
+/// provider-catalog sync budget (15s).
+pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Why a discovery document could not be fetched. The message is safe to put
+/// in an API response: it names the status or the transport class, never a
+/// header value or the credential secret.
+#[derive(Debug, thiserror::Error)]
+pub enum ModelsFetchError {
+    #[error("the provider did not answer /models within the timeout")]
+    Timeout,
+    #[error("the provider returned HTTP {0} for /models")]
+    Http(u16),
+    #[error("the provider could not be reached")]
+    Transport,
+    #[error("{0}")]
+    InvalidHeader(String),
+}
+
 /// The outcome of one probe, safe to log and to store on the credential.
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
@@ -55,26 +74,10 @@ pub async fn probe_models(
         Ok(client) => client,
         Err(e) => return failure(None, 0, e.to_string()),
     };
-
-    let mut request = client.get(&url);
-    if let Some(secret) = secret
-        && !headers
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("authorization"))
-    {
-        request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {secret}"));
-    }
-    for (name, value) in headers {
-        match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
-            Ok(name) => match reqwest::header::HeaderValue::from_str(value) {
-                Ok(value) => {
-                    request = request.header(name, value);
-                }
-                Err(_) => return failure(None, 0, format!("header {name} has an invalid value")),
-            },
-            Err(_) => return failure(None, 0, format!("header {name} is not a valid name")),
-        }
-    }
+    let request = match models_request(&client, &url, headers, secret) {
+        Ok(request) => request,
+        Err(message) => return failure(None, 0, message),
+    };
 
     let started = Instant::now();
     let response = request.send().await;
@@ -92,6 +95,67 @@ pub async fn probe_models(
         }
         Err(e) => failure(None, latency_ms, e.to_string()),
     }
+}
+
+/// Fetches the discovery document from `GET {base_url}/models` with the
+/// credential's merged headers and its secret as bearer auth, using the
+/// caller's timeout (the handler passes [`DISCOVERY_TIMEOUT`]). Tests pass a
+/// short timeout to exercise that path without waiting 15 seconds.
+///
+/// Failure modes: [`ModelsFetchError`] for a timeout, a non-2xx status, or a
+/// transport failure. The body is not validated here.
+pub(crate) async fn fetch_models_document_with_timeout(
+    base_url: &str,
+    headers: &BTreeMap<String, String>,
+    secret: Option<&str>,
+    timeout: Duration,
+) -> Result<String, ModelsFetchError> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|_| ModelsFetchError::Transport)?;
+    let request =
+        models_request(&client, &url, headers, secret).map_err(ModelsFetchError::InvalidHeader)?;
+
+    let response = request.send().await.map_err(|e| match e.is_timeout() {
+        true => ModelsFetchError::Timeout,
+        false => ModelsFetchError::Transport,
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ModelsFetchError::Http(status.as_u16()));
+    }
+    response
+        .text()
+        .await
+        .map_err(|_| ModelsFetchError::Transport)
+}
+
+/// Builds the authenticated `GET` request shared by the probe and discovery:
+/// the secret becomes `Authorization: Bearer` unless a header overrides it.
+fn models_request(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    secret: Option<&str>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let mut request = client.get(url);
+    if let Some(secret) = secret
+        && !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {secret}"));
+    }
+    for (name, value) in headers {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("header {name} is not a valid name"))?;
+        let header_value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| format!("header {name} has an invalid value"))?;
+        request = request.header(header_name, header_value);
+    }
+    Ok(request)
 }
 
 fn failure(http_status: Option<i64>, latency_ms: u64, error: String) -> ProbeResult {
@@ -190,6 +254,35 @@ mod tests {
         let error = result.error.expect("an error summary");
         assert!(!error.contains("sk-live-secret"), "{error}");
         assert!(!error.contains("do-not-leak"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn discovery_fetch_times_out_against_a_silent_provider() {
+        let addr = crate::test_support::spawn_hanging_server().await;
+        let error = fetch_models_document_with_timeout(
+            &format!("http://{addr}"),
+            &BTreeMap::new(),
+            Some("sk-live-secret"),
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("a silent provider must time out");
+        assert!(matches!(error, ModelsFetchError::Timeout), "{error}");
+        assert!(!error.to_string().contains("sk-live-secret"));
+    }
+
+    #[tokio::test]
+    async fn discovery_fetch_maps_upstream_statuses() {
+        let (addr, _) = spawn_static_server("403 Forbidden", "{}").await;
+        let error = fetch_models_document_with_timeout(
+            &format!("http://{addr}/v1"),
+            &BTreeMap::new(),
+            Some("sk"),
+            DISCOVERY_TIMEOUT,
+        )
+        .await
+        .expect_err("403 must fail");
+        assert!(matches!(error, ModelsFetchError::Http(403)), "{error}");
     }
 
     #[test]

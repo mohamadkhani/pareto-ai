@@ -1,28 +1,10 @@
-.state {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.25rem;
-}
-
-.state h2 {
-  margin: 0 0 0.5rem;
-  font-size: 1.05rem;
-}
-
-.state.error {
-  border-color: var(--danger);
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
 .state-note {
-  color: var(--muted);
-  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-size: var(--text-small);
 }
 
 .more {
-  margin-top: 1rem;
+  margin-top: var(--space-4);
 }
 
 .col-time {
@@ -30,12 +12,16 @@
 }
 
 /* 402/429/403 rows are money events: the request never reached a provider. */
-.logs-table tbody tr.money-event {
-  background: #fff8ec;
+.ui-table tbody tr.money-event {
+  background: var(--warning-soft);
 }
 
-.logs-table tbody tr.money-event:hover {
-  background: #fff0d6;
+.ui-table tbody tr.money-event td {
+  background: var(--warning-soft);
+}
+
+.ui-table tbody tr.money-event:hover td {
+  background: var(--warning-soft);
 }
 
 .actions {
@@ -43,7 +29,7 @@
 }
 
 /* The expanded "why this model" panel spans the whole row. */
-.logs-table tbody tr.decision-row td {
+.ui-table tbody tr.decision-row td {
   background: var(--bg);
-  padding: 0.85rem 1rem;
+  padding: var(--space-3) var(--space-4);
 }

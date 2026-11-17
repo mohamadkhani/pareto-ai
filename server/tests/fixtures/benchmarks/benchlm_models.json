@@ -1,0 +1,16 @@
+{
+  "pageProps": {
+    "directory": {
+      "v": 1,
+      "creators": ["Anthropic", "Google", "OpenAI"],
+      "rows": [
+        ["Claude Fable 5.2", "claude-fable-5-2", 0, 0, 0, 0, 93.84, 0, 24, 1, 0, -1],
+        ["Gemini 4 Carbon", "gemini-4-carbon", 1, 0, 0, 0, 89.56, 0, 6, 2, 4, -1],
+        ["Claude Opus 5.5", "claude-opus-5-5", 0, 0, 0, 0, 86.81, 0, 12, 3, 4]
+      ]
+    },
+    "rankingMode": "overall",
+    "totalModels": 3,
+    "totalFamilies": 2
+  }
+}

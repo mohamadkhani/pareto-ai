@@ -1,0 +1,14 @@
+<button
+  class="button"
+  [type]="type()"
+  [disabled]="disabled() || loading()"
+  [attr.aria-busy]="loading() ? 'true' : null"
+  [attr.aria-expanded]="ariaExpanded() === null ? null : ariaExpanded()"
+  [attr.aria-controls]="ariaControls() || null"
+  (click)="onClick($event)"
+>
+  @if (loading()) {
+    <ui-spinner size="sm" label="Working" />
+  }
+  <span class="label"><ng-content /></span>
+</button>

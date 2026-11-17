@@ -151,10 +151,10 @@ describe('Logs', () => {
     expect(text).toContain('403 access');
     // Both refusals carry the row highlight and the labelled refusal badge.
     expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
-    expect(root.querySelectorAll('tbody tr.money-event .badge.error').length).toBe(2);
-    expect(root.querySelector('.badge[title="Refused: access denied"]')?.textContent?.trim()).toBe(
-      '403 access',
-    );
+    expect(root.querySelectorAll('tbody tr.money-event ui-badge.tone-danger').length).toBe(2);
+    expect(
+      root.querySelector('ui-badge[title="Refused: access denied"]')?.textContent?.trim(),
+    ).toBe('403 access');
   });
 
   it('pages with the composite cursor and passes before_request_id', async () => {
@@ -255,10 +255,16 @@ describe('Logs', () => {
     expect(root.textContent).toContain('combo:shared-fast');
     expect(root.textContent).toContain('-0.125');
     expect(root.querySelector('tr.chosen')).not.toBeNull();
+    // The state lives on the real <button>, not on the <ui-button> host.
+    const expanded = root.querySelector<HTMLButtonElement>('button[aria-expanded="true"]');
+    expect(expanded?.getAttribute('aria-controls')).toBe('decision-r0');
+    expect(root.querySelector('ui-button[aria-expanded]')).toBeNull();
+    expect(root.querySelector('#decision-r0')).not.toBeNull();
 
     buttonByText(root, 'Hide').click();
     fixture.detectChanges();
     expect(root.querySelector('app-decision-panel')).toBeNull();
+    expect(root.querySelector('button[aria-expanded="false"]')).not.toBeNull();
   });
 
   it('falls back gracefully for an unreadable decision record', async () => {

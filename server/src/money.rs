@@ -1343,6 +1343,7 @@ mod tests {
             cache_write_per_m: cache_write,
             reasoning_per_m: reasoning,
             request_fee,
+            variable_price: 0,
             currency: "USD".to_string(),
             source: "manual".to_string(),
             source_url: None,

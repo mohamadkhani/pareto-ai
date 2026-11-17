@@ -9,235 +9,275 @@
   </header>
 
   @if (actionError()) {
-    <div class="banner error" role="alert">{{ actionError() }}</div>
+    <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+      {{ actionError() }}
+    </ui-banner>
   }
 
   <div class="toolbar">
     @if (isAdmin()) {
-      <div class="field">
-        <label for="limits-user">Account</label>
+      <ui-field label="Account" [controlId]="'limits-user'">
         <select id="limits-user" [value]="selectedUserId()" (change)="onUserChange($event)">
           @for (user of users(); track user.id) {
             <option [value]="user.id">{{ user.email }}</option>
           }
         </select>
-      </div>
+      </ui-field>
     }
     <span class="spacer"></span>
-    <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
   </div>
 
   @if (loadError()) {
-    <div class="banner error" role="alert">
+    <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
       {{ loadError() }}
-      <button type="button" class="btn" (click)="reload()">Try again</button>
-    </div>
+    </ui-banner>
   } @else if (loading() && budgets().length === 0 && caps().length === 0) {
     <p class="empty-note">Loading…</p>
   } @else {
-    <section class="card section-card">
-      <h2>USD budgets</h2>
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th scope="col">Period</th>
-            <th scope="col">Usage</th>
-            <th scope="col">Resets</th>
-            @if (isAdmin()) {
-              <th scope="col"><span class="visually-hidden">Edit</span></th>
-            }
-          </tr>
-        </thead>
-        <tbody>
-          @for (period of periods; track period) {
-            <tr>
-              <td>{{ period }}</td>
-              <td>
-                @if (budgetOf(period); as budget) {
-                  <div
-                    class="progress"
-                    role="progressbar"
-                    [attr.aria-valuenow]="progressPercent(budget.used_usd, budget.limit_usd)"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                  >
-                    <div
-                      class="progress-fill"
-                      [style.width.%]="progressPercent(budget.used_usd, budget.limit_usd)"
-                    ></div>
-                  </div>
-                  <span class="usage-text">
-                    {{ formatUsd(budget.used_usd) }} of
-                    {{ budget.limit_usd === 0 ? '$0.00 (blocked)' : formatUsd(budget.limit_usd) }}
-                  </span>
-                } @else {
-                  <span class="usage-text">{{ formatUsd(0) }} of unlimited</span>
-                }
-              </td>
-              <td>{{ resetText(budgetOf(period)?.reset_at) }}</td>
-              @if (isAdmin()) {
-                <td class="actions">
-                  <input
-                    class="limit-input"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    [formControl]="budgetForm.controls[period]"
-                    [attr.aria-label]="'USD limit for ' + period"
-                    placeholder="unlimited"
-                  />
-                  @if (showBudgetError(period)) {
-                    <p class="field-error" role="alert">Use a number of 0 or more.</p>
-                  }
-                  <button
-                    type="button"
-                    class="btn primary"
-                    (click)="saveBudget(period)"
-                    [disabled]="savingKey() === period"
-                  >
-                    {{ savingKey() === period ? 'Saving…' : 'Save' }}
-                  </button>
-                  @if (budgetOf(period)) {
-                    <app-delete-confirm
-                      label="Remove"
-                      confirmLabel="Confirm remove"
-                      [pending]="deletingKey() === period"
-                      (confirmed)="removeBudget(period)"
-                    />
-                  }
-                </td>
-              }
-            </tr>
-          }
-        </tbody>
-      </table>
-      @if (!isAdmin()) {
-        <p class="note">Limits are managed by an administrator.</p>
-      }
-    </section>
-
-    <section class="card section-card">
-      <h2>Token caps</h2>
-      @if (isAdmin()) {
-        <div class="toolbar">
-          <button type="button" class="btn primary" (click)="openCapCreate()">New cap</button>
-        </div>
-      }
-
-      @if (capFormState(); as state) {
-        <form class="form-card" [formGroup]="capForm" (ngSubmit)="saveCap()" novalidate>
-          <h2>
-            {{
-              state.mode === 'create'
-                ? 'New token cap'
-                : 'Edit ' + modelName(state.cap.model_id) + ' (' + state.cap.period + ')'
-            }}
-          </h2>
-          <div class="form-grid">
-            @if (state.mode === 'create') {
-              <div class="field">
-                <label for="cap-model">Model</label>
-                <select id="cap-model" formControlName="model_id">
-                  <option value="">Choose a model…</option>
-                  @for (model of models(); track model.id) {
-                    <option [value]="model.id">{{ model.canonical_name }}</option>
-                  }
-                </select>
-                @if (showCapError('model_id')) {
-                  <p class="field-error" role="alert">{{ capFieldError('model_id') }}</p>
-                }
-              </div>
-              <div class="field">
-                <label for="cap-period">Period</label>
-                <select id="cap-period" formControlName="period">
-                  @for (period of periods; track period) {
-                    <option [value]="period">{{ period }}</option>
-                  }
-                </select>
-              </div>
-            }
-            <div class="field">
-              <label for="cap-limit">Token limit</label>
-              <input
-                id="cap-limit"
-                type="number"
-                min="0"
-                step="1"
-                formControlName="limit_tokens"
-                placeholder="0 blocks all use"
-              />
-              @if (showCapError('limit_tokens')) {
-                <p class="field-error" role="alert">{{ capFieldError('limit_tokens') }}</p>
-              }
-            </div>
-          </div>
-          <div class="form-actions">
-            <button type="submit" class="btn primary" [disabled]="savingCap()">
-              {{ savingCap() ? 'Saving…' : 'Save' }}
-            </button>
-            <button type="button" class="btn" (click)="closeCapForm()">Cancel</button>
-          </div>
-        </form>
-      }
-
-      @if (caps().length === 0) {
-        <p class="empty-note">No token caps: every model may use unlimited tokens.</p>
-      } @else {
-        <table class="data-table">
+    <ui-card class="section-card">
+      <div ui-card-header>USD budgets</div>
+      <ui-table>
+        <table>
           <thead>
             <tr>
-              <th scope="col">Model</th>
               <th scope="col">Period</th>
               <th scope="col">Usage</th>
               <th scope="col">Resets</th>
               @if (isAdmin()) {
-                <th scope="col"><span class="visually-hidden">Actions</span></th>
+                <th scope="col"><span class="visually-hidden">Edit</span></th>
               }
             </tr>
           </thead>
           <tbody>
-            @for (cap of caps(); track cap.model_id + '|' + cap.period) {
+            @for (period of periods; track period) {
               <tr>
+                <td>{{ period }}</td>
                 <td>
-                  <code>{{ modelName(cap.model_id) }}</code>
-                </td>
-                <td>{{ cap.period }}</td>
-                <td>
-                  <div
-                    class="progress"
-                    role="progressbar"
-                    [attr.aria-valuenow]="progressPercent(cap.used_tokens, cap.limit_tokens)"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                  >
+                  @if (budgetOf(period); as budget) {
                     <div
-                      class="progress-fill"
-                      [style.width.%]="progressPercent(cap.used_tokens, cap.limit_tokens)"
-                    ></div>
-                  </div>
-                  <span class="usage-text">
-                    {{ formatTokens(cap.used_tokens) }} of
-                    {{ cap.limit_tokens === 0 ? '0 (blocked)' : formatTokens(cap.limit_tokens) }}
-                    tokens
-                  </span>
+                      class="progress"
+                      role="progressbar"
+                      [attr.aria-valuenow]="progressPercent(budget.used_usd, budget.limit_usd)"
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                    >
+                      <div
+                        class="progress-fill"
+                        [style.width.%]="progressPercent(budget.used_usd, budget.limit_usd)"
+                      ></div>
+                    </div>
+                    <span class="usage-text">
+                      {{ formatUsd(budget.used_usd) }} of
+                      {{ budget.limit_usd === 0 ? '$0.00 (blocked)' : formatUsd(budget.limit_usd) }}
+                    </span>
+                  } @else {
+                    <span class="usage-text">{{ formatUsd(0) }} of unlimited</span>
+                  }
                 </td>
-                <td>{{ cap.reset_at ? formatTime(cap.reset_at) : 'never' }}</td>
+                <td>{{ resetText(budgetOf(period)?.reset_at) }}</td>
                 @if (isAdmin()) {
                   <td class="actions">
-                    <button type="button" class="btn" (click)="openCapEdit(cap)">Edit</button>
-                    <app-delete-confirm
-                      label="Remove"
-                      confirmLabel="Confirm remove"
-                      [pending]="deletingKey() === cap.model_id + '|' + cap.period"
-                      (confirmed)="removeCap(cap)"
-                    />
+                    <ui-field label="USD limit" [controlId]="'budget-' + period">
+                      <input
+                        [id]="'budget-' + period"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        [formControl]="budgetForm.controls[period]"
+                        [attr.aria-label]="'USD limit for ' + period"
+                        placeholder="unlimited"
+                      />
+                    </ui-field>
+                    @if (showBudgetError(period)) {
+                      <p class="field-error" role="alert">Use a number of 0 or more.</p>
+                    }
+                    <ui-button
+                      size="sm"
+                      variant="primary"
+                      [loading]="savingKey() === period"
+                      (clicked)="saveBudget(period)"
+                    >
+                      Save
+                    </ui-button>
+                    @if (budgetOf(period)) {
+                      <ui-button size="sm" variant="danger" (clicked)="openBudgetRemove(period)">
+                        Remove
+                      </ui-button>
+                    }
                   </td>
                 }
               </tr>
             }
           </tbody>
         </table>
+      </ui-table>
+      @if (!isAdmin()) {
+        <p class="note">Limits are managed by an administrator.</p>
       }
-    </section>
+    </ui-card>
+
+    <ui-card class="section-card">
+      <div ui-card-header>Token caps</div>
+      @if (isAdmin()) {
+        <div class="toolbar">
+          <ui-button variant="primary" (clicked)="openCapCreate()">New cap</ui-button>
+        </div>
+      }
+
+      @if (caps().length === 0) {
+        <p class="empty-note">No token caps: every model may use unlimited tokens.</p>
+      } @else {
+        <ui-table>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Period</th>
+                <th scope="col">Usage</th>
+                <th scope="col">Resets</th>
+                @if (isAdmin()) {
+                  <th scope="col"><span class="visually-hidden">Actions</span></th>
+                }
+              </tr>
+            </thead>
+            <tbody>
+              @for (cap of caps(); track cap.model_id + '|' + cap.period) {
+                <tr>
+                  <td>
+                    <code>{{ modelName(cap.model_id) }}</code>
+                  </td>
+                  <td>{{ cap.period }}</td>
+                  <td>
+                    <div
+                      class="progress"
+                      role="progressbar"
+                      [attr.aria-valuenow]="progressPercent(cap.used_tokens, cap.limit_tokens)"
+                      aria-valuemin="0"
+                      aria-valuemax="100"
+                    >
+                      <div
+                        class="progress-fill"
+                        [style.width.%]="progressPercent(cap.used_tokens, cap.limit_tokens)"
+                      ></div>
+                    </div>
+                    <span class="usage-text">
+                      {{ formatTokens(cap.used_tokens) }} of
+                      {{ cap.limit_tokens === 0 ? '0 (blocked)' : formatTokens(cap.limit_tokens) }}
+                      tokens
+                    </span>
+                  </td>
+                  <td>{{ cap.reset_at ? formatTime(cap.reset_at) : 'never' }}</td>
+                  @if (isAdmin()) {
+                    <td class="actions">
+                      <ui-button size="sm" variant="ghost" (clicked)="openCapEdit(cap)">
+                        Edit
+                      </ui-button>
+                      <ui-button size="sm" variant="danger" (clicked)="openCapRemove(cap)">
+                        Remove
+                      </ui-button>
+                    </td>
+                  }
+                </tr>
+              }
+            </tbody>
+          </table>
+        </ui-table>
+      }
+    </ui-card>
+  }
+
+  @if (capFormState(); as state) {
+    <ui-dialog
+      [open]="true"
+      [title]="
+        state.mode === 'create'
+          ? 'New token cap'
+          : 'Edit ' + modelName(state.cap.model_id) + ' (' + state.cap.period + ')'
+      "
+      (closed)="closeCapForm()"
+    >
+      <form [formGroup]="capForm" (ngSubmit)="saveCap()" novalidate>
+        <div class="form-grid">
+          @if (state.mode === 'create') {
+            <ui-field
+              label="Model"
+              [controlId]="'cap-model'"
+              [error]="showCapError('model_id') ? capFieldError('model_id') : ''"
+            >
+              <select id="cap-model" formControlName="model_id">
+                <option value="">Choose a model…</option>
+                @for (model of models(); track model.id) {
+                  <option [value]="model.id">{{ model.canonical_name }}</option>
+                }
+              </select>
+            </ui-field>
+            <ui-field label="Period" [controlId]="'cap-period'">
+              <select id="cap-period" formControlName="period">
+                @for (period of periods; track period) {
+                  <option [value]="period">{{ period }}</option>
+                }
+              </select>
+            </ui-field>
+          }
+          <ui-field
+            label="Token limit"
+            [controlId]="'cap-limit'"
+            [error]="showCapError('limit_tokens') ? capFieldError('limit_tokens') : ''"
+          >
+            <input
+              id="cap-limit"
+              type="number"
+              min="0"
+              step="1"
+              formControlName="limit_tokens"
+              placeholder="0 blocks all use"
+            />
+          </ui-field>
+        </div>
+      </form>
+      <div ui-dialog-actions>
+        <ui-button (clicked)="closeCapForm()">Cancel</ui-button>
+        <ui-button variant="primary" [loading]="savingCap()" (clicked)="saveCap()">Save</ui-button>
+      </div>
+    </ui-dialog>
+  }
+
+  @if (budgetRemoveTarget(); as period) {
+    <ui-dialog [open]="true" title="Remove budget" (closed)="closeBudgetRemove()">
+      <p>
+        Remove the <strong>{{ period }}</strong> budget? The account becomes unlimited for that
+        period until a new limit is set.
+      </p>
+      <div ui-dialog-actions>
+        <ui-button (clicked)="closeBudgetRemove()">Cancel</ui-button>
+        <ui-button
+          variant="danger"
+          [loading]="deletingKey() === period"
+          (clicked)="confirmBudgetRemove()"
+        >
+          Confirm remove
+        </ui-button>
+      </div>
+    </ui-dialog>
+  }
+
+  @if (capRemoveTarget(); as cap) {
+    <ui-dialog [open]="true" title="Remove token cap" (closed)="closeCapRemove()">
+      <p>
+        Remove the {{ cap.period }} cap for <code>{{ modelName(cap.model_id) }}</code>? Token use
+        becomes unlimited until a new cap is set.
+      </p>
+      <div ui-dialog-actions>
+        <ui-button (clicked)="closeCapRemove()">Cancel</ui-button>
+        <ui-button
+          variant="danger"
+          [loading]="deletingKey() === cap.model_id + '|' + cap.period"
+          (clicked)="confirmCapRemove()"
+        >
+          Confirm remove
+        </ui-button>
+      </div>
+    </ui-dialog>
   }
 </div>

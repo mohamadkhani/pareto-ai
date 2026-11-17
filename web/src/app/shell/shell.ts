@@ -1,19 +1,130 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  computed,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
+import { UiBadge } from '../ui/badge';
+import { UiButton } from '../ui/button';
+import { UiIconButton } from '../ui/icon-button';
+import { ThemeService } from '../ui/theme.service';
 
-/** Layout shell around every authenticated route: nav, user info, sign out. */
+/** One navigation entry. `adminOnly` links are hidden from the self-service view. */
+interface NavLink {
+  readonly label: string;
+  readonly path: string;
+  readonly adminOnly: boolean;
+}
+
+/** A labelled group of navigation links. */
+interface NavSection {
+  readonly label: string;
+  readonly links: readonly NavLink[];
+}
+
+/**
+ * The full navigation tree. Admins see every section; a `user` account sees
+ * only the self-service links (API keys, Limits, Usage), which keeps the
+ * non-admin header short and matches the API's access model.
+ */
+const NAV_SECTIONS: readonly NavSection[] = [
+  // D31: one Models page carries the catalog, prices, and quality. Offerings,
+  // Benchmarks, and Price sync no longer have pages or nav links.
+  {
+    label: 'Catalog',
+    links: [
+      { label: 'Providers', path: '/providers', adminOnly: true },
+      { label: 'Models', path: '/models', adminOnly: true },
+    ],
+  },
+  {
+    label: 'Routing',
+    links: [{ label: 'Combos', path: '/combos', adminOnly: true }],
+  },
+  {
+    label: 'Access',
+    links: [
+      { label: 'Users', path: '/users', adminOnly: true },
+      { label: 'Grants', path: '/grants', adminOnly: true },
+      { label: 'API keys', path: '/keys', adminOnly: false },
+      { label: 'Limits', path: '/limits', adminOnly: false },
+    ],
+  },
+  {
+    label: 'Observability',
+    links: [
+      { label: 'Usage', path: '/usage', adminOnly: false },
+      { label: 'Request logs', path: '/logs', adminOnly: true },
+      { label: 'Audit log', path: '/audit', adminOnly: true },
+    ],
+  },
+  {
+    label: 'Development',
+    links: [{ label: 'Styleguide', path: '/styleguide', adminOnly: true }],
+  },
+];
+
+/** Layout shell around every authenticated route: nav, theme, user info, sign out. */
 @Component({
   selector: 'app-shell',
-  imports: [RouterOutlet, RouterLink, RouterLinkActive],
+  imports: [
+    NgTemplateOutlet,
+    RouterOutlet,
+    RouterLink,
+    RouterLinkActive,
+    UiBadge,
+    UiButton,
+    UiIconButton,
+  ],
   templateUrl: './shell.html',
   styleUrl: './shell.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '(document:keydown.escape)': 'onEscape()' },
 })
 export class Shell {
   protected readonly auth = inject(AuthService);
+  protected readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
+
   protected readonly signingOut = signal(false);
+  /** Whether the compact (below ~900px) navigation panel is open. */
+  protected readonly menuOpen = signal(false);
+
+  private readonly menuButton = viewChild<ElementRef<HTMLButtonElement>>('menuButton');
+
+  protected readonly sections = computed<readonly NavSection[]>(() => {
+    const admin = this.auth.isAdmin();
+    return NAV_SECTIONS.map((section) => ({
+      label: section.label,
+      links: section.links.filter((link) => admin || !link.adminOnly),
+    })).filter((section) => section.links.length > 0);
+  });
+
+  /** The icon explains the effective theme; the label names the chosen mode. */
+  protected readonly themeIcon = computed(() => this.theme.mode());
+
+  protected toggleMenu(): void {
+    this.menuOpen.update((open) => !open);
+  }
+
+  protected closeMenu(): void {
+    this.menuOpen.set(false);
+  }
+
+  /** Escape closes the compact panel and returns focus to its toggle. */
+  protected onEscape(): void {
+    if (!this.menuOpen()) {
+      return;
+    }
+    this.closeMenu();
+    this.menuButton()?.nativeElement.focus();
+  }
 
   protected async signOut(): Promise<void> {
     if (this.signingOut()) {

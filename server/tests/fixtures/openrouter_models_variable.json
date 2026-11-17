@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": "openai/priced-model",
+      "name": "OpenAI: Priced Model",
+      "context_length": 128000,
+      "pricing": {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "request": "0"
+      }
+    },
+    {
+      "id": "openrouter/auto",
+      "name": "Auto Router",
+      "pricing": {
+        "prompt": "-1",
+        "completion": "-1"
+      }
+    },
+    {
+      "id": "vendor/half-variable",
+      "name": "Half Variable",
+      "pricing": {
+        "prompt": "-1",
+        "completion": "0.00001"
+      }
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import {
 import { AuthService, type User } from '../auth/auth.service';
 import { CatalogService } from './catalog.service';
 import type { Credential, Price, PriceInput, Provider, SyncOutcome } from './catalog.types';
+import type { ModelsOverview } from './overview.types';
 
 function authStub(): object {
   return {
@@ -33,6 +34,9 @@ const provider: Provider = {
   enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
+  last_discovery_at: null,
+  last_discovery_created: null,
+  last_discovery_unchanged: null,
 };
 
 const credential: Credential = {
@@ -63,6 +67,7 @@ const price: Price = {
   cache_write_per_m: null,
   reasoning_per_m: null,
   request_fee: null,
+  variable_price: false,
   currency: 'USD',
   source: 'manual',
   source_url: null,
@@ -260,6 +265,54 @@ describe('CatalogService', () => {
     expect(call.method).toBe('POST');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
     expect(call.body).toBeNull();
+  });
+
+  it('reads the merged overview for all providers or one provider', async () => {
+    const mix = { profile_id: 'mix-code-agent', profile_name: 'code-agent' };
+    const all: ModelsOverview = { scope: 'all', provider_id: null, mix, rows: [] };
+    const one: ModelsOverview = { scope: 'provider', provider_id: 'p1', mix, rows: [] };
+    fetchMock.respond(jsonResponse(200, all));
+    fetchMock.respond(jsonResponse(200, one));
+    const catalog = TestBed.inject(CatalogService);
+
+    await expect(catalog.modelsOverview(null)).resolves.toEqual(all);
+    await expect(catalog.modelsOverview('p1')).resolves.toEqual(one);
+
+    expect(fetchMock.requests[0].url).toBe('/api/models/overview?provider=all');
+    expect(fetchMock.requests[0].method).toBe('GET');
+    expect(fetchMock.requests[1].url).toBe('/api/models/overview?provider=p1');
+  });
+
+  it('selects a mix profile for the overview when one is given', async () => {
+    const mix = { profile_id: 'mix-chat', profile_name: 'chat' };
+    fetchMock.respond(jsonResponse(200, { scope: 'all', provider_id: null, mix, rows: [] }));
+    const catalog = TestBed.inject(CatalogService);
+
+    await catalog.modelsOverview(null, 'mix-chat');
+
+    expect(fetchMock.requests[0].url).toBe('/api/models/overview?provider=all&mix=mix-chat');
+  });
+
+  it('discovers a provider’s models with a CSRF-protected POST', async () => {
+    const summary = {
+      dry_run: false,
+      credential_id: 'c1',
+      discovered: 2,
+      created_models: 2,
+      created_offerings: 2,
+      updated_offerings: 0,
+      unchanged: 0,
+    };
+    fetchMock.respond(jsonResponse(200, summary));
+    const catalog = TestBed.inject(CatalogService);
+
+    await expect(catalog.discoverModels('p1', { dry_run: true })).resolves.toEqual(summary);
+
+    const call = fetchMock.requests[0];
+    expect(call.url).toBe('/api/providers/p1/discover-models');
+    expect(call.method).toBe('POST');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(call.body).toEqual({ dry_run: true });
   });
 
   it('surfaces the stable error code and message from the envelope', async () => {

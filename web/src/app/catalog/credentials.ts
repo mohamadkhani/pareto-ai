@@ -7,21 +7,36 @@ import {
   input,
   signal,
 } from '@angular/core';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { CatalogService } from './catalog.service';
 import type { Credential, CredentialInput, CredentialPatch, Provider } from './catalog.types';
-import { DeleteConfirm } from './delete-confirm';
 import { describeError } from './errors';
 import { formatAge, formatTime, formatUsd } from './format';
 import { type HeaderRow, HeadersEditor, headerMapOf } from './headers-editor';
-import { nonNegative, positiveInteger } from './validators';
+import { UiBadge, type BadgeTone } from '../ui/badge';
+import { UiBanner, type BannerTone } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiDialog } from '../ui/dialog';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
+import { UiTable } from '../ui/table';
 
-type FormState = { mode: 'create' } | { mode: 'edit'; credential: Credential };
+/** The credential form's text fields; numbers stay strings until saved. */
+interface CredentialDraft {
+  label: string;
+  secret: string;
+  max_concurrency: string;
+  balance_usd: string;
+}
 
 /** One test-probe outcome to surface above the list. */
 interface TestBanner {
-  ok: boolean;
+  tone: BannerTone;
   text: string;
+}
+
+function emptyDraft(): CredentialDraft {
+  return { label: '', secret: '', max_concurrency: '', balance_usd: '' };
 }
 
 /**
@@ -30,7 +45,17 @@ interface TestBanner {
  */
 @Component({
   selector: 'app-credentials',
-  imports: [ReactiveFormsModule, DeleteConfirm, HeadersEditor],
+  imports: [
+    HeadersEditor,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiDialog,
+    UiEmpty,
+    UiField,
+    UiInput,
+    UiTable,
+  ],
   templateUrl: './credentials.html',
   styleUrl: './credentials.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -44,32 +69,41 @@ export class Credentials {
   protected readonly loading = signal(false);
   protected readonly loadError = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
-  protected readonly formState = signal<FormState | null>(null);
+  protected readonly notice = signal<string | null>(null);
+  protected readonly testBanner = signal<TestBanner | null>(null);
+
+  protected readonly formOpen = signal(false);
+  protected readonly editing = signal<Credential | null>(null);
+  protected readonly draft = signal<CredentialDraft>(emptyDraft());
   protected readonly attempted = signal(false);
   protected readonly saving = signal(false);
-  protected readonly deletingId = signal<string | null>(null);
-  protected readonly testingId = signal<string | null>(null);
-  protected readonly testBanner = signal<TestBanner | null>(null);
+  protected readonly formError = signal<string | null>(null);
   protected readonly headerRows = signal<HeaderRow[]>([]);
   protected readonly headersTouched = signal(false);
+
+  protected readonly deleting = signal<Credential | null>(null);
+  protected readonly deletePending = signal(false);
+  protected readonly testingId = signal<string | null>(null);
 
   protected readonly formatTime = formatTime;
   protected readonly formatAge = formatAge;
   protected readonly formatUsd = formatUsd;
 
-  protected readonly form = new FormGroup({
-    label: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
-    secret: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
-    max_concurrency: new FormControl<number | null>(null, { validators: [positiveInteger] }),
-    balance_usd: new FormControl<number | null>(null, { validators: [nonNegative] }),
-  });
+  protected readonly errors = computed<Partial<Record<keyof CredentialDraft, string>>>(() =>
+    validateDraft(this.draft(), this.editing() === null, this.attempted()),
+  );
+
+  protected readonly formTitle = computed(() =>
+    this.editing() === null ? 'New credential' : `Edit ${this.editing()?.label ?? ''}`,
+  );
 
   private readonly providerId = computed(() => this.provider().id);
 
   constructor() {
     effect(() => {
       const providerId = this.providerId();
-      this.formState.set(null);
+      this.formOpen.set(false);
+      this.editing.set(null);
       void this.load(providerId);
     });
   }
@@ -79,36 +113,39 @@ export class Credentials {
   }
 
   protected openCreate(): void {
-    this.form.reset({ label: '', secret: '', max_concurrency: null, balance_usd: null });
-    this.form.controls.secret.setValidators(Validators.required);
-    this.form.controls.secret.updateValueAndValidity();
+    this.editing.set(null);
+    this.draft.set(emptyDraft());
     this.headerRows.set([]);
     this.headersTouched.set(false);
     this.attempted.set(false);
-    this.actionError.set(null);
-    this.formState.set({ mode: 'create' });
+    this.formError.set(null);
+    this.formOpen.set(true);
   }
 
   protected openEdit(credential: Credential): void {
-    this.form.reset({
+    this.editing.set(credential);
+    this.draft.set({
       label: credential.label,
       secret: '',
-      max_concurrency: credential.max_concurrency,
-      balance_usd: credential.balance_usd,
+      max_concurrency:
+        credential.max_concurrency === null ? '' : String(credential.max_concurrency),
+      balance_usd: credential.balance_usd === null ? '' : String(credential.balance_usd),
     });
-    // "Leave blank to keep": the secret is optional while editing.
-    this.form.controls.secret.clearValidators();
-    this.form.controls.secret.updateValueAndValidity();
     // Values are write-only, so rows are seeded with names and empty values.
     this.headerRows.set(credential.header_names.map((name) => ({ name, value: '' })));
     this.headersTouched.set(false);
     this.attempted.set(false);
-    this.actionError.set(null);
-    this.formState.set({ mode: 'edit', credential });
+    this.formError.set(null);
+    this.formOpen.set(true);
   }
 
   protected closeForm(): void {
-    this.formState.set(null);
+    this.formOpen.set(false);
+    this.editing.set(null);
+  }
+
+  protected setDraft(field: keyof CredentialDraft, value: string): void {
+    this.draft.update((draft) => ({ ...draft, [field]: value }));
   }
 
   protected onHeaderRows(rows: HeaderRow[]): void {
@@ -118,25 +155,27 @@ export class Credentials {
 
   protected async save(): Promise<void> {
     this.attempted.set(true);
-    this.actionError.set(null);
-    const state = this.formState();
-    if (state === null || this.form.invalid) {
+    this.formError.set(null);
+    if (Object.keys(validateDraft(this.draft(), this.editing() === null, true)).length > 0) {
       return;
     }
+    const editing = this.editing();
     this.saving.set(true);
     try {
-      if (state.mode === 'create') {
+      if (editing === null) {
         await this.catalog.createCredential(this.providerId(), this.buildInput());
+        this.notice.set('Credential created.');
       } else {
-        const patch = this.buildPatch(state.credential);
+        const patch = this.buildPatch(editing);
         if (Object.keys(patch).length > 0) {
-          await this.catalog.updateCredential(state.credential.id, patch);
+          await this.catalog.updateCredential(editing.id, patch);
+          this.notice.set('Credential saved.');
         }
       }
-      this.formState.set(null);
+      this.closeForm();
       await this.load(this.providerId());
     } catch (err) {
-      this.actionError.set(describeError(err, 'Saving the credential failed.'));
+      this.formError.set(describeError(err, 'Saving the credential failed.'));
     } finally {
       this.saving.set(false);
     }
@@ -149,12 +188,19 @@ export class Credentials {
     try {
       const result = await this.catalog.testCredential(credential.id);
       const tested = formatTime(result.tested_at);
-      this.testBanner.set({
-        ok: result.ok,
-        text: result.ok
-          ? `Probe passed for ${credential.label} (last tested ${tested}).`
-          : `Probe failed for ${credential.label} (last tested ${tested}): ${result.error ?? 'no detail recorded.'}`,
-      });
+      this.testBanner.set(
+        result.ok
+          ? {
+              tone: 'success',
+              text: `Probe passed for ${credential.label} (last tested ${tested}).`,
+            }
+          : {
+              tone: 'danger',
+              text: `Probe failed for ${credential.label} (last tested ${tested}): ${
+                result.error ?? 'no detail recorded.'
+              }`,
+            },
+      );
       await this.load(this.providerId());
     } catch (err) {
       this.actionError.set(describeError(err, 'The credential probe failed.'));
@@ -163,53 +209,48 @@ export class Credentials {
     }
   }
 
-  protected async deleteCredential(credential: Credential): Promise<void> {
-    this.deletingId.set(credential.id);
+  protected askDelete(credential: Credential): void {
+    this.deleting.set(credential);
+  }
+
+  protected closeDelete(): void {
+    this.deleting.set(null);
+  }
+
+  protected async confirmDelete(): Promise<void> {
+    const credential = this.deleting();
+    if (credential === null) {
+      return;
+    }
+    this.deletePending.set(true);
     this.actionError.set(null);
     try {
       await this.catalog.deleteCredential(credential.id);
+      this.deleting.set(null);
+      this.notice.set('Credential deleted.');
       await this.load(this.providerId());
     } catch (err) {
       this.actionError.set(describeError(err, 'Deleting the credential failed.'));
     } finally {
-      this.deletingId.set(null);
+      this.deletePending.set(false);
     }
   }
 
-  protected showError(field: 'label' | 'secret' | 'max_concurrency' | 'balance_usd'): boolean {
-    const control = this.form.controls[field];
-    return control.invalid && (control.touched || this.attempted());
-  }
-
-  protected fieldError(field: 'label' | 'secret' | 'max_concurrency' | 'balance_usd'): string {
-    const control = this.form.controls[field];
-    if (control.hasError('required')) {
-      return field === 'label' ? 'Label is required.' : 'Secret is required.';
-    }
-    if (control.hasError('positiveInteger')) {
-      return 'Use a whole number of 1 or more.';
-    }
-    if (control.hasError('min')) {
-      return 'Cannot be negative.';
-    }
-    return '';
-  }
-
-  protected statusClass(status: Credential['status']): string {
+  protected statusTone(status: Credential['status']): BadgeTone {
     switch (status) {
       case 'ok':
-        return 'ok';
+        return 'success';
       case 'error':
-        return 'error';
+        return 'danger';
       case 'cooldown':
-        return 'warn';
+        return 'warning';
       default:
-        return '';
+        return 'neutral';
     }
   }
 
-  protected sourceClass(source: Credential['balance_source']): string {
-    return source === 'manual' ? 'warn' : source === 'provider_api' ? 'synced' : '';
+  protected sourceTone(source: Credential['balance_source']): BadgeTone {
+    return source === 'manual' ? 'warning' : source === 'provider_api' ? 'info' : 'neutral';
   }
 
   private async load(providerId: string): Promise<void> {
@@ -230,39 +271,76 @@ export class Credentials {
   }
 
   private buildInput(): CredentialInput {
-    const { label, secret, max_concurrency, balance_usd } = this.form.getRawValue();
+    const draft = this.draft();
     return {
-      label: label.trim(),
-      secret,
+      label: draft.label.trim(),
+      secret: draft.secret,
       headers: headerMapOf(this.headerRows()),
-      max_concurrency,
-      balance_usd,
+      max_concurrency: parseWhole(draft.max_concurrency),
+      balance_usd: parseAmount(draft.balance_usd),
       balance_low_threshold: null,
     };
   }
 
   /** Only the fields the admin changed; the secret only when retyped. */
   private buildPatch(credential: Credential): CredentialPatch {
-    const { label, secret, max_concurrency, balance_usd } = this.form.getRawValue();
+    const draft = this.draft();
     const patch: CredentialPatch = {};
-    const trimmed = label.trim();
-    if (trimmed !== credential.label) {
-      patch.label = trimmed;
+    const label = draft.label.trim();
+    if (label !== credential.label) {
+      patch.label = label;
     }
-    if (secret !== '') {
-      patch.secret = secret;
+    if (draft.secret !== '') {
+      patch.secret = draft.secret;
     }
     if (this.headersTouched()) {
       patch.headers = headerMapOf(this.headerRows());
     }
     // Nullable columns cannot be cleared over the wire (null means "keep"), so
     // only concrete values go out.
-    if (max_concurrency !== null && max_concurrency !== credential.max_concurrency) {
-      patch.max_concurrency = max_concurrency;
+    const maxConcurrency = parseWhole(draft.max_concurrency);
+    if (maxConcurrency !== null && maxConcurrency !== credential.max_concurrency) {
+      patch.max_concurrency = maxConcurrency;
     }
-    if (balance_usd !== null && balance_usd !== credential.balance_usd) {
-      patch.balance_usd = balance_usd;
+    const balance = parseAmount(draft.balance_usd);
+    if (balance !== null && balance !== credential.balance_usd) {
+      patch.balance_usd = balance;
     }
     return patch;
   }
+}
+
+/** Validates the form fields; `creating` makes the secret mandatory. */
+function validateDraft(
+  draft: CredentialDraft,
+  creating: boolean,
+  attempted: boolean,
+): Partial<Record<keyof CredentialDraft, string>> {
+  const errors: Partial<Record<keyof CredentialDraft, string>> = {};
+  if (!attempted) {
+    return errors;
+  }
+  if (draft.label.trim() === '') {
+    errors.label = 'Label is required.';
+  }
+  if (creating && draft.secret === '') {
+    errors.secret = 'Secret is required.';
+  }
+  const concurrency = draft.max_concurrency.trim();
+  if (concurrency !== '' && (!/^\d+$/.test(concurrency) || Number(concurrency) < 1)) {
+    errors.max_concurrency = 'Use a whole number of 1 or more.';
+  }
+  const balance = draft.balance_usd.trim();
+  if (balance !== '' && (!Number.isFinite(Number(balance)) || Number(balance) < 0)) {
+    errors.balance_usd = 'Cannot be negative.';
+  }
+  return errors;
+}
+
+function parseWhole(value: string): number | null {
+  return value.trim() === '' ? null : Number(value);
+}
+
+function parseAmount(value: string): number | null {
+  return value.trim() === '' ? null : Number(value);
 }

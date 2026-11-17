@@ -160,6 +160,12 @@ impl ApiError {
         )
     }
 
+    /// 502: every requested upstream source failed; the run rows record the
+    /// per-source reasons.
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "upstream_failed", message)
+    }
+
     /// Any taxonomy error the named constructors do not cover, e.g. the
     /// upstream failure classes of the chat data plane. `code` must be one of
     /// the documented `error.code` values; `message` must not carry internals

@@ -2,134 +2,285 @@
   <header class="page-head">
     <h1>Providers</h1>
     <p class="hint">
-      Register OpenAI-compatible upstreams, then attach credentials to each provider.
+      Register OpenAI-compatible upstreams, attach credentials, and load each provider's models into
+      the catalogue. Loading is a preview first, then an idempotent apply.
     </p>
   </header>
 
   @if (forbidden()) {
-    <div class="card">
-      <h2>Forbidden</h2>
-      <p class="empty-note">Providers are restricted to administrators.</p>
-    </div>
+    <ui-empty title="Forbidden" description="Providers are restricted to administrators." />
   } @else {
     @if (actionError()) {
-      <div class="banner error" role="alert">{{ actionError() }}</div>
+      <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+        {{ actionError() }}
+      </ui-banner>
+    }
+    @if (notice()) {
+      <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+        {{ notice() }}
+      </ui-banner>
     }
 
-    <div class="toolbar">
-      <button type="button" class="btn primary" (click)="openCreate()">New provider</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    <div class="page-toolbar">
+      <ui-button variant="primary" (clicked)="openCreate()">New provider</ui-button>
+      <span class="toolbar-spacer"></span>
+      <ui-button [disabled]="loading()" [loading]="loading()" (clicked)="reload()">
+        Refresh
+      </ui-button>
     </div>
 
-    @if (formState(); as state) {
-      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
-        <h2>{{ state.mode === 'create' ? 'New provider' : 'Edit ' + state.provider.name }}</h2>
-        <div class="form-grid">
-          <div class="field">
-            <label for="provider-name">Name</label>
-            <input id="provider-name" type="text" formControlName="name" placeholder="openrouter" />
-            @if (showError('name')) {
-              <p class="field-error" role="alert">{{ fieldError('name') }}</p>
-            }
-          </div>
-          <div class="field">
-            <label for="provider-base-url">Base URL</label>
-            <input
-              id="provider-base-url"
-              type="text"
-              formControlName="base_url"
-              placeholder="https://api.example.com/v1"
-            />
-            @if (showError('base_url')) {
-              <p class="field-error" role="alert">{{ fieldError('base_url') }}</p>
-            }
-          </div>
-          <div class="field">
-            <label for="provider-kind">Kind</label>
-            <select id="provider-kind" formControlName="kind">
-              <option value="openai_compatible">openai_compatible</option>
-            </select>
-          </div>
-        </div>
-        <div class="form-actions">
-          <button type="submit" class="btn primary" [disabled]="saving()">
-            {{ saving() ? 'Saving…' : 'Save' }}
-          </button>
-          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
-        </div>
-      </form>
-    }
-
     @if (loadError()) {
-      <div class="banner error" role="alert">
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
         {{ loadError() }}
-        <button type="button" class="btn" (click)="reload()">Try again</button>
-      </div>
+      </ui-banner>
     } @else if (loading() && providers().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (providers().length === 0) {
-      <div class="card">
-        <h2>No providers yet</h2>
-        <p class="empty-note">Register your first upstream to start building the catalog.</p>
-      </div>
+      <ui-empty
+        title="No providers yet"
+        description="Register your first upstream to start building the catalog."
+      >
+        <span ui-empty-action>
+          <ui-button variant="primary" size="sm" (clicked)="openCreate()">New provider</ui-button>
+        </span>
+      </ui-empty>
     } @else {
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th scope="col">Name</th>
-            <th scope="col">Base URL</th>
-            <th scope="col">Kind</th>
-            <th scope="col">Enabled</th>
-            <th scope="col"><span class="visually-hidden">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (provider of providers(); track provider.id) {
-            <tr [class.selected]="selected()?.id === provider.id">
-              <td>{{ provider.name }}</td>
-              <td>
-                <code>{{ provider.base_url }}</code>
-              </td>
-              <td>{{ provider.kind }}</td>
-              <td>
-                <span class="badge {{ provider.enabled ? 'ok' : 'warn' }}">
-                  {{ provider.enabled ? 'enabled' : 'disabled' }}
-                </span>
-              </td>
-              <td class="actions">
-                <button type="button" class="btn" (click)="select(provider)">
-                  {{ selected()?.id === provider.id ? 'Hide credentials' : 'Credentials' }}
-                </button>
-                <button type="button" class="btn" (click)="openEdit(provider)">Edit</button>
-                <button
-                  type="button"
-                  class="btn"
-                  (click)="toggleEnabled(provider)"
-                  [disabled]="togglingId() !== null"
-                >
-                  {{ provider.enabled ? 'Disable' : 'Enable' }}
-                </button>
-                <app-delete-confirm
-                  [pending]="deletingId() === provider.id"
-                  (confirmed)="deleteProvider(provider)"
-                />
-              </td>
+      <ui-table>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Provider</th>
+              <th scope="col">Base URL</th>
+              <th scope="col">Kind</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="num">Credentials</th>
+              <th scope="col" class="num">Offerings</th>
+              <th scope="col">Last load</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
             </tr>
-          }
-        </tbody>
-      </table>
-    }
-
-    @if (selected(); as provider) {
-      <section class="credentials">
-        <div class="toolbar">
-          <h2>Credentials — {{ provider.name }}</h2>
-          <span class="spacer"></span>
-          <button type="button" class="btn" (click)="clearSelection()">Close</button>
-        </div>
-        <app-credentials [provider]="provider" />
-      </section>
+          </thead>
+          <tbody>
+            @for (provider of providers(); track provider.id) {
+              <tr [class.is-selected]="selectedId() === provider.id">
+                <td>
+                  <span class="provider-name">{{ provider.name }}</span>
+                </td>
+                <td>
+                  <code>{{ provider.base_url }}</code>
+                </td>
+                <td>
+                  <code>{{ provider.kind }}</code>
+                </td>
+                <td>
+                  <ui-badge [tone]="provider.enabled ? 'success' : 'neutral'">
+                    {{ provider.enabled ? 'enabled' : 'disabled' }}
+                  </ui-badge>
+                </td>
+                <td class="num">{{ credentialCount(provider.id) }}</td>
+                <td class="num">{{ offeringCount(provider.id) }}</td>
+                <td class="last-load">{{ discoveryLabel(provider) }}</td>
+                <td class="actions">
+                  <ui-button size="sm" (clicked)="openDiscovery(provider)">Load models</ui-button>
+                  <ui-button size="sm" variant="ghost" (clicked)="toggleSelected(provider)">
+                    {{ selectedId() === provider.id ? 'Hide credentials' : 'Credentials' }}
+                  </ui-button>
+                  <ui-button size="sm" variant="ghost" (clicked)="openEdit(provider)">
+                    Edit
+                  </ui-button>
+                  <ui-button
+                    size="sm"
+                    variant="ghost"
+                    [disabled]="togglingId() !== null"
+                    (clicked)="toggleEnabled(provider)"
+                  >
+                    {{ provider.enabled ? 'Disable' : 'Enable' }}
+                  </ui-button>
+                  <ui-button size="sm" variant="danger" (clicked)="askDelete(provider)">
+                    Delete
+                  </ui-button>
+                </td>
+              </tr>
+              @if (selectedId() === provider.id) {
+                <tr class="credentials-row">
+                  <td colspan="8">
+                    <section
+                      class="credentials-panel"
+                      [attr.aria-label]="'Credentials — ' + provider.name"
+                    >
+                      <div class="credentials-head">
+                        <h2>Credentials — {{ provider.name }}</h2>
+                      </div>
+                      <app-credentials [provider]="provider" />
+                    </section>
+                  </td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </ui-table>
     }
   }
 </div>
+
+<ui-dialog [open]="formState() !== null" [title]="formTitle()" (closed)="closeForm()">
+  @if (formError()) {
+    <ui-banner tone="danger">{{ formError() }}</ui-banner>
+  }
+  <div class="form-stack">
+    <ui-field label="Name" [error]="errors().name ?? ''">
+      <ui-input
+        [id]="'provider-name'"
+        placeholder="openrouter"
+        [value]="draft().name"
+        (valueChange)="setName($event)"
+      />
+    </ui-field>
+    <ui-field
+      label="Base URL"
+      [error]="errors().base_url ?? ''"
+      hint="The OpenAI-compatible base, for example https://api.example.com/v1."
+    >
+      <ui-input
+        [id]="'provider-base-url'"
+        type="url"
+        placeholder="https://api.example.com/v1"
+        [value]="draft().base_url"
+        (valueChange)="setBaseUrl($event)"
+      />
+    </ui-field>
+    <ui-field label="Kind" hint="Only OpenAI-compatible upstreams are supported today.">
+      <ui-select [id]="'provider-kind'" [value]="draft().kind" (valueChange)="setKind($event)">
+        <option value="openai_compatible">openai_compatible</option>
+      </ui-select>
+    </ui-field>
+    @if (formState()?.mode === 'edit') {
+      <ui-field label="Enabled" hint="Disabled providers are skipped by routing.">
+        <ui-switch
+          label="Provider enabled"
+          [checked]="draft().enabled"
+          (checkedChange)="setEnabled($event)"
+        />
+      </ui-field>
+    }
+  </div>
+  <div ui-dialog-actions>
+    <ui-button variant="primary" [loading]="saving()" (clicked)="save()">Save</ui-button>
+    <ui-button variant="ghost" (clicked)="closeForm()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="deleting() !== null" title="Delete provider" (closed)="closeDelete()">
+  @if (deleting(); as provider) {
+    <p>
+      Delete <strong>{{ provider.name }}</strong> and everything under it — credentials, offerings,
+      and their prices? This cannot be undone.
+    </p>
+  }
+  <div ui-dialog-actions>
+    <ui-button variant="danger" [loading]="deletePending()" (clicked)="confirmDelete()">
+      Delete provider
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeDelete()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog
+  [open]="discovery() !== null"
+  [title]="'Load models — ' + (discovery()?.provider?.name ?? '')"
+  (closed)="closeDiscovery()"
+>
+  @if (discovery(); as state) {
+    @if (state.credentials.length === 0) {
+      <ui-banner tone="warning">
+        This provider has no credentials yet. Add one below before loading models.
+      </ui-banner>
+    } @else {
+      <ui-field
+        label="Credential"
+        hint="The first active credential is selected; another may be used for this run."
+      >
+        <ui-select
+          [id]="'discovery-credential'"
+          [value]="state.credentialId"
+          (valueChange)="setDiscoveryCredential($event)"
+        >
+          @for (credential of state.credentials; track credential.id) {
+            <option [value]="credential.id">
+              {{ credential.label }} ({{ credential.status }})
+            </option>
+          }
+        </ui-select>
+      </ui-field>
+    }
+
+    <p class="note">
+      Preview reads the provider's <code>/models</code> endpoint and shows what would change. Apply
+      writes canonical models and offerings; manual edits, overrides, enabled flags, and prices are
+      never overwritten.
+    </p>
+
+    @if (state.error) {
+      <ui-banner tone="danger">{{ state.error }}</ui-banner>
+    }
+
+    @if (state.preview; as preview) {
+      <div class="discovery-summary">
+        <h3>Preview (no changes written)</h3>
+        <dl class="counts">
+          <div>
+            <dt>Discovered</dt>
+            <dd>{{ preview.discovered }}</dd>
+          </div>
+          <div>
+            <dt>New models</dt>
+            <dd>{{ preview.created_models }}</dd>
+          </div>
+          <div>
+            <dt>New offerings</dt>
+            <dd>{{ preview.created_offerings }}</dd>
+          </div>
+          <div>
+            <dt>Updated offerings</dt>
+            <dd>{{ preview.updated_offerings }}</dd>
+          </div>
+          <div>
+            <dt>Unchanged</dt>
+            <dd>{{ preview.unchanged }}</dd>
+          </div>
+        </dl>
+      </div>
+    }
+
+    @if (state.applied; as applied) {
+      <ui-banner tone="success">
+        Applied: {{ applied.discovered }} discovered · {{ applied.created_models }} new models ·
+        {{ applied.created_offerings }} new offerings · {{ applied.updated_offerings }} updated ·
+        {{ applied.unchanged }} unchanged.
+      </ui-banner>
+      <p class="note">
+        <a [routerLink]="['/models']" [queryParams]="{ provider: state.provider.id }">
+          View models for {{ state.provider.name }}
+        </a>
+      </p>
+    }
+  }
+  <div ui-dialog-actions>
+    <ui-button
+      [disabled]="discovery()?.credentials?.length === 0"
+      [loading]="discovery()?.running === 'preview'"
+      (clicked)="runDiscovery(true)"
+    >
+      Preview
+    </ui-button>
+    <ui-button
+      variant="primary"
+      [disabled]="discovery()?.preview === null || discovery()?.credentials?.length === 0"
+      [loading]="discovery()?.running === 'apply'"
+      (clicked)="runDiscovery(false)"
+    >
+      Apply
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeDiscovery()">Close</ui-button>
+  </div>
+</ui-dialog>

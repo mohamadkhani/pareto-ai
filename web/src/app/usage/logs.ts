@@ -4,6 +4,13 @@ import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime, formatUsd } from '../catalog/format';
 import { DecisionPanel } from '../routing/decision-panel';
 import { parseDecision } from '../routing/routing.types';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiSelect } from '../ui/select';
+import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { UsageService } from './usage.service';
@@ -14,7 +21,7 @@ const PAGE_SIZE = 50;
 /** The request log: metadata and settled usage, never bodies. Admin only. */
 @Component({
   selector: 'app-logs',
-  imports: [DecisionPanel],
+  imports: [DecisionPanel, UiBadge, UiBanner, UiButton, UiEmpty, UiField, UiSelect, UiTable],
   templateUrl: './logs.html',
   styleUrl: './logs.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -101,12 +108,8 @@ export class Logs {
     }
   }
 
-  protected onUserFilterChange(event: Event): void {
-    const select = event.target;
-    if (!(select instanceof HTMLSelectElement)) {
-      return;
-    }
-    this.userFilter.set(select.value);
+  protected onUserFilterChange(value: string): void {
+    this.userFilter.set(value);
     void this.reload();
   }
 

@@ -118,12 +118,18 @@ pub async fn chat_completions(
     // UUID); the client's echo goes only into `client_request_id` (review B1).
     let rid = error::request_id(req.headers()).or_else(|| Some(uuid::Uuid::new_v4().to_string()));
     let client_rid = crate::request_id::client_request_id(req.extensions());
+    let session_hint = req
+        .headers()
+        .get("x-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let meta = chat::RequestMeta {
         request_id: rid.clone().unwrap_or_default(),
         client_request_id: client_rid,
         user_id: caller.user_id,
         role: caller.role,
         api_key: caller.api_key,
+        session_hint,
         started_at: crate::catalog::now_ts(),
         method: "POST".to_string(),
         path: "/v1/chat/completions".to_string(),

@@ -175,7 +175,7 @@ describe('Audit', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.querySelector('.state.error')?.textContent).toContain(
+    expect(root.querySelector('.ui-banner.tone-danger')?.textContent).toContain(
       'Reading the audit log failed.',
     );
   });

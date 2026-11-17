@@ -59,6 +59,25 @@ Rules for every agent working in this repository. They are enforced by
 - Services call the backend through `fetch` with `credentials: 'include'`;
   state-changing calls send the `X-CSRF-Token` header.
 
+### UI (admin console)
+
+- **No component library.** Primitives live in `web/src/app/ui/` (see D28);
+  use them instead of raw markup for buttons, fields, dialogs, badges, tables.
+- **Tokens only.** Colors, spacing, radius, type, shadows come from
+  `web/src/styles/tokens.css`; no hard-coded colors or sizes in components.
+- **Every primitive and state appears on `/styleguide`** before it is used.
+  When you add a primitive or a variant, add it there in the same change.
+- **Pages do not restyle primitives** — only tokens and variants. Light and
+  dark themes must both be checked (D30).
+- Accessibility is part of done: keyboard-operable, visible focus, labelled
+  controls, correct `aria-*`.
+- **Browser verification is required for UI changes.** Use the Firefox tools:
+  assert through `take_snapshot` and `evaluate_script` (text, no images), and
+  save screenshots with `screenshot_page({saveTo})` so only a file path comes
+  back. Never attach more than 2 inline images per turn — that limit is what
+  broke an earlier agent. Check light and dark themes and one mobile width
+  (~390px) for the shell.
+
 ## API
 
 - `/v1/*` is the OpenAI-compatible data plane (API-key auth).

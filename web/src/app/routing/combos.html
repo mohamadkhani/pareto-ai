@@ -4,263 +4,444 @@
     <p class="hint">
       Named pools of offerings, addressable as <code>combo:&lt;name&gt;</code> in
       <code>/v1/chat/completions</code>. The strategy picks the ordering; the stored member order is
-      the fallback chain for <code>ordered</code>.
+      the fallback chain for <code>ordered</code> and the rotation for <code>round_robin</code>.
     </p>
   </header>
 
   @if (forbidden()) {
-    <div class="card">
-      <h2>Forbidden</h2>
-      <p class="empty-note">Combos are restricted to administrators.</p>
-    </div>
+    <ui-card>
+      <div ui-card-header>Access</div>
+      <ui-banner tone="warning"> Forbidden — combos are restricted to administrators. </ui-banner>
+    </ui-card>
   } @else {
     @if (actionError()) {
-      <div class="banner error" role="alert">{{ actionError() }}</div>
+      <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+        {{ actionError() }}
+      </ui-banner>
     }
     @if (notice()) {
-      <div class="banner success" role="status">{{ notice() }}</div>
+      <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+        {{ notice() }}
+      </ui-banner>
     }
 
-    <div class="toolbar">
-      <button type="button" class="btn primary" (click)="openCreate()">New combo</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    <div class="combos-toolbar">
+      <ui-button variant="primary" (clicked)="openCreate()">New combo</ui-button>
+      <span class="toolbar-spacer"></span>
+      <ui-button [loading]="loading()" (clicked)="reload()">Refresh</ui-button>
     </div>
 
-    @if (formState(); as state) {
-      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
-        <h2>{{ state.mode === 'create' ? 'New combo' : 'Edit combo' }}</h2>
-        <div class="form-grid">
-          <div class="field">
-            <label for="combo-name">Name</label>
-            <input id="combo-name" type="text" formControlName="name" placeholder="shared-fast" />
-            <p class="note">
-              Requests address the combo as <code>combo:&lt;name&gt;</code>; the name cannot change
-              after creation.
-            </p>
-            @if (showError('name')) {
-              <p class="field-error" role="alert">{{ fieldError('name') }}</p>
+    @if (loadError()) {
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
+        {{ loadError() }}
+      </ui-banner>
+    } @else if (loading() && combos().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else if (combos().length === 0) {
+      <ui-empty
+        title="No combos yet"
+        description="A combo pools offerings under one name and is addressable as combo:<name>. Add offerings on the Models page, then create a combo here."
+      >
+        <span ui-empty-action>
+          <a class="empty-link" routerLink="/models">Go to Models</a>
+        </span>
+      </ui-empty>
+    } @else {
+      <ui-table>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Pool</th>
+              <th scope="col">Strategy</th>
+              <th scope="col">Preset / weights</th>
+              <th scope="col" class="num">Members</th>
+              <th scope="col">Stickiness</th>
+              <th scope="col">Enabled</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (combo of combos(); track combo.id) {
+              <tr>
+                <td>
+                  <code>combo:{{ combo.name }}</code>
+                  <span class="mix-profile">mix: {{ mixProfileName(combo) }}</span>
+                </td>
+                <td>
+                  @if (combo.pool === 'all') {
+                    <ui-badge tone="accent">all models</ui-badge>
+                    <span class="pool-summary">{{ constraintSummary(combo) }}</span>
+                  } @else {
+                    <ui-badge tone="neutral">members</ui-badge>
+                  }
+                </td>
+                <td>
+                  <ui-badge [tone]="strategyTone(combo.strategy)">{{ combo.strategy }}</ui-badge>
+                </td>
+                <td>
+                  <div class="weights-cell">
+                    <ui-badge [tone]="combo.preset === null ? 'neutral' : 'accent'">{{
+                      weightsLabel(combo)
+                    }}</ui-badge>
+                    <span class="weights-summary">{{ weightsSummary(combo) }}</span>
+                  </div>
+                </td>
+                <td class="num">{{ combo.pool === 'members' ? combo.members.length : '—' }}</td>
+                <td>
+                  <ui-badge [tone]="combo.stickiness.enabled ? 'info' : 'neutral'">{{
+                    stickinessLabel(combo)
+                  }}</ui-badge>
+                </td>
+                <td>
+                  <ui-switch
+                    [checked]="combo.enabled"
+                    [disabled]="togglingId() !== null"
+                    [label]="combo.enabled ? 'Enabled' : 'Disabled'"
+                    (checkedChange)="toggleEnabled(combo, $event)"
+                  />
+                </td>
+                <td class="actions">
+                  <ui-button size="sm" variant="ghost" (clicked)="previewSaved(combo)"
+                    >Preview</ui-button
+                  >
+                  <ui-button size="sm" variant="ghost" (clicked)="openEdit(combo)">Edit</ui-button>
+                  <ui-button size="sm" variant="ghost" (clicked)="askDelete(combo)"
+                    >Delete</ui-button
+                  >
+                </td>
+              </tr>
             }
-          </div>
-          <div class="field">
-            <label for="combo-strategy">Strategy</label>
-            <select id="combo-strategy" formControlName="strategy">
-              <option value="ordered">ordered</option>
-              <option value="weighted">weighted</option>
-              <option value="round_robin">round_robin</option>
-            </select>
-            <p class="note">{{ strategyHint() }}</p>
-          </div>
-          <div class="checkbox-field">
-            <input id="combo-enabled" type="checkbox" formControlName="enabled" />
-            <label for="combo-enabled">Enabled</label>
-          </div>
-        </div>
+          </tbody>
+        </table>
+      </ui-table>
+    }
+  }
+</div>
 
-        @if (form.controls.strategy.value === 'weighted') {
-          <div class="weights">
+<ui-dialog [open]="formState() !== null" [title]="formTitle()" (closed)="closeForm()">
+  @if (formState(); as state) {
+    <form (submit)="onSubmit($event)" novalidate>
+      <div class="form-stack">
+        <ui-field
+          label="Name"
+          controlId="combo-name"
+          [error]="nameError()"
+          hint="Requests address the combo as combo:<name>; the name cannot change after creation."
+        >
+          <ui-input
+            [value]="draft().name"
+            [readonly]="state.mode === 'edit'"
+            placeholder="shared-fast"
+            (valueChange)="setName($event)"
+          />
+        </ui-field>
+
+        <section class="form-section">
+          <h3>Pool</h3>
+          <p class="note">
+            A members list is fixed; an all-models pool resolves the catalog per request after
+            grants, budgets, and breakers (D35).
+          </p>
+          <ui-tabs
+            [tabs]="poolTabs"
+            [selected]="draft().pool"
+            label="Combo pool"
+            (selectedChange)="setPool($event)"
+          >
+            @if (catalogPool()) {
+              <div class="constraint-grid">
+                <ui-field
+                  label="Minimum quality"
+                  controlId="combo-min-quality"
+                  hint="Inclusive; the resolved score (override > benchmark > default). Leave blank for no floor."
+                >
+                  <ui-input
+                    type="number"
+                    inputmode="decimal"
+                    [value]="draft().minQuality"
+                    placeholder="unconstrained"
+                    (valueChange)="setMinQuality($event)"
+                  />
+                </ui-field>
+                <ui-field
+                  label="Maximum mix price ($/M)"
+                  controlId="combo-max-mix-price"
+                  hint="Inclusive; an offering with an unknown mix price cannot pass this cap and is excluded."
+                >
+                  <ui-input
+                    type="number"
+                    inputmode="decimal"
+                    [value]="draft().maxMixPrice"
+                    placeholder="unconstrained"
+                    (valueChange)="setMaxMixPrice($event)"
+                  />
+                </ui-field>
+              </div>
+              <p class="note">
+                At least one constraint is required: an unconstrained “everything” combo is almost
+                always a mistake.
+              </p>
+              @if (constraintError()) {
+                <p class="field-error" role="alert">{{ constraintError() }}</p>
+              }
+            } @else {
+              <p class="note">
+                Switch to all models to let the gateway pick from the whole catalog by rule instead
+                of a fixed list.
+              </p>
+            }
+          </ui-tabs>
+        </section>
+
+        <ui-field label="Strategy" controlId="combo-strategy" [hint]="strategyHint()">
+          <ui-select [value]="draft().strategy" (valueChange)="setStrategy($event)">
+            @for (strategy of strategies; track strategy) {
+              <option [value]="strategy" [disabled]="catalogPool() && strategy !== 'weighted'">
+                {{ strategyLabels[strategy] }}
+              </option>
+            }
+          </ui-select>
+        </ui-field>
+
+        <ui-switch
+          [checked]="draft().enabled"
+          label="Enabled"
+          (checkedChange)="setEnabled($event)"
+        />
+
+        @if (showWeights()) {
+          <section class="form-section">
             <h3>Scoring weights</h3>
-            <div class="field">
-              <label for="combo-weights-mode">Weights</label>
-              <select id="combo-weights-mode" formControlName="weights_mode">
+            <ui-field
+              label="Weights"
+              controlId="combo-weights-mode"
+              [error]="weightsError()"
+              hint="Presets are pure orders (D24): cheapest, fastest and best rank by one component with no health penalties — balanced and custom weights also subtract health penalties. Filters (capability, budget, breaker) run before any ordering."
+            >
+              <ui-select [value]="draft().weightsMode" (valueChange)="setWeightsMode($event)">
                 <option value="balanced">balanced (default)</option>
                 <option value="cheapest">cheapest</option>
                 <option value="fastest">fastest</option>
                 <option value="best">best</option>
                 <option value="custom">custom</option>
-              </select>
-              <p class="note">
-                Presets are pure orders (decision D24): <code>cheapest</code>, <code>fastest</code>,
-                and <code>best</code> rank by one component with no health penalties —
-                <code>balanced</code> and custom weights also subtract health penalties. In every
-                case the filters (capability, budget, breaker) run before any ordering.
-              </p>
-            </div>
-            @if (form.controls.weights_mode.value === 'custom') {
-              <div class="form-grid">
-                <div class="field">
-                  <label for="combo-weight-price">Price</label>
-                  <input
-                    id="combo-weight-price"
-                    type="number"
-                    min="0"
-                    step="0.05"
-                    formControlName="price"
-                  />
-                </div>
-                <div class="field">
-                  <label for="combo-weight-speed">Speed</label>
-                  <input
-                    id="combo-weight-speed"
-                    type="number"
-                    min="0"
-                    step="0.05"
-                    formControlName="speed"
-                  />
-                </div>
-                <div class="field">
-                  <label for="combo-weight-quality">Quality</label>
-                  <input
-                    id="combo-weight-quality"
-                    type="number"
-                    min="0"
-                    step="0.05"
-                    formControlName="quality"
-                  />
-                </div>
-                <div class="field">
-                  <label for="combo-weight-reliability">Reliability</label>
-                  <input
-                    id="combo-weight-reliability"
-                    type="number"
-                    min="0"
-                    step="0.05"
-                    formControlName="reliability"
-                  />
-                </div>
+              </ui-select>
+            </ui-field>
+
+            @if (draft().weightsMode === 'custom') {
+              <div class="weight-grid">
+                @for (field of weightFields; track field) {
+                  <ui-field [label]="weightLabels[field]" [controlId]="'combo-weight-' + field">
+                    <ui-input
+                      type="number"
+                      inputmode="decimal"
+                      [value]="draft().weights[field].toString()"
+                      (valueChange)="setWeight(field, $event)"
+                    />
+                  </ui-field>
+                }
               </div>
               <p class="note">
                 Weights are relative — they do not need to sum to 1 — but at least one must be above
                 zero.
               </p>
-              @if (attempted() && customWeightsInvalid()) {
-                <p class="field-error" role="alert">At least one weight must be above zero.</p>
-              }
             }
-          </div>
+          </section>
         }
 
-        <div class="members">
-          <h3>Members</h3>
-          <p class="note">Members are offerings (one provider's take on one model).</p>
-          @if (members().length > 0) {
-            <ol class="member-list">
-              @for (member of members(); track member.offering_id; let i = $index) {
-                <li class="member-row">
-                  <span class="order">{{ i + 1 }}</span>
-                  <span class="label">{{ offeringLabel(member.offering_id) }}</span>
-                  <label class="weight">
-                    <span class="visually-hidden">Member weight</span>
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.1"
-                      [value]="member.weight"
-                      [attr.aria-label]="'Member weight for ' + offeringLabel(member.offering_id)"
-                      (change)="setMemberWeight(i, $event)"
-                    />
-                  </label>
-                  <button
-                    type="button"
-                    class="btn"
-                    (click)="moveMember(i, -1)"
-                    [disabled]="i === 0"
-                  >
-                    Up
-                  </button>
-                  <button
-                    type="button"
-                    class="btn"
-                    (click)="moveMember(i, 1)"
-                    [disabled]="i === members().length - 1"
-                  >
-                    Down
-                  </button>
-                  <button type="button" class="btn danger" (click)="removeMember(i)">Remove</button>
-                </li>
-              }
-            </ol>
-          }
-          <div class="field add-member">
-            <label for="combo-member-picker">Add offering</label>
-            <select id="combo-member-picker" value="" (change)="addMember($event)">
-              <option value="">Choose an offering…</option>
-              @for (offering of addableOfferings(); track offering.id) {
-                <option [value]="offering.id">{{ offeringLabel(offering.id) }}</option>
-              }
-            </select>
-          </div>
-          @if (attempted() && members().length === 0) {
-            <p class="field-error" role="alert">Add at least one member offering.</p>
-          }
-          @if (attempted() && members().length > 0 && memberWeightsInvalid()) {
-            <p class="field-error" role="alert">Member weights must be positive numbers.</p>
-          }
-        </div>
+        @if (!catalogPool()) {
+          <section class="form-section">
+            <h3>Members</h3>
+            <p class="note">
+              Members are offerings (one provider's take on one model). The stored order is the
+              fallback chain for <code>ordered</code> and the rotation for <code>round_robin</code>;
+              the weight multiplies a member's score under <code>weighted</code>.
+            </p>
 
-        <div class="form-actions">
-          <button type="submit" class="btn primary" [disabled]="saving()">
-            {{ saving() ? 'Saving…' : 'Save' }}
-          </button>
-          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
-        </div>
-      </form>
-    }
-
-    @if (loadError()) {
-      <div class="banner error" role="alert">
-        {{ loadError() }}
-        <button type="button" class="btn" (click)="reload()">Try again</button>
-      </div>
-    } @else if (loading() && combos().length === 0) {
-      <p class="empty-note">Loading…</p>
-    } @else if (combos().length === 0) {
-      <div class="card">
-        <h2>No combos yet</h2>
-        <p class="empty-note">
-          A combo pools offerings and is addressable as <code>combo:&lt;name&gt;</code>.
-        </p>
-      </div>
-    } @else {
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th scope="col">Name</th>
-            <th scope="col">Strategy</th>
-            <th scope="col">Members</th>
-            <th scope="col">Enabled</th>
-            <th scope="col"><span class="visually-hidden">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (combo of combos(); track combo.id) {
-            <tr>
-              <td>
-                <code>combo:{{ combo.name }}</code>
-              </td>
-              <td>
-                <span class="badge" [class.ok]="combo.strategy === 'weighted'">
-                  {{ combo.strategy }}
-                </span>
-                @if (combo.preset; as preset) {
-                  <span class="badge">{{ preset }}</span>
+            @if (members().length > 0) {
+              <ol class="member-list">
+                @for (member of members(); track member.offering_id; let i = $index) {
+                  <li class="member-row">
+                    <div class="member-head">
+                      <span class="order">{{ i + 1 }}</span>
+                      <span class="member-label">{{ offeringLabel(member.offering_id) }}</span>
+                    </div>
+                    <div class="member-controls">
+                      <div class="member-weight">
+                        <ui-field label="Weight">
+                          <ui-input
+                            type="number"
+                            inputmode="decimal"
+                            [value]="member.weight.toString()"
+                            (valueChange)="setMemberWeight(i, $event)"
+                          />
+                        </ui-field>
+                      </div>
+                      <ui-button
+                        size="sm"
+                        variant="ghost"
+                        [disabled]="i === 0"
+                        (clicked)="moveMember(i, -1)"
+                        >Up</ui-button
+                      >
+                      <ui-button
+                        size="sm"
+                        variant="ghost"
+                        [disabled]="i === members().length - 1"
+                        (clicked)="moveMember(i, 1)"
+                        >Down</ui-button
+                      >
+                      <ui-button size="sm" variant="ghost" (clicked)="removeMember(i)"
+                        >Remove</ui-button
+                      >
+                    </div>
+                  </li>
                 }
-              </td>
-              <td>{{ combo.members.length }}</td>
-              <td>
-                <span class="badge {{ combo.enabled ? 'ok' : 'warn' }}">
-                  {{ combo.enabled ? 'enabled' : 'disabled' }}
-                </span>
-              </td>
-              <td class="actions">
-                <button type="button" class="btn" (click)="openEdit(combo)">Edit</button>
-                <button
-                  type="button"
-                  class="btn"
-                  (click)="toggleEnabled(combo)"
-                  [disabled]="togglingId() !== null"
+              </ol>
+            }
+
+            <ui-field label="Add offering" controlId="combo-member-picker">
+              <ui-select [value]="memberPicker()" (valueChange)="addMember($event)">
+                <option value="">Choose an offering…</option>
+                @for (offering of addableOfferings(); track offering.id) {
+                  <option [value]="offering.id">{{ offeringLabel(offering.id) }}</option>
+                }
+              </ui-select>
+            </ui-field>
+
+            @if (membersError()) {
+              <p class="field-error" role="alert">{{ membersError() }}</p>
+            }
+            @if (memberWeightsError()) {
+              <p class="field-error" role="alert">{{ memberWeightsError() }}</p>
+            }
+          </section>
+        }
+
+        <section class="form-section">
+          <h3>Mix price</h3>
+          <ui-field
+            label="Mix profile"
+            controlId="combo-mix-profile"
+            hint="Overrides the global default for this combo's requests. The profile's shares turn component prices into the routing price."
+          >
+            <ui-select [value]="draft().mixProfile" (valueChange)="setMixProfile($event)">
+              <option value="">Global default</option>
+              @for (profile of mixProfiles(); track profile.id) {
+                <option [value]="profile.id">{{ profile.name }}</option>
+              }
+            </ui-select>
+          </ui-field>
+          <p class="note">
+            Mix prices drive routing and previews; billing keeps component prices (D22/D34).
+          </p>
+        </section>
+
+        <section class="form-section">
+          <h3>Session stickiness</h3>
+          <p class="note">
+            Pinning one offering per session keeps the provider's prompt cache warm. Re-picking a
+            model every turn turns <code>code-agent</code> into <code>code-agent-nocache</code> — up
+            to ~5x the price on the reference model (D35).
+          </p>
+          <ui-switch
+            [checked]="draft().stickinessEnabled"
+            label="Pin the chosen offering per session"
+            (checkedChange)="setStickinessEnabled($event)"
+          />
+          @if (draft().stickinessEnabled) {
+            <div class="stickiness-grid">
+              <ui-field label="Pin lifetime" controlId="combo-stickiness-ttl">
+                <ui-select
+                  [value]="draft().stickinessTtl.toString()"
+                  (valueChange)="setStickinessTtl($event)"
                 >
-                  {{ combo.enabled ? 'Disable' : 'Enable' }}
-                </button>
-                <app-delete-confirm
-                  [pending]="deletingId() === combo.id"
-                  (confirmed)="deleteCombo(combo)"
-                />
-              </td>
-            </tr>
+                  @for (ttl of stickinessOptions(); track ttl.seconds) {
+                    <option [value]="ttl.seconds.toString()">{{ ttl.label }}</option>
+                  }
+                </ui-select>
+              </ui-field>
+              <ui-field
+                label="Session key"
+                controlId="combo-stickiness-key"
+                [hint]="stickinessHint()"
+              >
+                <ui-select
+                  [value]="draft().stickinessKeySource"
+                  (valueChange)="setStickinessKeySource($event)"
+                >
+                  <option value="auto">auto (derive from the request)</option>
+                  <option value="header">header (X-Session-Id)</option>
+                </ui-select>
+              </ui-field>
+            </div>
+            @if (draft().stickinessKeySource === 'header') {
+              <p class="note">
+                Header name: <code>X-Session-Id</code>. Requests without it are not pinned; this
+                mode has no derived-key fallback.
+              </p>
+            }
           }
-        </tbody>
-      </table>
+        </section>
+
+        @if (formError()) {
+          <ui-banner tone="danger">{{ formError() }}</ui-banner>
+        }
+      </div>
+    </form>
+  }
+
+  <div ui-dialog-actions>
+    <ui-button (clicked)="previewDraft()">Preview priority</ui-button>
+    <ui-button variant="primary" [loading]="saving()" (clicked)="save()">Save</ui-button>
+    <ui-button variant="ghost" (clicked)="closeForm()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="deleteTarget() !== null" [title]="deleteTitle()" (closed)="cancelDelete()">
+  @if (deleteTarget(); as combo) {
+    <p class="confirm-text">
+      Deleting <code>combo:{{ combo.name }}</code> stops every request that addresses it. This
+      cannot be undone.
+    </p>
+    @if (deleteError()) {
+      <ui-banner tone="danger">{{ deleteError() }}</ui-banner>
     }
   }
-</div>
+  <div ui-dialog-actions>
+    <ui-button variant="danger" [loading]="deleting()" (clicked)="confirmDelete()"
+      >Delete combo</ui-button
+    >
+    <ui-button variant="ghost" (clicked)="cancelDelete()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="previewOpen()" [title]="previewTitle()" (closed)="closePreview()">
+  @if (previewError()) {
+    <ui-banner tone="danger">{{ previewError() }}</ui-banner>
+  }
+  @if (previewIsSaved()) {
+    <div class="preview-session">
+      <ui-field
+        label="Session key"
+        controlId="preview-session-key"
+        hint="Optional X-Session-Id value; shows that session's current sticky pin."
+      >
+        <ui-input
+          [value]="previewSessionKey()"
+          placeholder="session-key"
+          (valueChange)="setPreviewSessionKey($event)"
+        />
+      </ui-field>
+      <ui-button [loading]="previewLoading()" (clicked)="refreshPreview()"> Refresh pin </ui-button>
+    </div>
+  }
+  @if (previewLoading() && preview() === null) {
+    <p class="empty-note">Computing the routing preview…</p>
+  } @else if (preview(); as result) {
+    <app-combo-preview [preview]="result" />
+  }
+  <div ui-dialog-actions>
+    <ui-button variant="ghost" (clicked)="closePreview()">Close</ui-button>
+  </div>
+</ui-dialog>

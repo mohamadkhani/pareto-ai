@@ -1,0 +1,50 @@
+:host {
+  display: block;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+:host(.is-raised) .card {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.card-header:not(:empty),
+.card-body:not(:empty),
+.card-footer:not(:empty) {
+  padding: var(--space-4) var(--space-5);
+}
+
+.card-header:not(:empty) {
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-display);
+  font-weight: var(--weight-semibold);
+}
+
+.card-footer:not(:empty) {
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+}
+
+.card-body:not(:empty) + .card-footer:not(:empty) {
+  margin-top: auto;
+}
+
+:host(.pad-none) .card-header:not(:empty),
+:host(.pad-none) .card-body:not(:empty),
+:host(.pad-none) .card-footer:not(:empty) {
+  padding: 0;
+}
+
+:host(.pad-sm) .card-header:not(:empty),
+:host(.pad-sm) .card-body:not(:empty),
+:host(.pad-sm) .card-footer:not(:empty) {
+  padding: var(--space-3);
+}

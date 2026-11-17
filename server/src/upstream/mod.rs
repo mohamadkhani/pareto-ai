@@ -101,7 +101,8 @@ pub struct FailureClass {
     pub code: &'static str,
     pub status: StatusCode,
     /// Failover is allowed only before the first byte reaches the client; this
-    /// marks the classes that may fail over at all (never for 400/401/403).
+    /// marks the classes that may fail over at all (400/422 are the caller's
+    /// fault and never retry; 401/403 are a credential fault and do).
     pub retryable_before_first_byte: bool,
     /// Cooldown to record on the credential (`Retry-After` when present).
     pub cooldown: Option<Duration>,
@@ -127,7 +128,8 @@ impl UpstreamError {
         };
         let class = match self {
             // 400/422 are returned to the caller; 401/403 cool the credential
-            // down but are never retried (spec failure rules). The caller's
+            // down and fail over to the next credential/offering (they are a
+            // credential fault, not the caller's request). The caller's
             // own invalid request never trips the breaker (review M1).
             UpstreamError::Http {
                 status: 400 | 422, ..
@@ -144,7 +146,7 @@ impl UpstreamError {
             } => class(
                 "upstream_auth",
                 StatusCode::BAD_GATEWAY,
-                false,
+                true,
                 Some(retry_after.unwrap_or(DEFAULT_COOLDOWN)),
                 true,
             ),

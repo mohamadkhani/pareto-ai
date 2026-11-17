@@ -16,7 +16,12 @@
 //!   score — a later import can never overwrite it.
 //! * **Quality for routing** = override > latest benchmark (wide CIs shrunk
 //!   toward the leaderboard mean, [`crate::routing::shrink`]) > model default
-//!   (neutral 0.5, imputed).
+//!   (neutral 0.5, imputed). Only `scale = 'elo'` rows take part (D25): the
+//!   automatic capability and percentage sources are stored for display with
+//!   their own scale and never mixed into the Elo ranking (D31).
+//!
+//! Automatic download lives in [`crate::benchmark_sync`]; this module owns
+//! the storage and the manual import the admin UI keeps.
 //!
 //! The module also serves the two admin listings the UI needs
 //! (`GET /api/benchmarks`, `GET /api/quality-overrides`): [`list_scores`] and
@@ -159,7 +164,7 @@ pub async fn run_import(
 
     for entry in &board.entries {
         let model_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ?")
+            sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE")
                 .bind(entry.model.trim())
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -259,7 +264,7 @@ pub const OVERRIDE_SCALE_MARGIN: f64 = 500.0;
 /// range.
 async fn validate_override_scale(pool: &SqlitePool, score: f64) -> Result<(), BenchmarkError> {
     let range: (Option<f64>, Option<f64>) =
-        sqlx::query_as("SELECT MIN(score), MAX(score) FROM benchmarks")
+        sqlx::query_as("SELECT MIN(score), MAX(score) FROM benchmarks WHERE scale = 'elo'")
             .fetch_one(pool)
             .await?;
     let (Some(min), Some(max)) = range else {
@@ -358,11 +363,16 @@ pub struct BenchmarkScoreRow {
     /// cascades benchmark rows away with their model), but the fallback keeps
     /// the row visible instead of hiding imported data.
     pub model_name: String,
-    /// Where the score came from (the importer records [`DEFAULT_SOURCE`]).
+    /// Where the score came from (the importer records [`DEFAULT_SOURCE`];
+    /// the automatic sources record their own names).
     pub source: String,
     /// `text` or `code`.
     pub category: String,
-    /// On the source's native Elo-like scale (decision D25).
+    /// The source's native scale (D25/D31). Only `elo` feeds routing
+    /// quality; `capability` and `percent` are display-only until a later
+    /// calibration decision.
+    pub scale: String,
+    /// On the source's native scale (decision D25).
     pub score: f64,
     /// CI half-width of `score`, in the source's own units, when published.
     pub ci: Option<f64>,
@@ -396,7 +406,7 @@ pub async fn list_scores(pool: &SqlitePool) -> Result<Vec<BenchmarkScoreRow>, Be
     let rows = sqlx::query_as::<_, BenchmarkScoreRow>(
         "SELECT b.id, b.model_id, \
                 COALESCE(m.canonical_name, b.model_id) AS model_name, \
-                b.source, b.category, b.score, b.ci, b.rank, b.source_url, b.fetched_at \
+                b.source, b.category, b.scale, b.score, b.ci, b.rank, b.source_url, b.fetched_at \
          FROM benchmarks b LEFT JOIN models m ON m.id = b.model_id \
          ORDER BY b.fetched_at DESC, b.model_id, b.category",
     )
@@ -420,6 +430,23 @@ pub async fn list_overrides(pool: &SqlitePool) -> Result<Vec<QualityOverrideRow>
     Ok(rows)
 }
 
+/// A resolved quality score plus the provenance the Models overview shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualityDetail {
+    pub score: f64,
+    pub source: routing::QualitySource,
+    pub imputed: bool,
+    /// Category of the benchmark that supplied the provenance (`text`/`code`),
+    /// even when an override supplies the score.
+    pub category: Option<String>,
+    pub ci: Option<f64>,
+    pub rank: Option<i64>,
+    /// When the latest benchmark was fetched; `None` without a benchmark.
+    pub fetched_at: Option<String>,
+    /// True when the operator's override supplied the score.
+    pub overridden: bool,
+}
+
 /// The resolved routing quality of the given models: override > latest
 /// benchmark (wide CIs shrunk toward the leaderboard mean of its
 /// `(source, category)`) > neutral model default (0.5, imputed). Every
@@ -432,7 +459,30 @@ pub async fn quality_for_models(
     pool: &SqlitePool,
     model_ids: &[String],
 ) -> Result<HashMap<String, QualityScore>, BenchmarkError> {
-    let mut quality: HashMap<String, QualityScore> = HashMap::new();
+    let details = quality_details_for_models(pool, model_ids).await?;
+    Ok(details
+        .into_iter()
+        .map(|(model_id, detail)| {
+            (
+                model_id,
+                QualityScore {
+                    score: detail.score,
+                    source: detail.source,
+                    imputed: detail.imputed,
+                },
+            )
+        })
+        .collect())
+}
+
+/// [`quality_for_models`] with the provenance (category, CI, rank, fetch time,
+/// and whether an override won) needed by the Models overview. Same
+/// resolution order and tie-break; failure mode: [`BenchmarkError`].
+pub async fn quality_details_for_models(
+    pool: &SqlitePool,
+    model_ids: &[String],
+) -> Result<HashMap<String, QualityDetail>, BenchmarkError> {
+    let mut quality: HashMap<String, QualityDetail> = HashMap::new();
     if model_ids.is_empty() {
         return Ok(quality);
     }
@@ -452,12 +502,22 @@ pub async fn quality_for_models(
     // "latest benchmark" is deterministic within one document — generic
     // quality prefers the `text` leaderboard (review nit).
     let rows_sql = format!(
-        "SELECT model_id, source, category, score, ci, fetched_at FROM benchmarks \
-         WHERE model_id IN ({placeholders}) \
+        "SELECT model_id, source, category, score, ci, rank, fetched_at FROM benchmarks \
+         WHERE model_id IN ({placeholders}) AND scale = 'elo' \
          ORDER BY fetched_at DESC, source, (category = 'text') DESC, category"
     );
-    let mut rows_query =
-        sqlx::query_as::<_, (String, String, String, f64, Option<f64>, String)>(&rows_sql);
+    let mut rows_query = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            f64,
+            Option<f64>,
+            Option<i64>,
+            String,
+        ),
+    >(&rows_sql);
     for model_id in model_ids {
         rows_query = rows_query.bind(model_id);
     }
@@ -465,7 +525,8 @@ pub async fn quality_for_models(
 
     // The mean each leaderboard's scores shrink toward.
     let means: Vec<(String, String, f64)> = sqlx::query_as(
-        "SELECT source, category, AVG(score) FROM benchmarks GROUP BY source, category",
+        "SELECT source, category, AVG(score) FROM benchmarks WHERE scale = 'elo' \
+         GROUP BY source, category",
     )
     .fetch_all(pool)
     .await?;
@@ -474,32 +535,61 @@ pub async fn quality_for_models(
         .map(|(source, category, mean)| ((source, category), mean))
         .collect();
 
-    let mut latest: HashMap<String, (String, String, f64, Option<f64>)> = HashMap::new();
-    for (model_id, source, category, score, ci, _fetched) in rows {
+    let mut latest: HashMap<String, LatestBenchmark> = HashMap::new();
+    for (model_id, source, category, score, ci, rank, fetched) in rows {
         latest
             .entry(model_id)
-            .or_insert((source, category, score, ci));
+            .or_insert((source, category, score, ci, rank, fetched));
     }
 
     for model_id in model_ids {
-        let benchmark = latest.get(model_id).map(|(source, category, score, ci)| {
-            let mean = means
-                .get(&(source.clone(), category.clone()))
-                .copied()
-                .unwrap_or(*score);
-            (*score, *ci, mean)
-        });
-        let score = match benchmark {
-            Some((score, ci, mean)) => routing::resolve_quality(
-                overrides.get(model_id).copied(),
-                Some((score, ci)),
-                Some(mean),
+        let benchmark = latest
+            .get(model_id)
+            .map(|(source, category, score, ci, rank, fetched)| {
+                let mean = means
+                    .get(&(source.clone(), category.clone()))
+                    .copied()
+                    .unwrap_or(*score);
+                (*score, *ci, mean, category.clone(), *rank, fetched.clone())
+            });
+        let overridden = overrides.get(model_id).copied();
+        let (resolved, category, rank, fetched_at) = match benchmark {
+            Some((score, ci, mean, category, rank, fetched)) => (
+                routing::resolve_quality(overridden, Some((score, ci)), Some(mean)),
+                Some(category),
+                rank,
+                Some(fetched),
             ),
-            None => routing::resolve_quality(overrides.get(model_id).copied(), None, None),
+            None => (
+                routing::resolve_quality(overridden, None, None),
+                None,
+                None,
+                None,
+            ),
         };
-        quality.insert(model_id.clone(), score);
+        quality.insert(
+            model_id.clone(),
+            QualityDetail {
+                score: resolved.score,
+                source: resolved.source,
+                imputed: resolved.imputed,
+                category,
+                ci: benchmark_ci(&latest, model_id),
+                rank,
+                fetched_at,
+                overridden: overridden.is_some(),
+            },
+        );
     }
     Ok(quality)
+}
+
+/// One selected benchmark row: source, category, score, CI, rank, fetched_at.
+type LatestBenchmark = (String, String, f64, Option<f64>, Option<i64>, String);
+
+/// The CI of the selected (latest) benchmark, if any.
+fn benchmark_ci(latest: &HashMap<String, LatestBenchmark>, model_id: &str) -> Option<f64> {
+    latest.get(model_id).and_then(|row| row.3)
 }
 
 #[cfg(test)]

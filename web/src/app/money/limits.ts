@@ -10,19 +10,18 @@ import {
 import { AuthService } from '../auth/auth.service';
 import { CatalogService } from '../catalog/catalog.service';
 import type { Model } from '../catalog/catalog.types';
-import { DeleteConfirm } from '../catalog/delete-confirm';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime, formatUsd } from '../catalog/format';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiCard } from '../ui/card';
+import { UiDialog } from '../ui/dialog';
+import { UiField } from '../ui/field';
+import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { MoneyService } from './money.service';
-import {
-  LIMIT_REFUSAL_CODES,
-  MONEY_PERIODS,
-  type BudgetView,
-  type MoneyPeriod,
-  type TokenCapView,
-} from './money.types';
+import { MONEY_PERIODS, type BudgetView, type MoneyPeriod, type TokenCapView } from './money.types';
 
 type CapFormState = { mode: 'create' } | { mode: 'edit'; cap: TokenCapView };
 
@@ -47,7 +46,7 @@ function progressPercent(used: number, limit: number): number {
 /** Budgets and token caps per user: hard spend and usage gates. */
 @Component({
   selector: 'app-limits',
-  imports: [ReactiveFormsModule, DeleteConfirm],
+  imports: [ReactiveFormsModule, UiBanner, UiButton, UiCard, UiDialog, UiField, UiTable],
   templateUrl: './limits.html',
   styleUrl: './limits.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -68,6 +67,8 @@ export class Limits {
   protected readonly actionError = signal<string | null>(null);
   protected readonly savingKey = signal<string | null>(null);
   protected readonly deletingKey = signal<string | null>(null);
+  protected readonly budgetRemoveTarget = signal<MoneyPeriod | null>(null);
+  protected readonly capRemoveTarget = signal<TokenCapView | null>(null);
 
   protected readonly capFormState = signal<CapFormState | null>(null);
   protected readonly attempted = signal(false);
@@ -133,14 +134,16 @@ export class Limits {
     this.loadError.set(null);
     try {
       const userId = this.selectedUserId();
-      const [budgets, caps, models] = await Promise.all([
+      // Budgets and caps are readable for the caller's own account, so they
+      // are the only calls that decide the page state. The model catalog is
+      // admin-only and feeds the cap picker; a refusal there must not hide
+      // the self-service budgets.
+      const [budgets, caps] = await Promise.all([
         this.money.listBudgets(userId),
         this.money.listTokenCaps(userId),
-        this.catalog.listModels(),
       ]);
       this.budgets.set(budgets);
       this.caps.set(caps);
-      this.models.set(models);
       // Prefill the drafts with the stored limits; null stays "keep".
       this.budgetForm.reset({
         day: this.budgetOf('day')?.limit_usd ?? null,
@@ -150,12 +153,28 @@ export class Limits {
       });
     } catch (err) {
       if (isForbidden(err)) {
-        this.loadError.set('You may only read limits for your own account.');
+        this.loadError.set('You may only read budgets and token caps for your own account.');
       } else {
         this.loadError.set(describeError(err, 'Loading limits failed.'));
       }
     } finally {
       this.loading.set(false);
+    }
+    if (this.auth.isAdmin()) {
+      await this.loadModels();
+    }
+  }
+
+  /** Loads the catalog for the cap model picker; failures never blank limits. */
+  private async loadModels(): Promise<void> {
+    try {
+      this.models.set(await this.catalog.listModels());
+    } catch (err) {
+      this.actionError.set(
+        isForbidden(err)
+          ? 'The model catalog is restricted to administrators.'
+          : describeError(err, 'Loading models failed.'),
+      );
     }
   }
 
@@ -187,11 +206,27 @@ export class Limits {
     this.actionError.set(null);
     try {
       await this.money.clearBudget(this.selectedUserId(), period);
+      this.budgetRemoveTarget.set(null);
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Removing the budget failed.'));
     } finally {
       this.deletingKey.set(null);
+    }
+  }
+
+  protected openBudgetRemove(period: MoneyPeriod): void {
+    this.budgetRemoveTarget.set(period);
+  }
+
+  protected closeBudgetRemove(): void {
+    this.budgetRemoveTarget.set(null);
+  }
+
+  protected confirmBudgetRemove(): void {
+    const period = this.budgetRemoveTarget();
+    if (period !== null) {
+      void this.removeBudget(period);
     }
   }
 
@@ -256,11 +291,27 @@ export class Limits {
     this.actionError.set(null);
     try {
       await this.money.clearTokenCap(this.selectedUserId(), cap.model_id, cap.period);
+      this.capRemoveTarget.set(null);
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Removing the token cap failed.'));
     } finally {
       this.deletingKey.set(null);
+    }
+  }
+
+  protected openCapRemove(cap: TokenCapView): void {
+    this.capRemoveTarget.set(cap);
+  }
+
+  protected closeCapRemove(): void {
+    this.capRemoveTarget.set(null);
+  }
+
+  protected confirmCapRemove(): void {
+    const cap = this.capRemoveTarget();
+    if (cap !== null) {
+      void this.removeCap(cap);
     }
   }
 

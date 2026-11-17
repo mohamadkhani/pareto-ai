@@ -1,0 +1,13 @@
+<select
+  #selectEl
+  class="control"
+  [attr.id]="controlId()"
+  [value]="value()"
+  [attr.name]="name() || null"
+  [attr.aria-describedby]="describedBy()"
+  [attr.aria-invalid]="invalid() ? 'true' : null"
+  [disabled]="disabled()"
+  (change)="onChange($event)"
+>
+  <ng-content />
+</select>

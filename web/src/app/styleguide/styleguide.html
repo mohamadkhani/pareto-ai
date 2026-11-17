@@ -1,0 +1,292 @@
+<div class="styleguide">
+  <header class="page-head">
+    <h1>Design system</h1>
+    <p class="hint">
+      Every token and primitive, shown twice with forced themes: the left column uses
+      <code>data-theme="light"</code>, the right <code>data-theme="dark"</code>. Hover any control
+      to see its hover state; tab through the page to check focus rings. Interactive state is shared
+      between the columns so both themes stay comparable.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <ui-empty
+      title="Forbidden"
+      description="The design system review surface is restricted to administrators."
+    />
+  } @else {
+    <section class="section">
+      <h2>Color tokens</h2>
+      <div class="swatch-grid">
+        @for (swatch of colorTokens; track swatch.token) {
+          <div class="swatch">
+            <span class="chip" [style.background]="'var(' + swatch.token + ')'"></span>
+            <span class="swatch-text">
+              <span class="swatch-label">{{ swatch.label }}</span>
+              <code>{{ swatch.token }}</code>
+            </span>
+          </div>
+        }
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Spacing (4px base)</h2>
+      <div class="spacing-list">
+        @for (token of spacingTokens; track token) {
+          <div class="spacing-row">
+            <code>{{ token }}</code>
+            <span class="bar" [style.width]="'var(' + token + ')'"></span>
+          </div>
+        }
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Type scale</h2>
+      <div class="type-list">
+        <div class="type-row">
+          <code class="type-token">--font-display</code>
+          <span class="type-sample display">Pareto Gateway</span>
+        </div>
+        <div class="type-row">
+          <code class="type-token">--font-body</code>
+          <span class="type-sample body">The quick brown fox jumps over the lazy dog.</span>
+        </div>
+        <div class="type-row">
+          <code class="type-token">--font-mono</code>
+          <span class="type-sample mono">openai/gpt-5 · sk-…4f2a · 1,234 tokens</span>
+        </div>
+        @for (token of typeScale; track token.token) {
+          <div class="type-row">
+            <code class="type-token">{{ token.token }}</code>
+            <span class="type-sample" [style.font-size]="'var(' + token.token + ')'">
+              {{ token.label }} — $0.42 / 1M
+            </span>
+          </div>
+        }
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Primitives in both themes</h2>
+      <div class="theme-pair">
+        <div class="theme-frame" data-theme="light">
+          <span class="theme-tag">Light</span>
+          <ng-container [ngTemplateOutlet]="showcase" />
+        </div>
+        <div class="theme-frame" data-theme="dark">
+          <span class="theme-tag">Dark</span>
+          <ng-container [ngTemplateOutlet]="showcase" />
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Dialog in both themes</h2>
+      <div class="theme-pair">
+        <div class="theme-frame" data-theme="light">
+          <span class="theme-tag">Light</span>
+          <ui-button variant="primary" (clicked)="lightDialog.set(true)">Open dialog</ui-button>
+          <ui-dialog [(open)]="lightDialog" title="Delete offering">
+            <p>
+              This removes the offering and its price. Requests already routed keep their log entry.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="lightDialog.set(false)">Cancel</ui-button>
+              <ui-button variant="danger" (clicked)="lightDialog.set(false)">Delete</ui-button>
+            </div>
+          </ui-dialog>
+        </div>
+        <div class="theme-frame" data-theme="dark">
+          <span class="theme-tag">Dark</span>
+          <ui-button variant="primary" (clicked)="darkDialog.set(true)">Open dialog</ui-button>
+          <ui-dialog [(open)]="darkDialog" title="Delete offering">
+            <p>
+              This removes the offering and its price. Requests already routed keep their log entry.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="darkDialog.set(false)">Cancel</ui-button>
+              <ui-button variant="danger" (clicked)="darkDialog.set(false)">Delete</ui-button>
+            </div>
+          </ui-dialog>
+        </div>
+      </div>
+    </section>
+  }
+</div>
+
+<ng-template #showcase>
+  <div class="showcase">
+    <section class="block">
+      <h3>Buttons</h3>
+      <div class="row">
+        <ui-button variant="primary">Primary</ui-button>
+        <ui-button variant="secondary">Secondary</ui-button>
+        <ui-button variant="ghost">Ghost</ui-button>
+        <ui-button variant="danger">Danger</ui-button>
+      </div>
+      <div class="row">
+        <ui-button size="sm">Small</ui-button>
+        <ui-button [disabled]="true">Disabled</ui-button>
+        <ui-button [loading]="true">Saving</ui-button>
+        <ui-icon-button label="Refresh">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+            <path d="M20 5v6h-6" />
+          </svg>
+        </ui-icon-button>
+        <ui-icon-button label="Delete offering" variant="danger">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" />
+          </svg>
+        </ui-icon-button>
+        <ui-icon-button label="Disabled action" [disabled]="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </ui-icon-button>
+      </div>
+      <p class="note">Hover for hover states; the disabled button ignores pointer events.</p>
+    </section>
+
+    <section class="block">
+      <h3>Fields</h3>
+      <div class="form-grid">
+        <ui-field label="Model name" hint="Canonical catalog name.">
+          <ui-input [(value)]="inputValue" placeholder="openai/gpt-5" />
+        </ui-field>
+        <ui-field label="Provider key" [error]="'A key is required to save this credential.'">
+          <ui-input value="" placeholder="sk-…" />
+        </ui-field>
+        <ui-field label="Upstream id" hint="Manual override is optional." [optional]="true">
+          <ui-input value="openai/gpt-5-mini" [disabled]="true" />
+        </ui-field>
+        <ui-field label="Notes">
+          <ui-textarea [(value)]="textareaValue" [rows]="3" />
+        </ui-field>
+        <ui-field label="Provider">
+          <ui-select [(value)]="selectValue">
+            <option value="openrouter">openrouter</option>
+            <option value="azure">azure</option>
+            <option value="sailresearch">sailresearch</option>
+          </ui-select>
+        </ui-field>
+        <ui-field label="Disabled input" hint="Read-only values use the disabled state.">
+          <ui-input value="locked" [disabled]="true" />
+        </ui-field>
+      </div>
+      <div class="row">
+        <ui-switch [(checked)]="switchOn" label="Offering enabled" />
+        <ui-switch [(checked)]="switchDisabled" label="Disabled switch" [disabled]="true" />
+        <ui-switch label="Unchecked switch" />
+      </div>
+    </section>
+
+    <section class="block">
+      <h3>Badges</h3>
+      <div class="row">
+        <ui-badge>neutral</ui-badge>
+        <ui-badge tone="success">enabled</ui-badge>
+        <ui-badge tone="warning">manual</ui-badge>
+        <ui-badge tone="danger">failed</ui-badge>
+        <ui-badge tone="info">synced</ui-badge>
+        <ui-badge tone="accent">admin</ui-badge>
+      </div>
+    </section>
+
+    <section class="block">
+      <h3>Banners</h3>
+      <ui-banner>Neutral note: the next sync runs at 02:00 UTC.</ui-banner>
+      <ui-banner tone="success">Price sync finished; 12 offerings updated.</ui-banner>
+      <ui-banner tone="warning" actionLabel="Review">
+        Three offerings have a manual price that sync will not overwrite.
+      </ui-banner>
+      <ui-banner tone="danger" actionLabel="Retry">
+        Loading offerings failed. The server did not answer.
+      </ui-banner>
+      <ui-banner tone="info">OpenRouter prices refresh every six hours.</ui-banner>
+    </section>
+
+    <section class="block">
+      <h3>Card</h3>
+      <ui-card>
+        <div ui-card-header>Offering summary</div>
+        <p class="card-copy">
+          <code>openai/gpt-5</code> via <code>openrouter</code> — $1.25 in / $5.00 out per 1M.
+        </p>
+        <div ui-card-footer><ui-button size="sm">Edit offering</ui-button></div>
+      </ui-card>
+    </section>
+
+    <section class="block">
+      <h3>Table (sticky header)</h3>
+      <ui-table [sticky]="true">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Provider</th>
+              <th scope="col">Model</th>
+              <th scope="col">Price</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>openrouter</td>
+              <td><code>openai/gpt-5</code></td>
+              <td>$1.25 / $5.00</td>
+              <td><ui-badge tone="success">enabled</ui-badge></td>
+            </tr>
+            <tr>
+              <td>azure</td>
+              <td><code>openai/gpt-5-mini</code></td>
+              <td>$0.25 / $2.00</td>
+              <td><ui-badge tone="warning">manual</ui-badge></td>
+            </tr>
+          </tbody>
+        </table>
+      </ui-table>
+    </section>
+
+    <section class="block">
+      <h3>Tabs</h3>
+      <ui-tabs [tabs]="tabs" [(selected)]="tab" label="Offering sections">
+        <p>
+          Selected tab id: <code>{{ tab() }}</code>. Use arrow keys, Home, and End.
+        </p>
+      </ui-tabs>
+    </section>
+
+    <section class="block">
+      <h3>Empty state</h3>
+      <ui-empty
+        title="No offerings yet"
+        description="Connect a provider and a model to create the first offering."
+      >
+        <span ui-empty-icon>
+          <svg
+            viewBox="0 0 24 24"
+            width="32"
+            height="32"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+          >
+            <path d="M4 7h16v12H4zM8 7V5h8v2" />
+          </svg>
+        </span>
+        <span ui-empty-action><ui-button size="sm">New offering</ui-button></span>
+      </ui-empty>
+    </section>
+
+    <section class="block">
+      <h3>Spinner</h3>
+      <div class="row">
+        <ui-spinner size="sm" label="Loading prices" />
+        <ui-spinner size="md" label="Loading offerings" />
+        <ui-spinner size="lg" label="Loading catalog" />
+      </div>
+    </section>
+  </div>
+</ng-template>

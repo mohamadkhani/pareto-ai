@@ -1,0 +1,65 @@
+{
+  "features": [
+    {"feature_idx": 0, "name": "model_name", "type": {"dtype": "string", "_type": "Value"}},
+    {"feature_idx": 3, "name": "rating", "type": {"dtype": "float64", "_type": "Value"}},
+    {"feature_idx": 5, "name": "rating_upper", "type": {"dtype": "float64", "_type": "Value"}},
+    {"feature_idx": 8, "name": "rank", "type": {"dtype": "int64", "_type": "Value"}},
+    {"feature_idx": 9, "name": "category", "type": {"dtype": "string", "_type": "Value"}}
+  ],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "model_name": "Claude Sonnet 5.5 (xHigh)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "rating": 1772.2,
+        "rating_lower": 1762.5,
+        "rating_upper": 1781.9,
+        "variance": 24.6,
+        "vote_count": 6120,
+        "rank": 3,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 1,
+      "row": {
+        "model_name": "GPT-5.4",
+        "organization": "openai",
+        "license": "Proprietary",
+        "rating": 1750.4,
+        "rating_lower": 1739.0,
+        "rating_upper": 1761.8,
+        "variance": 30.1,
+        "vote_count": 4399,
+        "rank": 5,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 2,
+      "row": {
+        "model_name": "DeepSeek V4 Flash (Thinking)",
+        "organization": "deepseek",
+        "license": "Open",
+        "rating": 1688.0,
+        "rating_lower": 1671.0,
+        "rating_upper": 1705.0,
+        "variance": 41.0,
+        "vote_count": 2100,
+        "rank": 9,
+        "category": "frontend",
+        "leaderboard_publish_date": "2026-11-15"
+      },
+      "truncated_cells": []
+    }
+  ],
+  "num_rows_total": 4,
+  "num_rows_per_page": 100,
+  "partial": false
+}

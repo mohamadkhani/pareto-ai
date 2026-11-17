@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { FetchMock, jsonResponse } from '../../testing/fetch-mock';
+import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { Credential, Provider } from './catalog.types';
 import { Credentials } from './credentials';
@@ -27,6 +27,9 @@ const provider: Provider = {
   enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
+  last_discovery_at: null,
+  last_discovery_created: null,
+  last_discovery_unchanged: null,
 };
 
 function credentialFixture(overrides: Partial<Credential> = {}): Credential {
@@ -59,14 +62,6 @@ function typeInto(root: HTMLElement, selector: string, value: string): void {
   }
   input.value = value;
   input.dispatchEvent(new Event('input'));
-}
-
-function submit(root: HTMLElement): void {
-  const form = root.querySelector('form');
-  if (!(form instanceof HTMLFormElement)) {
-    throw new Error('no form on the page');
-  }
-  form.dispatchEvent(new Event('submit'));
 }
 
 function buttonByText(root: HTMLElement, text: string): HTMLButtonElement {
@@ -150,7 +145,7 @@ describe('Credentials', () => {
     fixture.detectChanges();
     fetchMock.respond(jsonResponse(201, credentialFixture()));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    submit(root);
+    buttonByText(root, 'Save').click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -174,8 +169,7 @@ describe('Credentials', () => {
 
     buttonByText(root, 'New credential').click();
     fixture.detectChanges();
-    submit(root);
-    await fixture.whenStable();
+    buttonByText(root, 'Save').click();
     fixture.detectChanges();
 
     expect(fetchMock.requests).toHaveLength(1);
@@ -192,7 +186,7 @@ describe('Credentials', () => {
     typeInto(root, '#cred-label', 'prod-eu');
     fetchMock.respond(jsonResponse(200, credentialFixture({ label: 'prod-eu' })));
     fetchMock.respond(jsonResponse(200, [credentialFixture({ label: 'prod-eu' })]));
-    submit(root);
+    buttonByText(root, 'Save').click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -212,7 +206,7 @@ describe('Credentials', () => {
     typeInto(root, '#cred-label', 'prod-eu');
     fetchMock.respond(jsonResponse(200, credentialFixture({ label: 'prod-eu' })));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    submit(root);
+    buttonByText(root, 'Save').click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -222,9 +216,10 @@ describe('Credentials', () => {
     buttonByText(root, 'Edit').click();
     fixture.detectChanges();
     typeInto(root, '[aria-label="Header value 1"]', 'eu');
+    fixture.detectChanges();
     fetchMock.respond(jsonResponse(200, credentialFixture()));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    submit(root);
+    buttonByText(root, 'Save').click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -255,7 +250,7 @@ describe('Credentials', () => {
 
     expect(fetchMock.requests[1].url).toBe('/api/credentials/c1/test');
     expect(fetchMock.requests[1].headers.get('X-CSRF-Token')).toBe('csrf-1');
-    const banner = root.querySelector('.banner.success')?.textContent ?? '';
+    const banner = root.querySelector('ui-banner.tone-success')?.textContent ?? '';
     expect(banner).toContain('Probe passed for prod');
     expect(banner).toContain('last tested');
   });
@@ -279,8 +274,30 @@ describe('Credentials', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const banner = root.querySelector('.banner.error')?.textContent ?? '';
+    const banner = root.querySelector('ui-banner.tone-danger')?.textContent ?? '';
     expect(banner).toContain('Probe failed for prod');
     expect(banner).toContain('upstream returned 401');
+  });
+
+  it('deletes a credential only after the dialog confirmation', async () => {
+    const fixture = await create([credentialFixture()]);
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Delete').click();
+    fixture.detectChanges();
+    expect(fetchMock.requests).toHaveLength(1);
+    expect(root.textContent).toContain('Delete prod from openrouter');
+
+    fetchMock.respond(noContentResponse());
+    fetchMock.respond(jsonResponse(200, []));
+    buttonByText(root, 'Delete credential').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[1];
+    expect(call.method).toBe('DELETE');
+    expect(call.url).toBe('/api/credentials/c1');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(root.textContent).toContain('No credentials yet');
   });
 });

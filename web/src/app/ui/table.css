@@ -1,0 +1,11 @@
+:host {
+  display: block;
+}
+
+.table-scroll {
+  width: 100%;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}

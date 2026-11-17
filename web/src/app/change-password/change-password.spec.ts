@@ -1,12 +1,13 @@
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, provideRouter } from '@angular/router';
+import { type Provider, signal } from '@angular/core';
 import {
   FetchMock,
   errorResponse,
   jsonResponse,
   noContentResponse,
 } from '../../testing/fetch-mock';
-import { AuthService } from '../auth/auth.service';
+import { AuthService, type User } from '../auth/auth.service';
 import { ChangePassword } from './change-password';
 
 const session = {
@@ -37,6 +38,20 @@ function submit(root: HTMLElement): void {
   form.dispatchEvent(new Event('submit'));
 }
 
+function fill(root: HTMLElement, current: string, next: string, confirm = next): void {
+  typeInto(root, '#current-password', current);
+  typeInto(root, '#new-password', next);
+  typeInto(root, '#confirm-password', confirm);
+}
+
+function submitButton(root: HTMLElement): HTMLButtonElement {
+  const button = root.querySelector('button[type="submit"]');
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error('no submit button');
+  }
+  return button;
+}
+
 describe('ChangePassword', () => {
   let fetchMock: FetchMock;
 
@@ -49,10 +64,10 @@ describe('ChangePassword', () => {
     vi.unstubAllGlobals();
   });
 
-  async function create(): Promise<ComponentFixture<ChangePassword>> {
+  async function create(providers: Provider[] = []): Promise<ComponentFixture<ChangePassword>> {
     TestBed.configureTestingModule({
       imports: [ChangePassword],
-      providers: [provideRouter([])],
+      providers: [provideRouter([]), ...providers],
     });
     await TestBed.compileComponents();
     // The session exists but is flagged for rotation; it carries the CSRF token.
@@ -75,9 +90,7 @@ describe('ChangePassword', () => {
     expect(root.textContent).toContain('Your current password is required.');
     expect(root.textContent).toContain('A new password is required.');
 
-    typeInto(root, '#current-password', 'old-password-1');
-    typeInto(root, '#new-password', 'new-password-1');
-    typeInto(root, '#confirm-password', 'different-1');
+    fill(root, 'old-password-1', 'new-password-1', 'different-1');
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -90,9 +103,7 @@ describe('ChangePassword', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    typeInto(root, '#current-password', 'old-password-1');
-    typeInto(root, '#new-password', 'short');
-    typeInto(root, '#confirm-password', 'short');
+    fill(root, 'old-password-1', 'short');
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -108,9 +119,7 @@ describe('ChangePassword', () => {
     const root = fixture.nativeElement as HTMLElement;
     const navigate = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
 
-    typeInto(root, '#current-password', 'old-password-1');
-    typeInto(root, '#new-password', 'new-password-1');
-    typeInto(root, '#confirm-password', 'new-password-1');
+    fill(root, 'old-password-1', 'new-password-1');
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -124,8 +133,30 @@ describe('ChangePassword', () => {
       new_password: 'new-password-1',
     });
     // The forced-rotation flag is cleared by re-reading the session.
-    expect(fetchMock.requests[1].url).toBe('/api/auth/me');
+    expect(fetchMock.requests[1]?.url).toBe('/api/auth/me');
     expect(navigate).toHaveBeenCalledWith('/');
+  });
+
+  it('still leaves the screen when the session refresh fails', async () => {
+    fetchMock.respond(noContentResponse());
+    fetchMock.respond(errorResponse(401, 'unauthorized', 'Sign in required.'));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const navigate = vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockResolvedValue(true);
+
+    fill(root, 'old-password-1', 'new-password-1');
+    submit(root);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The password change already succeeded; a failed refresh must not strand
+    // the account on the rotation screen or leave the button busy.
+    expect(fetchMock.requests.map((call) => call.url)).toEqual([
+      '/api/auth/change-password',
+      '/api/auth/me',
+    ]);
+    expect(navigate).toHaveBeenCalledWith('/');
+    expect(submitButton(root).disabled).toBe(false);
   });
 
   it('explains a wrong current password without the generic 401 text', async () => {
@@ -133,13 +164,57 @@ describe('ChangePassword', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    typeInto(root, '#current-password', 'wrong');
-    typeInto(root, '#new-password', 'new-password-1');
-    typeInto(root, '#confirm-password', 'new-password-1');
+    fill(root, 'wrong', 'new-password-1');
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();
 
     expect(root.textContent).toContain('Your current password is not correct.');
+  });
+
+  it('re-enables the button once the change succeeds, even if navigation stalls', async () => {
+    const user: User = { ...session.user, must_change_password: true };
+    const authMock = {
+      user: signal<User | null>(user),
+      csrfToken: signal<string | null>('csrf-1'),
+      changePassword: vi.fn().mockResolvedValue(undefined),
+      loadMe: vi.fn().mockResolvedValue(true),
+      logout: vi.fn().mockResolvedValue(undefined),
+    };
+    const fixture = await create([{ provide: AuthService, useValue: authMock }]);
+    const root = fixture.nativeElement as HTMLElement;
+    // A navigation that never settles must not pin the form in its busy state.
+    vi.spyOn(TestBed.inject(Router), 'navigateByUrl').mockReturnValue(
+      new Promise<boolean>(() => {}),
+    );
+
+    fill(root, 'old-password-1', 'new-password-1');
+    submit(root);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(authMock.changePassword).toHaveBeenCalledWith('old-password-1', 'new-password-1');
+    expect(submitButton(root).disabled).toBe(false);
+    expect(submitButton(root).textContent).toContain('Change password');
+    expect(submitButton(root).textContent).not.toContain('Changing…');
+
+    // The password is already changed; clicking again must not re-post it.
+    submit(root);
+    await fixture.whenStable();
+    expect(authMock.changePassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the user on the page with the API message when the change fails', async () => {
+    fetchMock.respond(errorResponse(500, 'internal', 'Password hashing unavailable.'));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fill(root, 'old-password-1', 'new-password-1');
+    submit(root);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(root.textContent).toContain('Password hashing unavailable.');
+    expect(submitButton(root).disabled).toBe(false);
   });
 });

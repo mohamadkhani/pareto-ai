@@ -5,11 +5,17 @@ import { ApiError } from '../api';
 import { AuthService } from '../auth/auth.service';
 import { CatalogService } from '../catalog/catalog.service';
 import type { Credential, Model, Offering, Provider } from '../catalog/catalog.types';
-import { DeleteConfirm } from '../catalog/delete-confirm';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime } from '../catalog/format';
 import { KeysService } from '../keys/keys.service';
 import type { ApiKeyView } from '../keys/keys.types';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiDialog } from '../ui/dialog';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { GrantsService } from './grants.service';
@@ -19,6 +25,13 @@ import type { GrantMode, GrantResourceType, GrantSubjectType, GrantView } from '
 interface Option {
   id: string;
   label: string;
+}
+
+/** A readable API-key subject: name, visible prefix, and its owner. */
+interface KeyLabel {
+  name: string;
+  prefix: string;
+  ownerEmail: string;
 }
 
 /** A 409 duplicate gets its own message so the admin sees why it failed. */
@@ -32,7 +45,7 @@ function describeGrantError(err: unknown): string {
 /** Access grants: who may use which models, offerings, and credentials. */
 @Component({
   selector: 'app-grants',
-  imports: [ReactiveFormsModule, DeleteConfirm],
+  imports: [ReactiveFormsModule, UiBadge, UiBanner, UiButton, UiDialog, UiEmpty, UiField, UiTable],
   templateUrl: './grants.html',
   styleUrl: './grants.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -47,6 +60,8 @@ export class Grants {
   protected readonly grants = signal<GrantView[]>([]);
   private readonly users = signal<UserView[]>([]);
   private readonly keys = signal<ApiKeyView[]>([]);
+  /** Key-id → readable label, for grants whose subject is an API key. */
+  private readonly keyLabels = signal<ReadonlyMap<string, KeyLabel>>(new Map());
   private readonly models = signal<Model[]>([]);
   private readonly offerings = signal<Offering[]>([]);
   private readonly credentials = signal<Credential[]>([]);
@@ -59,6 +74,8 @@ export class Grants {
   protected readonly attempted = signal(false);
   protected readonly saving = signal(false);
   protected readonly deletingId = signal<string | null>(null);
+  /** The grant the delete confirmation dialog is open for. */
+  protected readonly deleteTarget = signal<GrantView | null>(null);
   protected readonly showForm = signal(false);
 
   protected readonly formatTime = formatTime;
@@ -138,11 +155,34 @@ export class Grants {
       this.offerings.set(offerings);
       this.providers.set(providers);
       this.credentials.set(credentials);
+      await this.loadKeyLabels(grants, users);
     } catch (err) {
       this.handleError(err);
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /**
+   * Resolves API-key grant subjects through the per-user key endpoints; the
+   * grants list carries only the key id. Only runs when such a grant exists,
+   * and a failing owner read leaves that key's label to the graceful fallback.
+   */
+  private async loadKeyLabels(grants: GrantView[], users: UserView[]): Promise<void> {
+    if (!grants.some((grant) => grant.subject_type === 'api_key')) {
+      this.keyLabels.set(new Map());
+      return;
+    }
+    const lists = await Promise.all(
+      users.map((user) => this.keysService.list(user.id).catch(() => [] as ApiKeyView[])),
+    );
+    const labels = new Map<string, KeyLabel>();
+    users.forEach((user, index) => {
+      for (const key of lists[index]) {
+        labels.set(key.id, { name: key.name, prefix: key.prefix, ownerEmail: user.email });
+      }
+    });
+    this.keyLabels.set(labels);
   }
 
   /** Switching the subject kind resets the picked subject and its key list. */
@@ -189,6 +229,7 @@ export class Grants {
 
   protected closeForm(): void {
     this.showForm.set(false);
+    this.actionError.set(null);
   }
 
   protected async save(): Promise<void> {
@@ -224,6 +265,7 @@ export class Grants {
     this.actionError.set(null);
     try {
       await this.grantsService.remove(grant.id);
+      this.deleteTarget.set(null);
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Deleting the grant failed.'));
@@ -232,13 +274,34 @@ export class Grants {
     }
   }
 
+  /** Opens the delete confirmation for one grant. */
+  protected openDelete(grant: GrantView): void {
+    this.actionError.set(null);
+    this.deleteTarget.set(grant);
+  }
+
+  protected closeDelete(): void {
+    this.deleteTarget.set(null);
+  }
+
+  protected confirmDelete(): void {
+    const grant = this.deleteTarget();
+    if (grant !== null) {
+      void this.remove(grant);
+    }
+  }
+
   /** Human-readable subject: the user's email or the key's name and prefix. */
   protected subjectLabel(grant: GrantView): string {
     if (grant.subject_type === 'user') {
       return this.users().find((user) => user.id === grant.subject_id)?.email ?? grant.subject_id;
     }
-    const key = this.keys().find((candidate) => candidate.id === grant.subject_id);
-    return key === undefined ? grant.subject_id : `${key.name} (${key.prefix})`;
+    const key = this.keyLabels().get(grant.subject_id);
+    if (key === undefined) {
+      // The key was deleted after the grant was written; keep the row readable.
+      return `deleted key ${grant.subject_id.slice(0, 8)}…`;
+    }
+    return `${key.name} (${key.prefix}) · ${key.ownerEmail}`;
   }
 
   /** Human-readable resource: canonical model, offering, or credential label. */

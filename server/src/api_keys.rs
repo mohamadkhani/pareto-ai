@@ -10,9 +10,10 @@
 //! is looked up, revocation/expiry and the owner's `is_active` are enforced,
 //! `last_used_at` is stamped, and the per-key rate limits are charged. A
 //! revoked, expired, or unknown key is `401`; a key of a deactivated account
-//! is `403`. The `last_used_at` stamp is one cheap write per request today;
-//! **follow-up** (review nit): batch it into periodic flushes if it ever
-//! shows up in profiles.
+//! is `403`. The `last_used_at` stamp is batched: at most one write per key
+//! per [`USAGE_STAMP_INTERVAL`] (60 s), never on a rejected key, so the admin
+//! lists show "last used" with up to one minute of granularity instead of
+//! paying a write transaction on every data-plane request.
 //!
 //! Rate limits are per-key RPM and TPM token buckets (in-memory, bounded at
 //! [`LIMITER_MAX_ENTRIES`] entries with least-recently-touched eviction, so a
@@ -48,6 +49,11 @@ pub const DEFAULT_RPM: i64 = 60;
 pub const DEFAULT_TPM: i64 = 100_000;
 /// Largest rate-limiter map; the least recently touched key is evicted.
 pub const LIMITER_MAX_ENTRIES: usize = 10_000;
+/// How often a key's `last_used_at` column is rewritten. The admin UI shows
+/// the column with this granularity.
+pub const USAGE_STAMP_INTERVAL: Duration = Duration::from_secs(60);
+/// Largest stamp map; the least recently stamped key is evicted.
+pub const USAGE_STAMP_MAX_ENTRIES: usize = 10_000;
 
 const TOKEN_BYTES: usize = 32;
 const NAME_MAX_CHARS: usize = 200;
@@ -445,12 +451,55 @@ impl KeyRejection {
     }
 }
 
+/// The `last_used_at` write throttle, by key id.
+///
+/// Authentication stamps the column at most once per key per
+/// [`USAGE_STAMP_INTERVAL`]; see [`crate::throttle::WriteThrottle`].
+#[derive(Debug)]
+pub struct KeyUsageStamps(crate::throttle::WriteThrottle);
+
+impl Default for KeyUsageStamps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeyUsageStamps {
+    pub fn new() -> Self {
+        Self(crate::throttle::WriteThrottle::new(
+            USAGE_STAMP_INTERVAL,
+            USAGE_STAMP_MAX_ENTRIES,
+        ))
+    }
+
+    /// Whether this request should write the key's `last_used_at`, recording
+    /// the decision.
+    pub fn should_stamp(&self, key_id: &str, now: Instant) -> bool {
+        self.0.should_write(key_id, now)
+    }
+
+    /// Forgets a stamp after its write failed, so the next request retries.
+    fn forget(&self, key_id: &str) {
+        self.0.forget(key_id);
+    }
+
+    /// Number of tracked keys; bounded by [`USAGE_STAMP_MAX_ENTRIES`].
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// Verifies a presented key string against the stored hash and stamps
-/// `last_used_at` on success.
+/// `last_used_at` on success (at most once per [`USAGE_STAMP_INTERVAL`]).
 ///
 /// Failure mode: [`KeyRejection`] (unknown, revoked, expired, or a disabled
 /// owner) or [`KeyRejection::Db`]. The presented key is never logged.
-pub async fn authenticate(pool: &SqlitePool, presented: &str) -> Result<KeyContext, KeyRejection> {
+pub async fn authenticate(
+    pool: &SqlitePool,
+    presented: &str,
+    stamps: &KeyUsageStamps,
+) -> Result<KeyContext, KeyRejection> {
     let row: Option<SqliteRow> = sqlx::query(
         "SELECT k.id, k.user_id, k.revoked_at, k.expires_at, k.rate_limit_rpm, k.rate_limit_tpm, \
                 u.role, u.is_active \
@@ -493,12 +542,19 @@ pub async fn authenticate(pool: &SqlitePool, presented: &str) -> Result<KeyConte
         return Err(KeyRejection::Expired);
     }
 
-    let now = ts(chrono::Utc::now());
-    sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&key_id)
-        .execute(pool)
-        .await?;
+    if stamps.should_stamp(&key_id, Instant::now()) {
+        let now = ts(chrono::Utc::now());
+        if let Err(e) = sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&key_id)
+            .execute(pool)
+            .await
+        {
+            // The stamp is not written; let the next request try again.
+            stamps.forget(&key_id);
+            return Err(e.into());
+        }
+    }
 
     Ok(KeyContext {
         key_id,
@@ -777,16 +833,19 @@ mod tests {
     #[tokio::test]
     async fn revoked_and_expired_keys_are_rejected() {
         let (dir, pool, user_id) = pool_with_user().await;
+        let stamps = KeyUsageStamps::new();
         let created = create_key(&pool, &actor(&user_id), &user_id, &input())
             .await
             .expect("create key");
-        let ctx = authenticate(&pool, &created.key).await.expect("valid key");
+        let ctx = authenticate(&pool, &created.key, &stamps)
+            .await
+            .expect("valid key");
         assert_eq!(ctx.user_id, user_id);
         assert_eq!(ctx.rate_limit_rpm, DEFAULT_RPM);
         assert_eq!(ctx.rate_limit_tpm, DEFAULT_TPM);
 
         // Unknown keys are refused with the same code shape.
-        let unknown = authenticate(&pool, "pk_live_nope")
+        let unknown = authenticate(&pool, "pk_live_nope", &stamps)
             .await
             .expect_err("unknown");
         assert!(matches!(unknown, KeyRejection::Unknown));
@@ -795,7 +854,7 @@ mod tests {
         revoke_key(&pool, &actor(&user_id), &created.view.id)
             .await
             .expect("revoke");
-        let rejected = authenticate(&pool, &created.key)
+        let rejected = authenticate(&pool, &created.key, &stamps)
             .await
             .expect_err("revoked");
         assert!(matches!(rejected, KeyRejection::Revoked));
@@ -808,7 +867,9 @@ mod tests {
         let stale = create_key(&pool, &actor(&user_id), &user_id, &expiring)
             .await
             .expect("create expired");
-        let rejected = authenticate(&pool, &stale.key).await.expect_err("expired");
+        let rejected = authenticate(&pool, &stale.key, &stamps)
+            .await
+            .expect_err("expired");
         assert!(matches!(rejected, KeyRejection::Expired));
 
         // A deactivated owner's keys stop working too.
@@ -824,10 +885,77 @@ mod tests {
         let created = create_key(&pool, &actor(&user_id), &user_id, &fresh)
             .await
             .expect("create");
-        let rejected = authenticate(&pool, &created.key)
+        let rejected = authenticate(&pool, &created.key, &stamps)
             .await
             .expect_err("disabled");
         assert!(matches!(rejected, KeyRejection::DisabledUser));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn last_used_at_is_batched_and_only_stamped_on_success() {
+        let (dir, pool, user_id) = pool_with_user().await;
+        let created = create_key(&pool, &actor(&user_id), &user_id, &input())
+            .await
+            .expect("create key");
+        let stamps = KeyUsageStamps::new();
+
+        authenticate(&pool, &created.key, &stamps)
+            .await
+            .expect("valid key");
+        let stamped: Option<String> = sqlx::query_scalar("SELECT last_used_at FROM api_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("stamp");
+        assert!(stamped.is_some(), "the first request stamps the key");
+        assert_eq!(stamps.len(), 1, "the throttle tracks the key");
+
+        // A second request inside the interval must not write the column.
+        sqlx::query("UPDATE api_keys SET last_used_at = NULL")
+            .execute(&pool)
+            .await
+            .expect("clear stamp");
+        authenticate(&pool, &created.key, &stamps)
+            .await
+            .expect("valid key");
+        let skipped: Option<String> = sqlx::query_scalar("SELECT last_used_at FROM api_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("stamp");
+        assert!(
+            skipped.is_none(),
+            "a request inside the 60 s window writes nothing"
+        );
+
+        // A fresh throttle (a restart, or the next window) writes again.
+        authenticate(&pool, &created.key, &KeyUsageStamps::new())
+            .await
+            .expect("valid key");
+        let restamped: Option<String> = sqlx::query_scalar("SELECT last_used_at FROM api_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("stamp");
+        assert!(restamped.is_some(), "the next window stamps again");
+
+        // A rejected key never writes the column, even with a fresh throttle.
+        sqlx::query("UPDATE api_keys SET last_used_at = NULL, revoked_at = ?")
+            .bind(crate::catalog::now_ts())
+            .execute(&pool)
+            .await
+            .expect("revoke");
+        let rejected = authenticate(&pool, &created.key, &KeyUsageStamps::new())
+            .await
+            .expect_err("revoked");
+        assert!(matches!(rejected, KeyRejection::Revoked));
+        let unstamped: Option<String> = sqlx::query_scalar("SELECT last_used_at FROM api_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("stamp");
+        assert!(
+            unstamped.is_none(),
+            "authentication failures do not stamp last_used_at"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

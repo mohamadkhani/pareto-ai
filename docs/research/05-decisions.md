@@ -305,6 +305,234 @@ defining an offering's speed and reliability.
 
 **Consequence:** explanation text marks shrunk metrics like imputed ones.
 
+### D28. Own UI primitives instead of a component library
+
+**Decision:** the admin console uses a small in-repo design system
+(`web/src/app/ui/`): design tokens plus ~12 primitives (button, icon-button,
+field, input, textarea, select, switch, badge, card, table wrapper, dialog,
+banner, tabs, empty-state), documented on a `/styleguide` route. No Angular
+Material, no CDK, no third-party component library.
+
+**Why:** the UI adds ~714 KiB to the single binary; a library adds its own
+runtime and an opinionated theme. The console is form/table shaped, so a small
+primitive set covers almost everything, and the design stays under our control.
+
+**Consequence:** pages may not restyle primitives — only tokens and variants.
+Every new primitive or state appears on `/styleguide` first. Use the native
+`<dialog>` element for modals (focus trap and ESC for free).
+
+### D29. Fonts: Exo 2 for display, Inter for body, JetBrains Mono for data
+
+**Decision:** self-hosted woff2 via `@fontsource-variable` packages, latin
+subset only. Exo 2 → brand/headings/nav/buttons; Inter → body and tables;
+JetBrains Mono → identifiers, keys, JSON, logs. All behind tokens
+(`--font-display`, `--font-body`, `--font-mono`) so a future Persian locale can
+swap the body font (Exo 2 and Inter have no Arabic script; Vazirmatn is the
+likely replacement, as OmniRoute used).
+
+**Why:** user preference (2026-11-16). Exo 2's wide geometric letterforms are
+hard to read in dense 13-14px tables; Inter is built for UI text.
+
+### D30. Light and dark themes from one token set
+
+**Decision:** one semantic token set with `html[data-theme="light|dark"]`
+values, defaulting to the system preference, persisted in `localStorage`, with
+a toggle in the shell. Components only reference tokens.
+
+**Why:** admin consoles are used for long sessions; the cost is low once tokens
+exist, and it forces the token discipline D28 needs.
+
+### D31. Models is one page; providers load their own models
+
+**Decision (user, 2026-11-16):**
+
+- The admin console merges models, prices and quality into a single **Models**
+  page. The Offerings and Benchmarks pages disappear; price sync and benchmark
+  sync become toolbar actions with last-run status.
+- The main table shows only important fields (model, provider, context, input/
+  output/cache price, quality, status). Everything else opens in a detail
+  dialog/expansion.
+- A provider filter switches between per-provider rows and, with no filter, one
+  row per model with **average and minimum price across providers** plus the
+  model-level quality score.
+- **Providers** get a "Load models" action: discover `GET {base_url}/models`
+  with a credential (dry-run preview, idempotent upsert, never overwriting
+  manual overrides).
+
+**Benchmark sources** (network-tested 2026-11-16 from this host):
+
+| Source | Endpoint | Reachable | License |
+| --- | --- | --- | --- |
+| Arena (WebDev) | `datasets-server.huggingface.co/rows?...lmarena-ai/leaderboard-dataset...` | yes (slow, ~20s) | CC BY 4.0 — attribution required |
+| BenchmarkList capability | `benchmarklist.com/directory-data/models.json` | yes (~11 MB) | check before shipping; attribute |
+| BenchLM | `benchlm.ai/_next/data/{build_id}/models.json` | yes | check; brittle (build id) |
+| OpenRouter prices/benchmarks | `openrouter.ai/api/...` | **blocked** | stays fixture-tested |
+
+`llm-leaders` (`/home/mohamad/Projects/llm-leaders`) is **GPL-3.0**: use its
+README for the API contracts and matching ideas only — reimplement
+independently, never copy its code into this project.
+
+### D32. License: MIT
+
+**Decision (user, 2026-11-16):** the project is licensed **MIT** — `LICENSE`
+with the standard text, `license = "MIT"` in `server/Cargo.toml` and
+`web/package.json`, third-party notices in `THIRD_PARTY_NOTICES.md`.
+
+**Why:** after comparing MIT and Apache-2.0 directly (patent grant, NOTICE and
+state-change duties, GPLv2 compatibility, simplicity), the user chose MIT:
+simplest, most widely accepted, compatible with GPLv2 and GPLv3, and the
+project can be relicensed later while a single copyright holder controls it.
+Apache-2.0's explicit patent grant was not needed for an internal tool.
+
+**Consequences:** fonts (OFL) and LMArena data (CC BY 4.0) keep their own
+notices; a `cargo-deny` audit is still pending because crates.io is
+unreachable.
+
+### D33. Only Elo-scale quality drives routing; other scales are display-only
+
+**Decision:** benchmark rows carry a `scale` (`elo`, `capability`, `percent`).
+Only `scale = 'elo'` rows feed `quality_for_models` and override validation;
+capability/percentage rows are stored with provenance, shown in the UI, and
+explicitly labelled display-only until a calibration decision is made.
+
+**Why:** mixing scales silently ranks a "0.87 capability" against an Elo 1400
+(the M5 review's M4 finding). Calibrating one onto the other is a modelling
+decision, not an implementation detail.
+
+**Consequences:** with OpenRouter benchmarks blocked and BenchmarkList currently
+publishing no capability scores, routing quality comes from **Arena (Elo)** and
+manual overrides; BenchLM percentages are informational. Follow-up: confirm
+BenchmarkList's current shape (it changed on 2026-11-16) or drop the source.
+
+### D34. Mix price is the routing price metric; billing stays component-based
+
+**Decision (user, 2026-11-16):** add token-mix profiles and a derived
+**mix price** = blended $/M at the profile's token shares. Used as the price
+component in routing and shown in the Models page; **never** used for billing
+(`usage_events.cost_usd` keeps component pricing per D22).
+
+Built-in presets (research: [12-token-mix.md](12-token-mix.md)):
+
+| Preset | input | output | cache read | Use |
+| --- | ---: | ---: | ---: | --- |
+| `code-agent` (default) | 8.1 | 0.4 | 91.5 | long agent sessions with warm cache |
+| `code-agent-nocache` | 99.6 | 0.4 | 0 | same work when prefixes do not survive |
+| `chat` | 74.0 | 26.0 | 0 | short assistants, one-shot tasks |
+| `long-context` | 97.0 | 3.0 | 0 | document analysis / batch summarisation |
+
+Rules:
+
+- A provider without cache pricing bills the cached share at the **input**
+  price (never drops it) — otherwise it looks ~5x cheaper than its bill.
+- `cache_write` and `reasoning` shares are part of the profile schema but 0 by
+  default; when a price exists for them they are blended in (they fall outside
+  the research's three-component model).
+- The mix is a **client property**: re-picking an offering every turn silently
+  turns `code-agent` into `code-agent-nocache` (5x price difference on the
+  reference model). Session/cache affinity therefore matters more once mix
+  pricing drives routing.
+- Calibration follow-up: derive the deployment's measured mix from our own
+  `usage_events` and offer it as a preset.
+
+### D35. Rule-based combos: constraints over the whole catalog
+
+**Decision (user, 2026-11-16):** a combo may use **pool = all models** instead of
+an explicit member list. The pool is every eligible offering that satisfies the
+combo's constraints — `min_quality` (score) and/or `max_mix_price_per_m`
+(mix price under the combo's profile) — then ordered by the **same weighted
+score** as `weighted` combos (price/speed/quality/reliability + penalties).
+
+Rules:
+
+- At least one constraint is required (an unconstrained "everything" combo is
+  almost always a mistake); a constraint set to null is "not constrained".
+- An offering with an **unknown** mix price is excluded when
+  `max_mix_price_per_m` is set — an unverifiable price must not pass a price
+  cap. It is shown in the preview as `excluded: unpriced`.
+- Boundaries are inclusive (`>= min_quality`, `<= max price`); the score used is
+  the same resolved quality as routing (override > Elo benchmark > default).
+- Strategy for pool combos is `weighted` (ordered/round-robin need an explicit
+  list by definition); document the restriction in the API error.
+- The pool is resolved per request (after grants/budget/breaker filters), so
+  access control and budgets still apply.
+- A **preview** endpoint returns the ranked candidates and the exclusions with
+  one-line reasons, computed by the *same* engine the runtime uses — the UI's
+  "which models this combo prioritizes" view must never drift from reality.
+
+**Why:** the user wants a combo like "best value coding models, quality >= X,
+mix price <= $Y/M", ordered by their weights, without maintaining a list. The
+preview makes the rule auditable before the operator saves it.
+
+### Stickiness (same decision, added 2026-11-16)
+
+A combo may pin its chosen offering per **session** so prompt caching survives
+across turns (research: per-turn re-picking turns `code-agent` into
+`code-agent-nocache`, up to ~5x cost).
+
+- Config: `stickiness {enabled, ttl_seconds (default 1800), key_source:
+  "header"|"auto"}`; when enabled the combo keeps the choice keyed by
+  `X-Session-Id` when present, otherwise by a stable hash of
+  `(user or api key, system prompt + first user message)`.
+- State: `combo_sticky_choices(combo_id, session_key, offering_id, chosen_at,
+  expires_at)` with `(combo_id, session_key)` as the key and TTL pruning.
+- On each request: a valid pin is used only if the offering is still eligible
+  (enabled, access, budget, breaker); otherwise the pool is re-scored and the
+  pin is replaced. A failed pinned attempt may fail over, and the pin then moves
+  to the offering that served the request.
+- Visible in `decision_json` (`sticky: {enabled, key_source, pinned, age_s,
+  replaced_why}`) and in the combo preview (the current pin per example key).
+- Applies to both combo pools; it is a no-op for `ordered` when the pinned
+  member is still first.
+
+### D36. SQLite runs WAL + `synchronous=NORMAL`
+
+**Decision:** the pool sets `journal_mode=WAL` and `synchronous=NORMAL` (it had
+silently defaulted to `FULL`). Measured on 2026-11-16
+([13-performance.md](13-performance.md)): p50 2.09 ms → 0.93 ms and ~454 → ~959
+req/s at concurrency 1; settle p50 0.742 → 0.304 ms; 200 concurrent writers
+~2.1k settlements/s; WAL plateaus ~4.1 MiB over 50k settlements.
+
+**Trade-off:** NORMAL survives a process crash; a **machine power loss** can
+lose the newest usage commits (billing under-counts), never corruption and never
+a double charge (settlement is idempotent). Accepted for an internal gateway;
+flip the one line back to `FULL` (~2.2x slower) if that changes.
+
+**Why SQLite is not our bottleneck:** 22 statements / 8 writes / 3 transactions
+per request, and the practical ceiling is ~700 req/s against a documented load
+of ~0.17 req/s — far from the Postgres triggers. The remaining cost is the
+three write transactions, not the engine. OmniRoute's slowness is not evidence
+against SQLite here: it runs the data plane inside Next.js with synchronous
+SQLite on the hot path.
+
+**Follow-ups (measured, ranked):** cache mix-profile resolution (3 SELECTs per
+request), stop reading the price twice, batch `last_used_at`, resolve candidate
+credentials in one query.
+
+### D37. A published variable price is unknown, never a number
+
+**Decision (2026-11-17, live finding):** OpenRouter publishes
+`pricing.prompt`/`pricing.completion` as the string `"-1"` for models whose
+price it cannot state (`openrouter/auto`, `nvidia/switchyard`, six more live
+ids). `-1` is a **sentinel**, not USD per token.
+
+- The sync maps every negative component to `NULL` and sets
+  `prices.variable_price = 1`; `-1` never reaches a price column, an
+  aggregate, the mix blend, or the routing price score. `0012_variable_price`
+  repairs rows written before the fix (the live DB held `-$1,000,000/M` and
+  ranked those models cheapest).
+- An all-variable offering is unpriced: routing imputes the neutral 0.5 price
+  score and marks it `imputed`; a combo price cap excludes it (`unpriced`),
+  never passes it. A partial sentinel keeps the components that are real
+  numbers.
+- The UI shows a `variable` badge with a tooltip instead of a number, and
+  sortable columns keep missing prices last in both directions, so a variable
+  price can never appear at the cheap end.
+- A manual price clears the flag: the operator has stated a number.
+
+**Rejected:** storing `-1` as a very small price (it ranked cheapest); storing
+0 (unknown is never 0, D10); dropping the model (it is routable, just not
+price-comparable).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

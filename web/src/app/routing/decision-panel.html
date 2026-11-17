@@ -1,112 +1,199 @@
-<div class="decision">
-  <p class="reason">{{ decision().reason }}</p>
+<ui-card padding="sm">
+  <div ui-card-header class="panel-head">
+    <h3 class="title">Why this model</h3>
+    <p class="reason">{{ decision().reason }}</p>
+  </div>
 
-  <dl class="routing">
-    <dt>Strategy</dt>
-    <dd>
-      <span class="badge">{{ decision().routing.strategy }}</span>
-    </dd>
-    @if (decision().routing.combo; as combo) {
-      <dt>Combo</dt>
-      <dd>
-        <code>combo:{{ combo }}</code>
-      </dd>
-    }
-    @if (decision().routing.preset; as preset) {
-      <dt>Preset</dt>
-      <dd>
-        <span class="badge">{{ preset }}</span>
-      </dd>
-    }
-    @if (decision().routing.weights; as weights) {
-      <dt>Weights</dt>
-      <dd class="weights">
-        price {{ formatScore(weights.price) }} · speed {{ formatScore(weights.speed) }} · quality
-        {{ formatScore(weights.quality) }} · reliability {{ formatScore(weights.reliability) }}
-      </dd>
-    }
-    @if (decision().routing.rr_cursor !== null) {
-      <dt>Rotation</dt>
-      <dd>round-robin cursor {{ decision().routing.rr_cursor }}</dd>
-    }
-  </dl>
+  <div class="decision">
+    <dl class="routing">
+      <div class="routing-item">
+        <dt>Strategy</dt>
+        <dd>
+          <ui-badge tone="info">{{ decision().routing.strategy }}</ui-badge>
+        </dd>
+      </div>
+      @if (decision().routing.combo; as combo) {
+        <div class="routing-item">
+          <dt>Combo</dt>
+          <dd>
+            <code>combo:{{ combo }}</code>
+          </dd>
+        </div>
+      }
+      @if (decision().routing.preset; as preset) {
+        <div class="routing-item">
+          <dt>Preset</dt>
+          <dd>
+            <ui-badge tone="accent">{{ preset }}</ui-badge>
+          </dd>
+        </div>
+      }
+      @if (decision().routing.mix_profile; as profile) {
+        <div class="routing-item">
+          <dt>Mix profile</dt>
+          <dd>
+            <ui-badge tone="info">{{ profile.profile_name }}</ui-badge>
+            <code class="profile-id">{{ profile.profile_id }}</code>
+          </dd>
+        </div>
+      }
+      @if (decision().routing.weights; as weights) {
+        <div class="routing-item routing-weights">
+          <dt>Weights</dt>
+          <dd class="weights">
+            price {{ formatScore(weights.price) }} · speed {{ formatScore(weights.speed) }} ·
+            quality {{ formatScore(weights.quality) }} · reliability
+            {{ formatScore(weights.reliability) }}
+          </dd>
+        </div>
+      }
+      @if (decision().routing.rr_cursor !== null) {
+        <div class="routing-item">
+          <dt>Rotation</dt>
+          <dd>round-robin cursor {{ decision().routing.rr_cursor }}</dd>
+        </div>
+      }
+    </dl>
 
-  @if (decision().candidates.length === 0) {
-    <p class="empty">No candidates were recorded for this request.</p>
-  } @else {
-    <table class="data-table score-table">
-      <thead>
-        <tr>
-          <th scope="col">Candidate</th>
-          <th scope="col">Outcome</th>
-          <th scope="col">Price</th>
-          <th scope="col">Speed</th>
-          <th scope="col">Quality</th>
-          <th scope="col">Reliability</th>
-          <th scope="col">Penalties</th>
-          <th scope="col">Total</th>
-          <th scope="col">Why</th>
-        </tr>
-      </thead>
-      <tbody>
-        @for (candidate of decision().candidates; track candidate.id) {
-          <tr [class.chosen]="isChosen(candidate)">
-            <td class="candidate">
-              <code>{{ candidate.id }}</code>
-              <span class="sub">{{ candidate.provider }} · {{ candidate.model }}</span>
-            </td>
-            <td>
-              <span class="badge {{ outcomeClass(candidate) }}">{{ outcomeLabel(candidate) }}</span>
-            </td>
-            @if (candidate.score; as score) {
-              <td class="num">
-                {{ formatScore(score.price) }}
-                @if (marker(score, 'price'); as mark) {
-                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
-                }
-              </td>
-              <td class="num">
-                {{ formatScore(score.speed) }}
-                @if (marker(score, 'speed'); as mark) {
-                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
-                }
-              </td>
-              <td class="num">
-                {{ formatScore(score.quality) }}
-                @if (marker(score, 'quality'); as mark) {
-                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
-                }
-              </td>
-              <td class="num">
-                {{ formatScore(score.reliability) }}
-                @if (marker(score, 'reliability'); as mark) {
-                  <sup class="marker" [attr.title]="markerHelp(mark)">{{ markerLabel(mark) }}</sup>
-                }
-              </td>
-              <td class="num">{{ formatScore(score.penalties) }}</td>
-              <td class="num total" [class.negative]="score.total < 0">
-                {{ formatScore(score.total) }}
-              </td>
-            } @else {
-              <td
-                colspan="6"
-                class="unscored"
-                title="Excluded or unscored strategies carry no breakdown."
-              >
-                not scored
-              </td>
+    @if (decision().sticky.enabled) {
+      <dl class="routing sticky">
+        <div class="routing-item">
+          <dt>Stickiness</dt>
+          <dd>
+            <ui-badge tone="info">enabled</ui-badge>
+            @if (decision().sticky.key_source; as source) {
+              <span class="sticky-source">key from {{ source }}</span>
             }
-            <td class="why">{{ candidate.explanation }}</td>
-          </tr>
+          </dd>
+        </div>
+        @if (decision().sticky.pinned; as pinned) {
+          <div class="routing-item">
+            <dt>Pinned</dt>
+            <dd>
+              @if (pinnedCandidate(); as candidate) {
+                <code>{{ candidate.id }}</code>
+                <span class="sub">{{ candidate.provider }} · {{ candidate.model }}</span>
+              } @else {
+                <code>{{ pinned }}</code>
+                <span class="sub">not among this request's candidates</span>
+              }
+            </dd>
+          </div>
         }
-      </tbody>
-    </table>
-    <p class="legend">
-      <sup class="marker" [attr.title]="markerHelp('imputed')">imp</sup>
-      imputed at the neutral 0.5 (no data) ·
-      <sup class="marker" [attr.title]="markerHelp('shrunk')">shr</sup>
-      shrunk toward 0.5 (fewer than 10 samples) · total is not clamped to [0, 1] and can be
-      negative.
-    </p>
-  }
-</div>
+        @if (decision().sticky.age_s !== null) {
+          <div class="routing-item">
+            <dt>Pin age</dt>
+            <dd>
+              {{
+                decision().sticky.age_s === 0
+                  ? 'fresh pin (picked by this request)'
+                  : decision().sticky.age_s + 's'
+              }}
+            </dd>
+          </div>
+        }
+        @if (decision().sticky.replaced_why; as reason) {
+          <div class="routing-item">
+            <dt>Previous pin</dt>
+            <dd>replaced: {{ reason }}</dd>
+          </div>
+        }
+      </dl>
+    }
+
+    @if (decision().candidates.length === 0) {
+      <p class="empty">No candidates were recorded for this request.</p>
+    } @else {
+      <ui-table [dense]="true">
+        <table class="score-table">
+          <thead>
+            <tr>
+              <th scope="col">Candidate</th>
+              <th scope="col">Outcome</th>
+              <th scope="col">Basis</th>
+              <th scope="col" class="num">Mix $/M</th>
+              <th scope="col" class="num">Price</th>
+              <th scope="col" class="num">Speed</th>
+              <th scope="col" class="num">Quality</th>
+              <th scope="col" class="num">Reliability</th>
+              <th scope="col" class="num">Penalties</th>
+              <th scope="col" class="num">Total</th>
+              <th scope="col">Why</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (candidate of decision().candidates; track candidate.id) {
+              <tr [class.chosen]="isChosen(candidate)">
+                <td class="candidate">
+                  <code>{{ candidate.id }}</code>
+                  <span class="sub">{{ candidate.provider }} · {{ candidate.model }}</span>
+                </td>
+                <td>
+                  <ui-badge [tone]="outcomeTone(candidate)">{{ outcomeLabel(candidate) }}</ui-badge>
+                </td>
+                <td>
+                  <ui-badge [tone]="basisTone(candidate)">{{ basisLabel(candidate) }}</ui-badge>
+                </td>
+                <td class="num mix">{{ formatMixPrice(candidate) }}</td>
+                @if (candidate.score; as score) {
+                  <td class="num">
+                    {{ formatScore(score.price) }}
+                    @if (marker(score, 'price'); as mark) {
+                      <sup class="marker" [attr.title]="markerHelp(mark)">{{
+                        markerLabel(mark)
+                      }}</sup>
+                    }
+                  </td>
+                  <td class="num">
+                    {{ formatScore(score.speed) }}
+                    @if (marker(score, 'speed'); as mark) {
+                      <sup class="marker" [attr.title]="markerHelp(mark)">{{
+                        markerLabel(mark)
+                      }}</sup>
+                    }
+                  </td>
+                  <td class="num">
+                    {{ formatScore(score.quality) }}
+                    @if (marker(score, 'quality'); as mark) {
+                      <sup class="marker" [attr.title]="markerHelp(mark)">{{
+                        markerLabel(mark)
+                      }}</sup>
+                    }
+                  </td>
+                  <td class="num">
+                    {{ formatScore(score.reliability) }}
+                    @if (marker(score, 'reliability'); as mark) {
+                      <sup class="marker" [attr.title]="markerHelp(mark)">{{
+                        markerLabel(mark)
+                      }}</sup>
+                    }
+                  </td>
+                  <td class="num">{{ formatScore(score.penalties) }}</td>
+                  <td class="num total" [class.negative]="score.total < 0">
+                    {{ formatScore(score.total) }}
+                  </td>
+                } @else {
+                  <td
+                    colspan="6"
+                    class="unscored"
+                    title="Excluded or unscored strategies carry no breakdown."
+                  >
+                    not scored
+                  </td>
+                }
+                <td class="why">{{ candidate.explanation }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </ui-table>
+      <p class="legend">
+        <sup class="marker" [attr.title]="markerHelp('imputed')">imp</sup>
+        imputed at the neutral 0.5 (no data) ·
+        <sup class="marker" [attr.title]="markerHelp('shrunk')">shr</sup>
+        shrunk toward 0.5 (fewer than 10 samples) · total is a raw weighted score, not clamped to
+        [0, 1] — it can be negative (penalties, member weights) or above 1.
+      </p>
+    }
+  </div>
+</ui-card>

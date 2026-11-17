@@ -50,11 +50,5 @@ export interface UserPatch {
   must_change_password?: boolean;
 }
 
-/** The body of `POST /api/auth/change-password`. */
-export interface PasswordChange {
-  current_password: string;
-  new_password: string;
-}
-
 /** Shortest password the API accepts (server `MIN_PASSWORD_LEN`). */
 export const MIN_PASSWORD_LEN = 12;

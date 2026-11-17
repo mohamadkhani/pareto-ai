@@ -10,168 +10,182 @@
   </header>
 
   @if (forbidden()) {
-    <div class="card">
-      <h2>Forbidden</h2>
-      <p class="empty-note">Access grants are restricted to administrators.</p>
-    </div>
+    <ui-empty title="Forbidden" description="Access grants are restricted to administrators." />
   } @else {
-    @if (actionError()) {
-      <div class="banner error" role="alert">{{ actionError() }}</div>
+    @if (actionError() && !showForm()) {
+      <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+        {{ actionError() }}
+      </ui-banner>
     }
 
     <div class="toolbar">
-      <button type="button" class="btn primary" (click)="openForm()">New grant</button>
+      <ui-button variant="primary" (clicked)="openForm()">New grant</ui-button>
       <span class="spacer"></span>
-      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+      <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
     </div>
 
     @if (showForm()) {
-      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
-        <h2>New grant</h2>
-        <div class="form-grid">
-          <div class="field">
-            <label for="grant-subject-type">Subject kind</label>
-            <select
-              id="grant-subject-type"
-              formControlName="subject_type"
-              (change)="onSubjectTypeChange()"
-            >
-              <option value="user">user</option>
-              <option value="api_key">api key</option>
-            </select>
-          </div>
-          @if (form.controls.subject_type.value === 'api_key') {
-            <div class="field">
-              <label for="grant-key-owner">Key owner</label>
+      <ui-dialog [open]="true" title="New grant" (closed)="closeForm()">
+        @if (actionError()) {
+          <ui-banner tone="danger">{{ actionError() }}</ui-banner>
+        }
+        <form [formGroup]="form" (ngSubmit)="save()" novalidate>
+          <div class="form-grid">
+            <ui-field label="Subject kind" [controlId]="'grant-subject-type'">
               <select
-                id="grant-key-owner"
-                formControlName="key_owner_id"
-                (change)="onKeyOwnerChange()"
+                id="grant-subject-type"
+                formControlName="subject_type"
+                (change)="onSubjectTypeChange()"
               >
-                <option value="">Choose an account…</option>
-                @for (user of users(); track user.id) {
-                  <option [value]="user.id">{{ user.email }}</option>
+                <option value="user">user</option>
+                <option value="api_key">api key</option>
+              </select>
+            </ui-field>
+            @if (form.controls.subject_type.value === 'api_key') {
+              <ui-field label="Key owner" [controlId]="'grant-key-owner'">
+                <select
+                  id="grant-key-owner"
+                  formControlName="key_owner_id"
+                  (change)="onKeyOwnerChange()"
+                >
+                  <option value="">Choose an account…</option>
+                  @for (user of users(); track user.id) {
+                    <option [value]="user.id">{{ user.email }}</option>
+                  }
+                </select>
+              </ui-field>
+            }
+            <ui-field
+              [label]="form.controls.subject_type.value === 'user' ? 'Account' : 'API key'"
+              [controlId]="'grant-subject'"
+              [error]="showError('subject_id') ? fieldError('subject_id') : ''"
+            >
+              <select id="grant-subject" formControlName="subject_id">
+                <option value="">
+                  {{
+                    form.controls.subject_type.value === 'user'
+                      ? 'Choose an account…'
+                      : 'Choose an API key…'
+                  }}
+                </option>
+                @for (option of subjectOptions(); track option.id) {
+                  <option [value]="option.id">{{ option.label }}</option>
                 }
               </select>
-            </div>
-          }
-          <div class="field">
-            <label for="grant-subject">
-              {{ form.controls.subject_type.value === 'user' ? 'Account' : 'API key' }}
-            </label>
-            <select id="grant-subject" formControlName="subject_id">
-              <option value="">
-                {{
-                  form.controls.subject_type.value === 'user'
-                    ? 'Choose an account…'
-                    : 'Choose an API key…'
-                }}
-              </option>
-              @for (option of subjectOptions(); track option.id) {
-                <option [value]="option.id">{{ option.label }}</option>
-              }
-            </select>
-            @if (showError('subject_id')) {
-              <p class="field-error" role="alert">{{ fieldError('subject_id') }}</p>
-            }
-          </div>
-          <div class="field">
-            <label for="grant-resource-type">Resource kind</label>
-            <select
-              id="grant-resource-type"
-              formControlName="resource_type"
-              (change)="onResourceTypeChange()"
+            </ui-field>
+            <ui-field label="Resource kind" [controlId]="'grant-resource-type'">
+              <select
+                id="grant-resource-type"
+                formControlName="resource_type"
+                (change)="onResourceTypeChange()"
+              >
+                <option value="model">model</option>
+                <option value="offering">offering</option>
+                <option value="credential">credential</option>
+              </select>
+            </ui-field>
+            <ui-field
+              label="Resource"
+              [controlId]="'grant-resource'"
+              [error]="showError('resource_id') ? fieldError('resource_id') : ''"
             >
-              <option value="model">model</option>
-              <option value="offering">offering</option>
-              <option value="credential">credential</option>
-            </select>
+              <select id="grant-resource" formControlName="resource_id">
+                <option value="">Choose a resource…</option>
+                @for (option of resourceOptions(); track option.id) {
+                  <option [value]="option.id">{{ option.label }}</option>
+                }
+              </select>
+            </ui-field>
+            <ui-field label="Mode" [controlId]="'grant-mode'">
+              <select id="grant-mode" formControlName="mode">
+                <option value="allow">allow</option>
+                <option value="deny">deny</option>
+              </select>
+            </ui-field>
           </div>
-          <div class="field">
-            <label for="grant-resource">Resource</label>
-            <select id="grant-resource" formControlName="resource_id">
-              <option value="">Choose a resource…</option>
-              @for (option of resourceOptions(); track option.id) {
-                <option [value]="option.id">{{ option.label }}</option>
-              }
-            </select>
-            @if (showError('resource_id')) {
-              <p class="field-error" role="alert">{{ fieldError('resource_id') }}</p>
-            }
-          </div>
-          <div class="field">
-            <label for="grant-mode">Mode</label>
-            <select id="grant-mode" formControlName="mode">
-              <option value="allow">allow</option>
-              <option value="deny">deny</option>
-            </select>
-          </div>
+        </form>
+        <div ui-dialog-actions>
+          <ui-button (clicked)="closeForm()">Cancel</ui-button>
+          <ui-button variant="primary" [loading]="saving()" (clicked)="save()">
+            Create grant
+          </ui-button>
         </div>
-        <div class="form-actions">
-          <button type="submit" class="btn primary" [disabled]="saving()">
-            {{ saving() ? 'Saving…' : 'Create grant' }}
-          </button>
-          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
+      </ui-dialog>
+    }
+
+    @if (deleteTarget(); as target) {
+      <ui-dialog [open]="true" title="Delete grant" (closed)="closeDelete()">
+        <p>
+          Delete the {{ target.mode }} grant on <code>{{ resourceLabel(target) }}</code>? Access is
+          re-evaluated on the next request.
+        </p>
+        <div ui-dialog-actions>
+          <ui-button (clicked)="closeDelete()">Cancel</ui-button>
+          <ui-button
+            variant="danger"
+            [loading]="deletingId() === target.id"
+            (clicked)="confirmDelete()"
+          >
+            Confirm delete
+          </ui-button>
         </div>
-      </form>
+      </ui-dialog>
     }
 
     @if (loadError()) {
-      <div class="banner error" role="alert">
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
         {{ loadError() }}
-        <button type="button" class="btn" (click)="reload()">Try again</button>
-      </div>
+      </ui-banner>
     } @else if (loading() && grants().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (grants().length === 0) {
-      <div class="card">
-        <h2>No grants yet</h2>
-        <p class="empty-note">
-          Without a grant, a non-admin account is denied every model, offering, and credential.
-        </p>
-      </div>
+      <ui-empty
+        title="No grants yet"
+        description="Without a grant, a non-admin account is denied every model, offering, and credential."
+      >
+        <span ui-empty-action>
+          <ui-button size="sm" variant="primary" (clicked)="openForm()">New grant</ui-button>
+        </span>
+      </ui-empty>
     } @else {
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th scope="col">Subject</th>
-            <th scope="col">Resource</th>
-            <th scope="col">Mode</th>
-            <th scope="col">Created</th>
-            <th scope="col"><span class="visually-hidden">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (grant of grants(); track grant.id) {
+      <ui-table [sticky]="true">
+        <table>
+          <thead>
             <tr>
-              <td>
-                {{ subjectLabel(grant) }}
-                <span class="badge">{{ grant.subject_type }}</span>
-              </td>
-              <td>
-                {{ resourceLabel(grant) }}
-                <span class="badge">{{ grant.resource_type }}</span>
-              </td>
-              <td>
-                <span
-                  class="badge"
-                  [class.ok]="grant.mode === 'allow'"
-                  [class.error]="grant.mode === 'deny'"
-                >
-                  {{ grant.mode }}
-                </span>
-              </td>
-              <td>{{ formatTime(grant.created_at) }}</td>
-              <td class="actions">
-                <app-delete-confirm
-                  [pending]="deletingId() === grant.id"
-                  (confirmed)="remove(grant)"
-                />
-              </td>
+              <th scope="col">Subject</th>
+              <th scope="col">Resource</th>
+              <th scope="col">Mode</th>
+              <th scope="col">Created</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
             </tr>
-          }
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            @for (grant of grants(); track grant.id) {
+              <tr>
+                <td>
+                  {{ subjectLabel(grant) }}
+                  <ui-badge tone="neutral">{{ grant.subject_type }}</ui-badge>
+                </td>
+                <td>
+                  {{ resourceLabel(grant) }}
+                  <ui-badge tone="neutral">{{ grant.resource_type }}</ui-badge>
+                </td>
+                <td>
+                  <ui-badge [tone]="grant.mode === 'allow' ? 'success' : 'danger'">{{
+                    grant.mode
+                  }}</ui-badge>
+                </td>
+                <td>{{ formatTime(grant.created_at) }}</td>
+                <td class="actions">
+                  <ui-button size="sm" variant="danger" (clicked)="openDelete(grant)">
+                    Delete
+                  </ui-button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </ui-table>
     }
   }
 </div>

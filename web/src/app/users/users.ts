@@ -7,9 +7,16 @@ import {
   Validators,
 } from '@angular/forms';
 import { AuthService } from '../auth/auth.service';
-import { DeleteConfirm } from '../catalog/delete-confirm';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime } from '../catalog/format';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiDialog } from '../ui/dialog';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiSwitch } from '../ui/switch';
+import { UiTable } from '../ui/table';
 import { UsersService } from './users.service';
 import { MIN_PASSWORD_LEN, type UserPatch, type UserView } from './users.types';
 
@@ -41,7 +48,17 @@ function fieldErrorText(control: AbstractControl, field: string): string {
 /** The user directory: create, edit, and force password resets. Admin only. */
 @Component({
   selector: 'app-users',
-  imports: [ReactiveFormsModule, DeleteConfirm],
+  imports: [
+    ReactiveFormsModule,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiDialog,
+    UiEmpty,
+    UiField,
+    UiSwitch,
+    UiTable,
+  ],
   templateUrl: './users.html',
   styleUrl: './users.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -60,6 +77,8 @@ export class Users {
   protected readonly saving = signal(false);
   protected readonly resetUser = signal<UserView | null>(null);
   protected readonly resetting = signal(false);
+  /** The reset's second click: the first arms, the second sends the request. */
+  protected readonly resetArmed = signal(false);
 
   protected readonly formatTime = formatTime;
   protected readonly minLength = MIN_PASSWORD_LEN;
@@ -199,11 +218,26 @@ export class Users {
     this.resetForm.reset({ password: '' });
     this.attempted.set(false);
     this.actionError.set(null);
+    this.resetArmed.set(false);
     this.resetUser.set(user);
   }
 
   protected closeReset(): void {
     this.resetUser.set(null);
+    this.resetArmed.set(false);
+  }
+
+  /** Arms the destructive second click; the dialog already names the effect. */
+  protected armReset(): void {
+    this.resetArmed.set(true);
+  }
+
+  protected setMustChangePassword(value: boolean): void {
+    this.createForm.controls.must_change_password.setValue(value);
+  }
+
+  protected setActive(value: boolean): void {
+    this.editForm.controls.is_active.setValue(value);
   }
 
   /**
@@ -220,7 +254,7 @@ export class Users {
     this.resetting.set(true);
     try {
       await this.usersService.update(user.id, { password: this.resetForm.getRawValue().password });
-      this.resetUser.set(null);
+      this.closeReset();
       await this.reload();
     } catch (err) {
       this.actionError.set(describeError(err, 'Resetting the password failed.'));

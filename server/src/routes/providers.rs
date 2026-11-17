@@ -16,7 +16,7 @@ use crate::AppState;
 use crate::auth::{ClientIp, RequireAdmin};
 use crate::catalog::{
     self, Actor, CredentialInput, CredentialPatch, CredentialTestView, CredentialView,
-    ProviderInput, ProviderPatch, ProviderView,
+    DiscoveryInput, DiscoverySummary, ProviderInput, ProviderPatch, ProviderView,
 };
 use crate::error::{self, ApiError, ErrorBody};
 use crate::probe;
@@ -410,6 +410,50 @@ pub async fn test_credential(
         error: result.error,
         tested_at: row.last_tested_at.unwrap_or_default(),
     }))
+}
+
+/// Discovers the provider's models from its `GET {base_url}/models` endpoint
+/// and materializes them as models and offerings. Admin only and audited as
+/// `provider.discover_models`.
+///
+/// The credential defaults to the provider's first active one; `dry_run`
+/// previews the counts without writing catalog rows. Upstream failures
+/// (unreachable, timeout, 401/403, malformed payload) answer `502
+/// upstream_error` and write nothing.
+#[utoipa::path(
+    post,
+    path = "/api/providers/{id}/discover-models",
+    tag = "admin",
+    params(("id" = String, Path, description = "provider id")),
+    request_body = DiscoveryInput,
+    responses(
+        (status = 200, description = "discovery summary (dry-run included)", body = DiscoverySummary),
+        (status = 400, description = "invalid body or provider has no credentials", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
+        (status = 404, description = "no such provider or credential", body = ErrorBody),
+        (status = 502, description = "provider /models request failed", body = ErrorBody)
+    )
+)]
+pub async fn discover_models(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    ip: ClientIp,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<DiscoveryInput>, JsonRejection>,
+) -> Result<Json<DiscoverySummary>, ApiError> {
+    let rid = error::request_id(&headers);
+    let Json(input) = bad_body(body, "provider discover models", &rid)?;
+    let actor = Actor {
+        user_id: &admin.user_id,
+        ip: &ip.0,
+    };
+    let summary =
+        catalog::discovery::discover_models(&state.pool, &state.secrets, &actor, &id, &input)
+            .await
+            .map_err(|e| e.into_api_error(rid))?;
+    Ok(Json(summary))
 }
 
 #[cfg(test)]

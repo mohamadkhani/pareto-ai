@@ -1,0 +1,154 @@
+<div class="preview">
+  <ui-banner tone="info">
+    This is exactly what routing will do: the same filters (grants, budgets, breakers, constraints)
+    run before the same weighted score, in the same order. Saving the combo does not change this
+    list; catalog changes do.
+  </ui-banner>
+
+  <dl class="facts">
+    <div>
+      <dt>Effective mix profile</dt>
+      <dd>
+        <strong>{{ preview().profile.profile_name }}</strong>
+        <span class="mono">{{ preview().profile.profile_id }}</span>
+      </dd>
+    </div>
+    <div>
+      <dt>Pool</dt>
+      <dd>
+        {{ preview().scored }} scored
+        @if (preview().candidates.length !== preview().scored) {
+          · showing {{ preview().candidates.length }}
+        }
+        · {{ preview().excluded.length }} excluded ({{
+          preview().scored + preview().excluded.length
+        }}
+        total)
+      </dd>
+    </div>
+  </dl>
+
+  <section class="section">
+    <h3>Priority order</h3>
+    @if (preview().candidates.length === 0) {
+      <p class="empty">
+        No candidate passed the filters and constraints. The request would fail until an offering
+        becomes eligible or a constraint is relaxed.
+      </p>
+    } @else {
+      <ol class="candidate-list">
+        @for (candidate of preview().candidates; track candidate.offering_id; let i = $index) {
+          <li class="candidate">
+            <span class="position" aria-hidden="true">{{ i + 1 }}</span>
+            <div class="candidate-main">
+              <div class="candidate-head">
+                <span class="candidate-model">{{ candidate.model }}</span>
+                <span class="candidate-provider">{{ candidate.provider }}</span>
+                <code class="offering">{{ candidate.offering_id }}</code>
+              </div>
+              <p class="explanation">{{ candidate.explanation }}</p>
+              <p class="markers">{{ markers(candidate) }}</p>
+            </div>
+            <div class="candidate-figures">
+              <div class="figure">
+                <span class="figure-label">Quality</span>
+                <span class="figure-value">{{ formatQuality(candidate.quality) }}</span>
+                <ui-badge [tone]="qualityTone(candidate)">{{ qualityLabel(candidate) }}</ui-badge>
+              </div>
+              <div class="figure">
+                <span class="figure-label">Mix $/M</span>
+                <span class="figure-value">{{ formatMixPrice(candidate.mix_price) }}</span>
+              </div>
+              <div class="score">
+                <div class="score-bar" aria-hidden="true">
+                  <span class="score-fill" [style.width.%]="barWidth(candidate.score)"></span>
+                </div>
+                <span class="score-total">{{ formatScore(candidate.score.total) }}</span>
+              </div>
+              <span class="breakdown">{{ breakdown(candidate) }}</span>
+            </div>
+          </li>
+        }
+      </ol>
+      <p class="legend">
+        The score is the weighted sum minus penalties, multiplied by the member weight. It is not
+        clamped: a penalty-heavy candidate can score below zero, and the bar clamps only its width.
+      </p>
+    }
+  </section>
+
+  <section class="section">
+    <h3>Excluded ({{ preview().excluded.length }})</h3>
+    @if (groups().length === 0) {
+      <p class="empty">
+        Nothing was excluded — every offering the gateway could see is a candidate.
+      </p>
+    } @else {
+      @for (group of groups(); track group.reason) {
+        <div class="exclusion-group">
+          <h4>
+            {{ group.label }}
+            <ui-badge tone="neutral">{{ group.items.length }}</ui-badge>
+          </h4>
+          <ul class="exclusion-list">
+            @for (item of group.items; track item.offering_id) {
+              <li>
+                <span class="excluded-model">{{ item.model }}</span>
+                <span class="excluded-provider">{{ item.provider }}</span>
+                <span class="excluded-detail">{{ item.detail }}</span>
+              </li>
+            }
+          </ul>
+        </div>
+      }
+    }
+  </section>
+
+  <section class="section">
+    <h3>Session stickiness</h3>
+    @if (sticky(); as pin) {
+      <dl class="facts">
+        <div>
+          <dt>Status</dt>
+          <dd>
+            <ui-badge tone="success">enabled</ui-badge>
+            <span class="mono">key source: {{ pin.key_source }}</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Session key</dt>
+          <dd>
+            @if (pin.session_key !== null) {
+              <code>{{ pin.session_key }}</code>
+            } @else {
+              <span class="empty-inline">none supplied</span>
+            }
+          </dd>
+        </div>
+        <div>
+          <dt>Current pin</dt>
+          <dd>
+            @if (pin.pinned !== null) {
+              <code>{{ pin.pinned }}</code>
+              <span class="empty-inline">· {{ ageLabel(pin.age_s) }}</span>
+            } @else if (pin.session_key === null) {
+              <span class="empty-inline">supply a session key to see its pin</span>
+            } @else {
+              <span class="empty-inline">no current pin; the next request scores the pool</span>
+            }
+          </dd>
+        </div>
+      </dl>
+      <p class="legend">
+        A valid pin is reused only while its offering stays eligible; otherwise the pool is
+        re-scored and the pin moves to the offering that serves the request. This keeps prompt
+        caching alive across turns.
+      </p>
+    } @else {
+      <p class="empty">
+        Stickiness is off: this combo re-scores the pool on every request. Enable it to pin one
+        offering per session, which keeps the provider's prompt cache warm.
+      </p>
+    }
+  </section>
+</div>

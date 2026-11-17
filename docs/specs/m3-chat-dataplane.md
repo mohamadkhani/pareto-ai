@@ -96,8 +96,11 @@ request_logs(request_id TEXT PK, client_request_id TEXT, occurred_at TEXT NOT
   `chars/4`, and set `tokens_estimated=1` — never from JSON scaffolding or raw
   body bytes (review M1, 2026-11-16). Estimation applies only when a request
   was actually sent upstream (review M3).
-- Never retry a `400`/`401`/`403` from upstream; `429` is retried once on the
-  next candidate honouring `Retry-After` as a cooldown on that credential.
+- Never retry a `400`/`422` from upstream. `401`/`403` (credential fault),
+  `402`, and `429` first retry the same offering with its next eligible
+  credential (never the credential that just failed), then the next offering;
+  `429` is retried at most once per request, honouring `Retry-After` as a
+  cooldown on that credential.
 
 ## Error taxonomy (status + `error.code`)
 

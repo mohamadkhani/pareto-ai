@@ -1,4 +1,4 @@
-import { type AbstractControl, type ValidationErrors, Validators } from '@angular/forms';
+import { type AbstractControl, type ValidationErrors } from '@angular/forms';
 
 /** Requires an http(s) URL; empty is left to `required`. */
 export function httpUrl(control: AbstractControl): ValidationErrors | null {
@@ -18,6 +18,3 @@ export function positiveInteger(control: AbstractControl): ValidationErrors | nu
   const valid = typeof value === 'number' && Number.isInteger(value) && value >= 1;
   return valid ? null : { positiveInteger: true };
 }
-
-/** Rejects negative numbers; empty is allowed (unknown). */
-export const nonNegative = Validators.min(0);

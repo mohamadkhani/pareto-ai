@@ -26,11 +26,16 @@
 //!   is reserved against the user's budgets and token caps (decision D7).
 //! * **Failover**: only before the first byte reaches the client — before the
 //!   first upstream chunk is forwarded for streams, before the response is
-//!   returned for buffered calls. `400`/`401`/`403` never fail over — except
-//!   that inside a combo an `upstream_auth` failure **does** advance to the
-//!   next member: the member list is the operator's explicit fallback chain,
-//!   and advancing does not retry the bad credential. `429` fails over at
-//!   most once, honouring `Retry-After` as a cooldown on that credential.
+//!   returned for buffered calls. `400`/`422` never fail over. A failure
+//!   attributable to the credential (`upstream_auth` 401/403, `upstream_quota`
+//!   402, `upstream_rate_limited` 429) first retries the **same offering with
+//!   the next eligible credential** (ordered: not cooled and not breaker-open,
+//!   then cooled; a credential that just failed is never retried in the same
+//!   request), then moves to the next offering. Inside a combo an
+//!   `upstream_auth` failure also advances to the next member — the member
+//!   list is the operator's explicit fallback chain. `429` fails over at most
+//!   once per request, honouring `Retry-After` as a cooldown on that
+//!   credential.
 //! * **Settle**: exactly one `usage_events` and one `request_logs` row per
 //!   request (never one per attempt — a failed over request is not double
 //!   spent), plus one `telemetry_attempts` sample per classified attempt
@@ -75,6 +80,7 @@ use crate::access;
 use crate::benchmarks;
 use crate::catalog;
 use crate::combos;
+use crate::mix;
 use crate::money;
 use crate::reports;
 use crate::routing::{self, Strategy};
@@ -106,6 +112,8 @@ pub struct RequestMeta {
     pub role: crate::auth::Role,
     /// The API key behind the request, `None` for session callers (M4).
     pub api_key: Option<crate::api_keys::KeyContext>,
+    /// The client's optional `X-Session-Id`, used by sticky combos (D35).
+    pub session_hint: Option<String>,
     /// Wall-clock request start: the period a request settles into (D7) and
     /// the rollup day key.
     pub started_at: String,
@@ -276,7 +284,7 @@ fn parse_request(raw: &[u8]) -> Result<WireRequest, ChatFailure> {
 // ---------------------------------------------------------------------------
 
 /// One provider credential selected for an offering.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Credential {
     id: String,
     secret_cipher: String,
@@ -297,13 +305,24 @@ struct Candidate {
     upstream_model_id: String,
     provider_name: String,
     base_url: String,
+    /// The offering and its provider are both enabled (D35 pools include
+    /// disabled rows so the preview can explain them).
+    enabled: bool,
     context_length: Option<i64>,
     max_output_tokens: Option<i64>,
     /// The model's declared input modalities (JSON array), for the capability
     /// filter. Unknown modalities pass every requirement.
     modalities_input: Option<String>,
     offering_headers_json: Option<String>,
+    /// The credential that will serve the next attempt for this offering.
+    /// Rotated in-request on a credential-attributable failure (see
+    /// [`credential_attributable`]).
     credential: Option<Credential>,
+    /// Every eligible credential of this offering's provider, in the same
+    /// deterministic preference order as [`ordered_credentials`] (not cooled and
+    /// not breaker-open first, then cooled, then breaker-open). The first
+    /// entry is `credential` when it was selected from this list.
+    credentials: Vec<Credential>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -321,40 +340,101 @@ struct OfferingJoin {
     provider_id: String,
     provider_name: String,
     base_url: String,
+    offering_enabled: i64,
+    provider_enabled: i64,
 }
+
+const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream_model_id, \
+     o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
+     m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
+     pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
+     o.enabled AS offering_enabled, pr.enabled AS provider_enabled \
+     FROM offerings o \
+     JOIN models m ON m.id = o.model_id \
+     JOIN providers pr ON pr.id = o.provider_id";
 
 const SELECT_OFFERING_JOIN: &str = "SELECT o.id AS offering_id, o.model_id, o.upstream_model_id, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
-     pr.id AS provider_id, pr.name AS provider_name, pr.base_url \
+     pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
+     o.enabled AS offering_enabled, pr.enabled AS provider_enabled \
      FROM offerings o \
      JOIN models m ON m.id = o.model_id \
      JOIN providers pr ON pr.id = o.provider_id \
      WHERE pr.enabled = 1 AND o.enabled = 1";
 
 /// Builds one candidate from its join row, picking the provider credential
-/// (M3 cooldown demotion plus M5 breaker avoidance, see [`pick_credential`]).
-async fn build_candidate(
-    pool: &sqlx::SqlitePool,
+/// (M3 cooldown demotion plus M5 breaker avoidance, see [`ordered_credentials`]).
+fn build_candidate(
     breaker: &crate::breaker::BreakerRegistry,
     row: OfferingJoin,
+    credentials: &mut HashMap<String, Vec<CredentialRow>>,
     now: &str,
-) -> Result<Candidate, ChatFailure> {
-    let credential =
-        pick_credential(pool, &row.provider_id, &row.offering_id, now, breaker).await?;
-    Ok(Candidate {
+) -> Candidate {
+    let credentials = ordered_credentials(
+        credentials
+            .get(&row.provider_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        &row.offering_id,
+        now,
+        breaker,
+    );
+    let credential = credentials.first().cloned();
+    Candidate {
         offering_id: row.offering_id,
         model_id: row.model_id,
         canonical_name: row.canonical_name,
         upstream_model_id: row.upstream_model_id,
         provider_name: row.provider_name,
         base_url: row.base_url,
+        enabled: row.offering_enabled == 1 && row.provider_enabled == 1,
         context_length: row.context_override.or(row.context_length),
         max_output_tokens: row.max_output_override.or(row.max_output_tokens),
         modalities_input: row.modalities_input,
         offering_headers_json: row.offering_headers_json,
         credential,
-    })
+        credentials,
+    }
+}
+
+/// Loads the credentials of every candidate provider in **one** query
+/// (`WHERE provider_id IN (...)`), grouped by provider with `ORDER BY id`
+/// inside a provider — the same per-provider order the one-query-per-candidate
+/// path used. Failure mode: `500 internal` on database errors.
+async fn load_credentials(
+    pool: &sqlx::SqlitePool,
+    rows: &[OfferingJoin],
+) -> Result<HashMap<String, Vec<CredentialRow>>, ChatFailure> {
+    let mut provider_ids: Vec<&str> = rows.iter().map(|row| row.provider_id.as_str()).collect();
+    provider_ids.sort_unstable();
+    provider_ids.dedup();
+    if provider_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; provider_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT id, provider_id, secret_cipher, headers_json, cooldown_until, balance_usd, \
+                balance_low_threshold \
+         FROM provider_credentials WHERE provider_id IN ({placeholders}) \
+         ORDER BY provider_id, id"
+    );
+    let mut query = sqlx::query_as::<_, CredentialRow>(&sql);
+    for provider_id in &provider_ids {
+        query = query.bind(provider_id);
+    }
+    let credentials = query.fetch_all(pool).await.map_err(|e| {
+        tracing::error!(error = %e, "resolving credentials failed");
+        ChatFailure::internal()
+    })?;
+    let mut grouped: HashMap<String, Vec<CredentialRow>> = HashMap::new();
+    for credential in credentials {
+        grouped
+            .entry(credential.provider_id.clone())
+            .or_default()
+            .push(credential);
+    }
+    Ok(grouped)
 }
 
 /// Resolves the requested plain model to candidates in the fixed M3 order:
@@ -381,9 +461,10 @@ async fn resolve_candidates(
         ChatFailure::internal()
     })?;
 
+    let mut credentials = load_credentials(pool, &rows).await?;
     let mut candidates = Vec::with_capacity(rows.len());
     for row in rows {
-        candidates.push(build_candidate(pool, breaker, row, now).await?);
+        candidates.push(build_candidate(breaker, row, &mut credentials, now));
     }
     Ok(candidates)
 }
@@ -414,9 +495,10 @@ async fn resolve_members(
         ChatFailure::internal()
     })?;
 
+    let mut credentials = load_credentials(pool, &rows).await?;
     let mut by_id: HashMap<String, Candidate> = HashMap::with_capacity(rows.len());
     for row in rows {
-        let candidate = build_candidate(pool, breaker, row, now).await?;
+        let candidate = build_candidate(breaker, row, &mut credentials, now);
         by_id.insert(candidate.offering_id.clone(), candidate);
     }
     let mut candidates = Vec::with_capacity(combo.members.len());
@@ -433,6 +515,95 @@ async fn resolve_members(
     Ok(candidates)
 }
 
+/// Resolves every offering in the catalog (enabled or not) for a `pool = all`
+/// combo, in the same stable creation order as plain models. Disabled rows are
+/// kept so [`combos::resolve_pool`] can report them; the preview shares this
+/// loader. Failure mode: `500 internal` on database errors.
+async fn resolve_pool_candidates(
+    state: &AppState,
+    now: &str,
+) -> Result<Vec<Candidate>, ChatFailure> {
+    let rows = sqlx::query_as::<_, OfferingJoin>(&format!(
+        "SELECT {OFFERING_JOIN_COLUMNS} ORDER BY o.created_at, o.id"
+    ))
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "resolving the catalog pool failed");
+        ChatFailure::internal()
+    })?;
+    let mut credentials = load_credentials(&state.pool, &rows).await?;
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        candidates.push(build_candidate(&state.breaker, row, &mut credentials, now));
+    }
+    Ok(candidates)
+}
+
+/// The message text of a content string or text parts (for the auto session
+/// key). Non-text parts are ignored.
+fn message_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.get("content").and_then(Value::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// The conversation opening for the auto session key: the first `system`
+/// message and the first `user` message (D35).
+fn conversation_opening(messages: &[Value]) -> (Option<String>, Option<String>) {
+    let role = |message: &Value| {
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let system = messages
+        .iter()
+        .find(|message| role(message) == "system")
+        .map(message_text);
+    let user = messages
+        .iter()
+        .find(|message| role(message) == "user")
+        .map(message_text);
+    (system, user)
+}
+
+/// The sticky session key of a request, when the combo is sticky and a key
+/// can be derived (see [`combos::session_key`]).
+fn sticky_session_key(
+    combo: &combos::Combo,
+    meta: &RequestMeta,
+    messages: &[Value],
+) -> Option<String> {
+    if !combo.stickiness_enabled {
+        return None;
+    }
+    let subject = meta
+        .api_key
+        .as_ref()
+        .map(|key| key.key_id.as_str())
+        .unwrap_or(meta.user_id.as_str());
+    let (system, user) = conversation_opening(messages);
+    combos::session_key(
+        combo.stickiness_key_source,
+        meta.session_hint.as_deref(),
+        subject,
+        system.as_deref(),
+        user.as_deref(),
+    )
+}
+
 /// Stable M3 demotion: candidates whose credential is in cooldown sink to the
 /// end of the order, relative order kept.
 fn demote_cooled(candidates: &mut [Candidate]) {
@@ -447,6 +618,7 @@ fn demote_cooled(candidates: &mut [Candidate]) {
 #[derive(Debug, sqlx::FromRow)]
 struct CredentialRow {
     id: String,
+    provider_id: String,
     secret_cipher: String,
     headers_json: Option<String>,
     cooldown_until: Option<String>,
@@ -454,53 +626,54 @@ struct CredentialRow {
     balance_low_threshold: Option<f64>,
 }
 
-/// The provider credential to use for one offering: id order, preferring a
-/// credential that is neither breaker-open for this offering nor in cooldown,
-/// then one that is only cooled (the M3 demotion still applies), then one
-/// whose breaker is open (the candidate is then excluded with
-/// `skipped_breaker_open`). `None` when the provider has no credential at all.
-async fn pick_credential(
-    pool: &sqlx::SqlitePool,
-    provider_id: &str,
+/// The provider's credentials for one offering in attempt order: not cooled
+/// and not breaker-open first, then cooled ones (the M3 demotion), then
+/// breaker-open ones (the caller excludes those). Id order inside each tier
+/// keeps it deterministic. `rows` is one provider's slice from
+/// [`load_credentials`], already in id order.
+fn ordered_credentials(
+    rows: &[CredentialRow],
     offering_id: &str,
     now: &str,
     breaker: &crate::breaker::BreakerRegistry,
-) -> Result<Option<Credential>, ChatFailure> {
-    let rows = sqlx::query_as::<_, CredentialRow>(
-        "SELECT id, secret_cipher, headers_json, cooldown_until, balance_usd, \
-                balance_low_threshold \
-         FROM provider_credentials WHERE provider_id = ? ORDER BY id",
-    )
-    .bind(provider_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "resolving credentials failed");
-        ChatFailure::internal()
-    })?;
-
+) -> Vec<Credential> {
     let cooled = |row: &CredentialRow| {
         row.cooldown_until
             .as_deref()
             .is_some_and(|until| until > now)
     };
     let open = |row: &CredentialRow| breaker.is_open(&row.id, offering_id, Instant::now());
-    let preference = |row: &CredentialRow| (open(row), cooled(row));
-    let picked = rows
-        .iter()
-        .min_by_key(|row| preference(row))
-        .or_else(|| rows.first());
-    Ok(picked.map(|row| {
-        warn_low_balance(row);
-        Credential {
-            id: row.id.clone(),
-            secret_cipher: row.secret_cipher.clone(),
-            headers_json: row.headers_json.clone(),
-            cooled: cooled(row),
-            balance_usd: row.balance_usd,
-            balance_low_threshold: row.balance_low_threshold,
-        }
-    }))
+    let mut ordered: Vec<&CredentialRow> = rows.iter().collect();
+    ordered.sort_by_key(|row| (open(row), cooled(row)));
+    ordered
+        .into_iter()
+        .map(|row| {
+            warn_low_balance(row);
+            Credential {
+                id: row.id.clone(),
+                secret_cipher: row.secret_cipher.clone(),
+                headers_json: row.headers_json.clone(),
+                cooled: cooled(row),
+                balance_usd: row.balance_usd,
+                balance_low_threshold: row.balance_low_threshold,
+            }
+        })
+        .collect()
+}
+
+/// The provider credential to use for one offering: the first entry of
+/// [`ordered_credentials`] (not cooled and not breaker-open preferred,
+/// then cooled). `None` when the provider has no credential at all.
+#[cfg(test)]
+fn pick_credential(
+    rows: &[CredentialRow],
+    offering_id: &str,
+    now: &str,
+    breaker: &crate::breaker::BreakerRegistry,
+) -> Option<Credential> {
+    ordered_credentials(rows, offering_id, now, breaker)
+        .into_iter()
+        .next()
 }
 
 /// The manual credential balance is **advisory** in v1 (decision D8): a
@@ -560,11 +733,30 @@ struct CandidateRecord {
     outcome: &'static str,
     error_class: Option<&'static str>,
     status: Option<i64>,
+    /// The mix price used for this candidate, when computable (D34).
+    mix_price: Option<mix::MixPrice>,
+    /// `mix`, `component_sum`, or `unpriced` — how the routing price was
+    /// obtained.
+    price_basis: &'static str,
     /// The M5 score breakdown for weighted candidates (None elsewhere).
     score: Option<routing::Score>,
     /// Why this candidate sits where it sits (set by the router or the
     /// skip sites; synthesized from the outcome otherwise).
     explanation: Option<String>,
+    /// Every credential this request attempted for the candidate, in order.
+    /// Additive to `decision_json`: the field is always present as an array
+    /// (empty when the candidate was skipped), so older readers keep working.
+    credential_attempts: Vec<CredentialAttempt>,
+}
+
+/// One credential attempt inside a candidate, for `decision_json`.
+#[derive(Debug, Clone)]
+struct CredentialAttempt {
+    credential_id: String,
+    /// `failed` or `chosen`.
+    outcome: &'static str,
+    error_class: Option<&'static str>,
+    status: Option<i64>,
 }
 
 /// The `decision_json` routing block: which strategy decided the order and
@@ -579,6 +771,9 @@ struct RoutingInfo {
     weights: Option<Value>,
     /// The named weight preset, when `weights_json` named one.
     preset: Option<String>,
+    /// The token-mix profile whose blend supplied the price component
+    /// (decision D34).
+    mix_profile: Option<mix::MixProfileRef>,
     /// The round-robin cursor consumed by this request.
     rr_cursor: Option<i64>,
 }
@@ -590,8 +785,33 @@ impl Default for RoutingInfo {
             combo: None,
             weights: None,
             preset: None,
+            mix_profile: None,
             rr_cursor: None,
         }
+    }
+}
+
+/// The `decision_json.sticky` block (D35): whether stickiness was enabled, the
+/// key source, the pin in force for this session, its age, and why a previous
+/// pin was replaced.
+#[derive(Debug, Clone, Default)]
+struct StickyInfo {
+    enabled: bool,
+    key_source: Option<&'static str>,
+    pinned: Option<String>,
+    age_s: Option<i64>,
+    replaced_why: Option<String>,
+}
+
+impl StickyInfo {
+    fn to_json(&self) -> Value {
+        json!({
+            "enabled": self.enabled,
+            "key_source": self.key_source,
+            "pinned": self.pinned,
+            "age_s": self.age_s,
+            "replaced_why": self.replaced_why,
+        })
     }
 }
 
@@ -601,6 +821,7 @@ struct Decision {
     chosen_offering_id: Option<String>,
     reason: String,
     routing: RoutingInfo,
+    sticky: StickyInfo,
     /// One telemetry sample per classified attempt (decision D26), written to
     /// `telemetry_attempts` with the settle transaction. Not part of
     /// `decision_json` — the candidate records already narrate the attempts.
@@ -656,7 +877,26 @@ impl Decision {
                     "model": record.model,
                     "upstream_model_id": record.upstream_model_id,
                     "price": record.price,
+                    "mix_price": record.mix_price.as_ref().map(|mix| json!({
+                        "per_m": mix.per_m,
+                        "profile_id": self.routing.mix_profile.as_ref().map(|profile| &profile.profile_id),
+                        "profile_name": self.routing.mix_profile.as_ref().map(|profile| &profile.profile_name),
+                        "shares": {
+                            "input": mix.effective_shares.input,
+                            "output": mix.effective_shares.output,
+                            "cache_read": mix.effective_shares.cache_read,
+                            "cache_write": mix.effective_shares.cache_write,
+                            "reasoning": mix.effective_shares.reasoning,
+                        },
+                    })),
+                    "price_basis": record.price_basis,
                     "credential_id": record.credential_id,
+                    "credential_attempts": record.credential_attempts.iter().map(|attempt| json!({
+                        "credential_id": attempt.credential_id,
+                        "outcome": attempt.outcome,
+                        "error_class": attempt.error_class,
+                        "status": attempt.status,
+                    })).collect::<Vec<_>>(),
                     "outcome": record.outcome,
                     "error_class": record.error_class,
                     "status": record.status,
@@ -671,10 +911,43 @@ impl Decision {
                 "combo": self.routing.combo,
                 "weights": self.routing.weights,
                 "preset": self.routing.preset,
+                "mix_profile": self.routing.mix_profile.as_ref().map(|profile| json!({
+                    "profile_id": profile.profile_id,
+                    "profile_name": profile.profile_name,
+                })),
                 "rr_cursor": self.routing.rr_cursor,
             },
+            "sticky": self.sticky.to_json(),
         })
     }
+}
+
+/// The one-line reason plus the chosen candidate's mix-price provenance
+/// (decision D34), e.g. `mix $0.578/M at code-agent (8.1/0.4/91.5)`.
+fn decision_reason_with_mix(decision: &Decision) -> String {
+    let mut reason = decision_reason(decision);
+    let chosen = decision.chosen_offering_id.as_deref().and_then(|chosen| {
+        decision
+            .candidates
+            .iter()
+            .find(|record| record.id == chosen)
+            .and_then(|record| record.mix_price.as_ref())
+    });
+    if let Some(mix) = chosen {
+        let name = decision
+            .routing
+            .mix_profile
+            .as_ref()
+            .map(|profile| profile.profile_name.as_str())
+            .unwrap_or("?");
+        reason.push_str(&format!(
+            "; mix ${:.3}/M at {} ({})",
+            mix.per_m,
+            name,
+            mix.shares_label()
+        ));
+    }
+    reason
 }
 
 /// The one-line reason for `decision_json`, composed from the attempt
@@ -758,10 +1031,40 @@ struct Attempt {
     decision_idx: usize,
     candidate: Candidate,
     body: Value,
+    /// The offering's price row resolved during candidate resolution. The
+    /// settlement reuses it when the request is served by this offering, so
+    /// one request reads each price row once (docs/research/13-performance.md
+    /// §2, §8.5). `None` means the offering is unpriced, not "not loaded".
+    price: Option<catalog::PriceRow>,
+    /// Index into `candidate.credentials` of the credential the next attempt
+    /// uses. Starts at 0 and only advances on a credential-attributable
+    /// failure, so no credential is retried in the same request.
+    credential_cursor: usize,
 }
 
-/// The blended list price used for scoring: input + output per million
-/// tokens. A partial price is unknown, never 0 (decision D10).
+/// The `decision_json` explanation fragment for the candidate's routing
+/// price (D34): the mix, or the documented component-sum fallback.
+fn price_note(
+    mix_price: Option<&mix::MixPrice>,
+    price: Option<&catalog::PriceRow>,
+    profile: &mix::MixProfile,
+) -> Option<String> {
+    match mix_price {
+        Some(mix) => Some(format!(
+            "price from mix ${:.3}/M at {} ({})",
+            mix.per_m,
+            profile.name,
+            mix.shares_label()
+        )),
+        None => scoring_price(price).map(|per_m| {
+            format!("price from component sum ${per_m:.3}/M (input + output; no mix price)")
+        }),
+    }
+}
+
+/// The old per-component scoring price: input + output per million tokens,
+/// used only when a mix price cannot be computed. A partial price is unknown,
+/// never 0 (decision D10).
 fn scoring_price(price: Option<&catalog::PriceRow>) -> Option<f64> {
     let price = price?;
     Some(price.input_per_m? + price.output_per_m?)
@@ -778,6 +1081,46 @@ fn context_fits(candidate: &Candidate, input_chars: usize, max_tokens: Option<i6
             estimated_input.saturating_add(max_tokens.unwrap_or(0)) <= context
         }
     }
+}
+
+/// Whether a candidate can actually serve this request right now: enabled,
+/// with a usable credential that is neither cooled nor breaker-open, and
+/// inside its context window. Sticky pins use the same test as the attempt
+/// builder (D35).
+fn candidate_ready(state: &AppState, candidate: &Candidate, parsed: &WireRequest) -> bool {
+    if !candidate.enabled {
+        return false;
+    }
+    let Some(credential) = &candidate.credential else {
+        return false;
+    };
+    if credential.cooled {
+        return false;
+    }
+    if state
+        .breaker
+        .is_open(&credential.id, &candidate.offering_id, Instant::now())
+    {
+        return false;
+    }
+    let max_tokens =
+        crate::upstream::clamp_max_tokens(parsed.max_tokens, candidate.max_output_tokens);
+    context_fits(candidate, message_text_chars(&parsed.messages), max_tokens)
+}
+
+/// Why a pinned offering is no longer eligible, if it is excluded by either
+/// routing path.
+fn sticky_excluded(
+    offering_id: &str,
+    pool_exclusions: &HashMap<String, combos::PoolExclusion>,
+    weighted_exclusions: &HashMap<String, routing::Exclusion>,
+) -> Option<String> {
+    if let Some(excluded) = pool_exclusions.get(offering_id) {
+        return Some(excluded.reason.as_str().to_string());
+    }
+    weighted_exclusions
+        .get(offering_id)
+        .map(|reason| reason.outcome().to_string())
 }
 
 /// The tokens this request wants from a candidate's context window (the same
@@ -818,6 +1161,7 @@ fn signal_for(
     state: &AppState,
     candidate: &Candidate,
     price: Option<&catalog::PriceRow>,
+    mix_price: Option<&mix::MixPrice>,
     quality: Option<routing::QualityScore>,
     member_weight: f64,
     requested_tokens: f64,
@@ -841,7 +1185,11 @@ fn signal_for(
         _ => None,
     };
     let mut signal = routing::CandidateSignal::neutral(candidate.offering_id.clone());
-    signal.price_per_m_usd = scoring_price(price);
+    // The price component is the mix price (D34); the old input + output
+    // component sum is the fallback when no mix can be computed.
+    signal.price_per_m_usd = mix_price
+        .map(|mix| mix.per_m)
+        .or_else(|| scoring_price(price));
     signal.tokens_per_sec = stats.as_ref().and_then(|stats| stats.tokens_per_sec);
     // A resolved-but-imputed quality (the neutral model default) is a
     // missing component, scored as 0.5 and marked like the others.
@@ -934,6 +1282,9 @@ pub async fn execute(
     };
 
     let mut candidates = match &combo {
+        Some(combo) if combo.pool == combos::Pool::All => {
+            resolve_pool_candidates(state, &now).await?
+        }
         Some(combo) => resolve_members(&state.pool, &state.breaker, combo, &now).await?,
         None => resolve_candidates(&state.pool, &state.breaker, &parsed.model, &now).await?,
     };
@@ -1007,6 +1358,45 @@ pub async fn execute(
     // price and M5 score when known, its one-line explanation, and what
     // happened to it.
     let mut prices: HashMap<String, Option<catalog::PriceRow>> = HashMap::new();
+    // The effective token-mix profile (D34): a combo's `mix_profile`
+    // overrides the global default. A resolution failure is logged and falls
+    // back to the embedded `code-agent`, keeping routing deterministic.
+    let default_mix = match state
+        .mix_profiles
+        .resolve_default(&state.pool, state.config.token_mix_profile.as_deref())
+        .await
+    {
+        Ok(profile) => profile,
+        Err(e) => {
+            tracing::error!(error = %e, "resolving the default mix profile failed");
+            mix::code_agent_profile()
+        }
+    };
+    let mix_profile = match combo
+        .as_ref()
+        .and_then(|combo| combo.mix_profile.as_deref())
+    {
+        Some(selector) => match state
+            .mix_profiles
+            .resolve_selector(&state.pool, selector)
+            .await
+        {
+            Ok(Some(profile)) => profile,
+            Ok(None) => {
+                tracing::warn!(
+                    selector,
+                    "the combo's mix profile is missing; using the default"
+                );
+                default_mix
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "resolving the combo's mix profile failed");
+                default_mix
+            }
+        },
+        None => default_mix,
+    };
+    let mut mix_prices: HashMap<String, Option<mix::MixPrice>> = HashMap::new();
     for candidate in &candidates {
         let price = match catalog::get_price(&state.pool, &candidate.offering_id).await {
             Ok(row) => row,
@@ -1015,13 +1405,18 @@ pub async fn execute(
                 None
             }
         };
+        let mix_price = price
+            .as_ref()
+            .and_then(|price| mix::mix_price(price, &mix_profile));
         prices.insert(candidate.offering_id.clone(), price);
+        mix_prices.insert(candidate.offering_id.clone(), mix_price);
     }
 
     let mut decision = Decision {
         candidates: Vec::with_capacity(candidates.len()),
         routing: RoutingInfo {
             combo: combo.as_ref().map(|combo| combo.name.clone()),
+            mix_profile: Some(mix::MixProfileRef::from(&mix_profile)),
             ..RoutingInfo::default()
         },
         ..Decision::default()
@@ -1033,6 +1428,7 @@ pub async fn execute(
     // paths; the weighted strategy demotes cooled credentials through the
     // recent-failure penalty instead (see `crate::routing`).
     let mut weighted_exclusions: HashMap<String, routing::Exclusion> = HashMap::new();
+    let mut pool_exclusions: HashMap<String, combos::PoolExclusion> = HashMap::new();
     let mut weighted_scores: HashMap<String, routing::Score> = HashMap::new();
     let mut weighted_explanations: HashMap<String, String> = HashMap::new();
     if let Some(combo) = &combo {
@@ -1072,56 +1468,135 @@ pub async fn execute(
                     .iter()
                     .map(|member| (member.offering_id.as_str(), member.weight))
                     .collect();
-                let signals: Vec<routing::CandidateSignal> = candidates
-                    .iter()
-                    .map(|candidate| {
-                        let max_tokens = crate::upstream::clamp_max_tokens(
-                            parsed.max_tokens,
-                            candidate.max_output_tokens,
-                        );
-                        signal_for(
-                            state,
-                            candidate,
-                            prices.get(&candidate.offering_id).and_then(Option::as_ref),
-                            quality.get(&candidate.model_id).copied(),
-                            member_weights
-                                .get(candidate.offering_id.as_str())
-                                .copied()
-                                .unwrap_or(1.0),
-                            requested_tokens(input_chars, max_tokens),
-                            needs_image,
-                            context_fits(candidate, input_chars, max_tokens),
-                        )
-                    })
-                    .collect();
-                let outcome = routing::weighted_order(signals, &combo.weights);
-                for scored in &outcome.ordered {
-                    weighted_scores.insert(scored.id.clone(), scored.score.clone());
-                    weighted_explanations.insert(scored.id.clone(), scored.explanation.clone());
-                }
-                for (id, reason) in &outcome.excluded {
-                    weighted_exclusions.insert(id.clone(), *reason);
-                }
-                // Rebuild the candidate order: scored candidates first (best
-                // first), then the excluded ones in their original order — their
-                // records explain why they are out.
-                let mut by_id: HashMap<String, Candidate> = candidates
-                    .into_iter()
-                    .map(|candidate| (candidate.offering_id.clone(), candidate))
-                    .collect();
-                let mut reordered = Vec::with_capacity(by_id.len());
-                for scored in &outcome.ordered {
-                    if let Some(candidate) = by_id.remove(&scored.id) {
-                        reordered.push(candidate);
+                if combo.pool == combos::Pool::All {
+                    // D35: resolve the whole catalog with the combo's
+                    // constraints through the same engine the preview uses.
+                    let items: Vec<combos::PoolItem> = candidates
+                        .iter()
+                        .map(|candidate| {
+                            let max_tokens = crate::upstream::clamp_max_tokens(
+                                parsed.max_tokens,
+                                candidate.max_output_tokens,
+                            );
+                            let mut signal = signal_for(
+                                state,
+                                candidate,
+                                prices.get(&candidate.offering_id).and_then(Option::as_ref),
+                                mix_prices
+                                    .get(&candidate.offering_id)
+                                    .and_then(Option::as_ref),
+                                quality.get(&candidate.model_id).copied(),
+                                1.0,
+                                requested_tokens(input_chars, max_tokens),
+                                needs_image,
+                                context_fits(candidate, input_chars, max_tokens),
+                            );
+                            signal.enabled = candidate.enabled;
+                            combos::PoolItem {
+                                offering_id: candidate.offering_id.clone(),
+                                model: candidate.canonical_name.clone(),
+                                provider: candidate.provider_name.clone(),
+                                quality: quality.get(&candidate.model_id).copied().unwrap_or(
+                                    routing::QualityScore {
+                                        score: 0.5,
+                                        source: routing::QualitySource::ModelDefault,
+                                        imputed: true,
+                                    },
+                                ),
+                                mix_price: mix_prices
+                                    .get(&candidate.offering_id)
+                                    .and_then(Option::as_ref)
+                                    .cloned(),
+                                signal,
+                            }
+                        })
+                        .collect();
+                    let outcome = combos::resolve_pool(
+                        items,
+                        &combos::PoolConstraints::of(combo),
+                        &combo.weights,
+                    );
+                    for scored in &outcome.ordered {
+                        weighted_scores
+                            .insert(scored.item.offering_id.clone(), scored.score.clone());
+                        weighted_explanations
+                            .insert(scored.item.offering_id.clone(), scored.explanation.clone());
                     }
-                }
-                for (id, _) in &outcome.excluded {
-                    if let Some(candidate) = by_id.remove(id) {
-                        reordered.push(candidate);
+                    for excluded in &outcome.excluded {
+                        pool_exclusions.insert(excluded.offering_id.clone(), excluded.clone());
                     }
+                    let mut by_id: HashMap<String, Candidate> = candidates
+                        .into_iter()
+                        .map(|candidate| (candidate.offering_id.clone(), candidate))
+                        .collect();
+                    let mut reordered = Vec::with_capacity(by_id.len());
+                    for scored in &outcome.ordered {
+                        if let Some(candidate) = by_id.remove(&scored.item.offering_id) {
+                            reordered.push(candidate);
+                        }
+                    }
+                    for excluded in &outcome.excluded {
+                        if let Some(candidate) = by_id.remove(&excluded.offering_id) {
+                            reordered.push(candidate);
+                        }
+                    }
+                    reordered.extend(by_id.into_values());
+                    candidates = reordered;
+                } else {
+                    let signals: Vec<routing::CandidateSignal> = candidates
+                        .iter()
+                        .map(|candidate| {
+                            let max_tokens = crate::upstream::clamp_max_tokens(
+                                parsed.max_tokens,
+                                candidate.max_output_tokens,
+                            );
+                            signal_for(
+                                state,
+                                candidate,
+                                prices.get(&candidate.offering_id).and_then(Option::as_ref),
+                                mix_prices
+                                    .get(&candidate.offering_id)
+                                    .and_then(Option::as_ref),
+                                quality.get(&candidate.model_id).copied(),
+                                member_weights
+                                    .get(candidate.offering_id.as_str())
+                                    .copied()
+                                    .unwrap_or(1.0),
+                                requested_tokens(input_chars, max_tokens),
+                                needs_image,
+                                context_fits(candidate, input_chars, max_tokens),
+                            )
+                        })
+                        .collect();
+                    let outcome = routing::weighted_order(signals, &combo.weights);
+                    for scored in &outcome.ordered {
+                        weighted_scores.insert(scored.id.clone(), scored.score.clone());
+                        weighted_explanations.insert(scored.id.clone(), scored.explanation.clone());
+                    }
+                    for (id, reason) in &outcome.excluded {
+                        weighted_exclusions.insert(id.clone(), *reason);
+                    }
+                    // Rebuild the candidate order: scored candidates first
+                    // (best first), then the excluded ones in their original
+                    // order — their records explain why they are out.
+                    let mut by_id: HashMap<String, Candidate> = candidates
+                        .into_iter()
+                        .map(|candidate| (candidate.offering_id.clone(), candidate))
+                        .collect();
+                    let mut reordered = Vec::with_capacity(by_id.len());
+                    for scored in &outcome.ordered {
+                        if let Some(candidate) = by_id.remove(&scored.id) {
+                            reordered.push(candidate);
+                        }
+                    }
+                    for (id, _) in &outcome.excluded {
+                        if let Some(candidate) = by_id.remove(id) {
+                            reordered.push(candidate);
+                        }
+                    }
+                    reordered.extend(by_id.into_values());
+                    candidates = reordered;
                 }
-                reordered.extend(by_id.into_values());
-                candidates = reordered;
             }
         }
     } else {
@@ -1130,14 +1605,91 @@ pub async fn execute(
         demote_cooled(&mut candidates);
     }
 
+    // D35 session stickiness: a valid pin is put first when its offering is
+    // still eligible; otherwise the resolved pool already re-ordered the
+    // candidates and the first ready one becomes the new pin. The write
+    // happens after the attempt list is built (a request that dispatches no
+    // upstream call must not move the pin).
+    let mut sticky_key: Option<String> = None;
+    let mut sticky_pinned: Option<String> = None;
+    let mut sticky_age: Option<i64> = None;
+    let mut sticky_write: Option<String> = None;
+    let mut sticky_ttl = 0i64;
+    if let Some(combo) = &combo {
+        decision.sticky.enabled = combo.stickiness_enabled;
+        decision.sticky.key_source = combo
+            .stickiness_enabled
+            .then(|| combo.stickiness_key_source.as_str());
+        if combo.stickiness_enabled {
+            sticky_ttl = combo.stickiness_ttl_seconds;
+            sticky_key = sticky_session_key(combo, meta, &parsed.messages);
+            if let Some(key) = &sticky_key {
+                let mut pin = match combos::load_pin_any(&state.pool, &combo.id, key).await {
+                    Ok(pin) => pin,
+                    Err(e) => {
+                        tracing::error!(error = %e, "loading the sticky pin failed");
+                        None
+                    }
+                };
+                if let Some(existing) = &pin
+                    && existing.expires_at <= now
+                {
+                    decision.sticky.replaced_why = Some("expired".to_string());
+                    pin = None;
+                }
+                if let Some(existing) = pin {
+                    let excluded = sticky_excluded(
+                        &existing.offering_id,
+                        &pool_exclusions,
+                        &weighted_exclusions,
+                    );
+                    let ready = candidates
+                        .iter()
+                        .find(|candidate| candidate.offering_id == existing.offering_id)
+                        .is_some_and(|candidate| candidate_ready(state, candidate, &parsed));
+                    if let (None, true) = (&excluded, ready) {
+                        if let Some(index) = candidates
+                            .iter()
+                            .position(|candidate| candidate.offering_id == existing.offering_id)
+                        {
+                            let candidate = candidates.remove(index);
+                            candidates.insert(0, candidate);
+                        }
+                        sticky_age = combos::age_seconds(&existing.chosen_at, &now);
+                        sticky_pinned = Some(existing.offering_id);
+                    } else {
+                        decision.sticky.replaced_why = Some(match excluded {
+                            Some(reason) => reason,
+                            None => "not_eligible".to_string(),
+                        });
+                    }
+                }
+                if sticky_pinned.is_none()
+                    && let Some(candidate) = candidates
+                        .iter()
+                        .find(|candidate| candidate_ready(state, candidate, &parsed))
+                {
+                    sticky_write = Some(candidate.offering_id.clone());
+                    sticky_pinned = Some(candidate.offering_id.clone());
+                    sticky_age = Some(0);
+                }
+            }
+        }
+    }
+    decision.sticky.pinned = sticky_pinned.clone();
+    decision.sticky.age_s = sticky_age;
+
     let mut attempts: Vec<Attempt> = Vec::new();
-    // Price rows of the attempts in order: the reservation estimate is
-    // priced on the first *priced* candidate (review m4).
-    let mut attempt_prices: Vec<Option<catalog::PriceRow>> = Vec::new();
     let mut first_output_estimate: Option<Option<i64>> = None;
     let mut context_rejected = false;
     for candidate in candidates {
         let price_row = prices.remove(&candidate.offering_id).flatten();
+        let candidate_mix = mix_prices.remove(&candidate.offering_id).flatten();
+        let price_basis = match (&candidate_mix, scoring_price(price_row.as_ref())) {
+            (Some(_), _) => "mix",
+            (None, Some(_)) => "component_sum",
+            (None, None) => "unpriced",
+        };
         let price = price_row.as_ref().map(|row| {
             json!({
                 "input_per_m": row.input_per_m,
@@ -1149,6 +1701,14 @@ pub async fn execute(
                 "currency": row.currency,
             })
         });
+        let explanation = weighted_explanations
+            .remove(&candidate.offering_id)
+            .map(|text| {
+                match price_note(candidate_mix.as_ref(), price_row.as_ref(), &mix_profile) {
+                    Some(note) => format!("{text}; {note}"),
+                    None => text,
+                }
+            });
         decision.candidates.push(CandidateRecord {
             id: candidate.offering_id.clone(),
             provider: candidate.provider_name.clone(),
@@ -1159,11 +1719,24 @@ pub async fn execute(
             outcome: "not_tried",
             error_class: None,
             status: None,
+            mix_price: candidate_mix,
+            price_basis,
             score: weighted_scores.remove(&candidate.offering_id),
-            explanation: weighted_explanations.remove(&candidate.offering_id),
+            explanation,
+            credential_attempts: Vec::new(),
         });
         let decision_idx = decision.candidates.len() - 1;
 
+        // A catalog pool already filtered this candidate out; record its
+        // constraint/filter reason.
+        if let Some(excluded) = pool_exclusions.remove(&candidate.offering_id) {
+            decision.candidates[decision_idx].outcome = excluded.reason.as_str();
+            decision.candidates[decision_idx].explanation = Some(excluded.detail);
+            if excluded.reason == combos::PoolReason::ContextExceeded {
+                context_rejected = true;
+            }
+            continue;
+        }
         // The weighted strategy already filtered this candidate out; record
         // the router's reason instead of re-deriving it.
         if let Some(reason) = weighted_exclusions.remove(&candidate.offering_id) {
@@ -1222,11 +1795,34 @@ pub async fn execute(
             // *priced* candidate (review m4).
             first_output_estimate = Some(max_tokens);
         }
-        attempt_prices.push(price_row);
         attempts.push(Attempt {
             decision_idx,
             candidate,
             body,
+            price: price_row,
+            credential_cursor: 0,
+        });
+    }
+
+    // Persist the new pin only when this request will actually dispatch: a
+    // request refused before dispatch must not move the session's pin.
+    let mut sticky_run: Option<StickyRun> = None;
+    if !attempts.is_empty()
+        && let (Some(combo), Some(key)) = (&combo, &sticky_key)
+    {
+        if let Some(offering_id) = &sticky_write {
+            match combos::upsert_pin(&state.pool, &combo.id, key, offering_id, sticky_ttl, &now)
+                .await
+            {
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "writing the sticky pin failed"),
+            }
+        }
+        sticky_run = Some(StickyRun {
+            combo_id: combo.id.clone(),
+            session_key: key.clone(),
+            pinned: sticky_pinned.clone(),
+            ttl_seconds: sticky_ttl,
         });
     }
 
@@ -1259,7 +1855,7 @@ pub async fn execute(
                 format!("no eligible offering serves model {:?}", parsed.model),
             ),
         };
-        decision.reason = decision_reason(&decision);
+        decision.reason = decision_reason_with_mix(&decision);
         settle(
             state,
             &Settlement::rejected_with_decision(
@@ -1300,9 +1896,11 @@ pub async fn execute(
         output_tokens: Some(estimated_output),
         ..Usage::default()
     };
-    let estimated_usd = attempt_prices
+    let estimated_usd = attempts
         .iter()
-        .find_map(|price| money::compute_cost(price.as_ref(), Some(&estimate_usage)).cost_usd)
+        .find_map(|attempt| {
+            money::compute_cost(attempt.price.as_ref(), Some(&estimate_usage)).cost_usd
+        })
         .unwrap_or(0.0);
     let reservation = money::ReservationInput {
         request_id: meta.request_id.clone(),
@@ -1380,6 +1978,14 @@ pub async fn execute(
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let guard = CancelOnDrop(Some(cancel_tx));
     let total = tokio::time::Instant::now() + state.config.timeout_total;
+    // The resolved price rows travel to settlement: the chosen offering's
+    // row is reused when it is still the same offering, so settlement never
+    // re-reads it. An offering missing from the map (or a failover to one
+    // outside the resolution set) falls back to a database read.
+    let prices = attempts
+        .iter()
+        .map(|attempt| (attempt.candidate.offering_id.clone(), attempt.price.clone()))
+        .collect();
     let plan = Plan {
         parsed_stream: parsed.stream,
         attempts,
@@ -1388,6 +1994,8 @@ pub async fn execute(
         bytes_in,
         input_chars,
         has_request_body: bytes_in > 0,
+        sticky: sticky_run,
+        prices,
     };
     let runner_state = state.clone();
     let runner_meta = meta.clone();
@@ -1466,6 +2074,15 @@ pub async fn record_rejection(
 // The runner task
 // ---------------------------------------------------------------------------
 
+/// The pin this request resolved, so a failover that serves from another
+/// offering moves the session's pin there (D35).
+struct StickyRun {
+    combo_id: String,
+    session_key: String,
+    pinned: Option<String>,
+    ttl_seconds: i64,
+}
+
 struct Plan {
     parsed_stream: bool,
     attempts: Vec<Attempt>,
@@ -1475,6 +2092,9 @@ struct Plan {
     /// Message-text characters, the input estimator's base (review M1).
     input_chars: usize,
     has_request_body: bool,
+    sticky: Option<StickyRun>,
+    /// Price rows resolved before dispatch, by offering id.
+    prices: HashMap<String, Option<catalog::PriceRow>>,
 }
 
 /// How a run ended, before settlement.
@@ -1569,6 +2189,8 @@ async fn runner(
         bytes_in,
         input_chars,
         has_request_body,
+        sticky,
+        prices,
     } = plan;
     let mut decision = decision;
     let end = match parsed_stream {
@@ -1598,7 +2220,33 @@ async fn runner(
         ),
     };
     let mut decision = result.decision;
-    decision.reason = decision_reason(&decision);
+    // D35: a failed pinned attempt that failed over moves the pin to the
+    // offering that actually served the request. Failures before any
+    // offering served leave the pin untouched.
+    if let Some(sticky) = &sticky
+        && decision.chosen_offering_id.is_some()
+        && let Some(served) = &result.offering_id
+        && sticky.pinned.as_deref() != Some(served.as_str())
+    {
+        let now = crate::catalog::now_ts();
+        match combos::upsert_pin(
+            &state.pool,
+            &sticky.combo_id,
+            &sticky.session_key,
+            served,
+            sticky.ttl_seconds,
+            &now,
+        )
+        .await
+        {
+            Ok(_) => {
+                decision.sticky.pinned = Some(served.clone());
+                decision.sticky.age_s = Some(0);
+            }
+            Err(e) => tracing::error!(error = %e, "moving the sticky pin failed"),
+        }
+    }
+    decision.reason = decision_reason_with_mix(&decision);
     settle(
         &state,
         &Settlement {
@@ -1618,6 +2266,7 @@ async fn runner(
             bytes_in,
             input_chars,
             has_request_body,
+            prices,
         },
     )
     .await;
@@ -1715,35 +2364,67 @@ async fn run_streaming(
     let mut sent = false;
     let combo_member = decision.routing.combo.is_some();
 
-    for attempt in attempts {
+    'candidates: for mut attempt in attempts {
         let decision_idx = attempt.decision_idx;
-        let candidate = &attempt.candidate;
-        let attempt_started = Instant::now();
-        last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
-        let offering_id = candidate.offering_id.clone();
-        let model_id = candidate.model_id.clone();
-
-        let (mut stream, first, ttft_ms) = match start_attempt(state, &attempt, &mut cancel, total)
-            .await
-        {
-            AttemptStart::Started {
-                stream,
-                first,
-                ttft_ms,
-            } => {
-                sent = true;
-                (stream, first, ttft_ms)
-            }
-            AttemptStart::Canceled => {
-                return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None, sent));
-            }
-            AttemptStart::Failed(e) => {
-                if let Some(credential) = &candidate.credential {
+        // One offering may have several credentials. A credential-attributable
+        // failure (401/403, 402, 429) advances to the next eligible credential
+        // of the same offering before the request moves to another offering;
+        // the failed credential is never retried in this request.
+        let (mut stream, first, ttft_ms, attempt_started) = 'credentials: loop {
+            let candidate = &attempt.candidate;
+            let attempt_started = Instant::now();
+            last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
+            match start_attempt(state, &attempt, &mut cancel, total).await {
+                AttemptStart::Started {
+                    stream,
+                    first,
+                    ttft_ms,
+                } => {
+                    sent = true;
+                    if let Some(credential_id) = candidate.credential.as_ref().map(|c| c.id.clone())
+                    {
+                        decision.candidates[decision_idx].credential_id =
+                            Some(credential_id.clone());
+                        record_credential_attempt(
+                            decision,
+                            decision_idx,
+                            &credential_id,
+                            "chosen",
+                            None,
+                            None,
+                        );
+                    }
+                    break 'credentials (stream, first, ttft_ms, attempt_started);
+                }
+                AttemptStart::Canceled => {
+                    return RunEnd::Disconnected(last_result(
+                        decision, &last, None, 0, 0, None, sent,
+                    ));
+                }
+                AttemptStart::Failed(e) => {
+                    let Some(credential) = candidate.credential.as_ref() else {
+                        let failure = ChatFailure::internal();
+                        return RunEnd::Failed {
+                            result: last_result(decision, &last, None, 0, 0, None, sent),
+                            failure,
+                        };
+                    };
                     let class = e.classify();
+                    let status = upstream_status(&e);
                     if let Some(cooldown) = class.cooldown {
                         record_cooldown(&state.pool, &credential.id, cooldown).await;
                     }
-                    record_failure(decision, decision_idx, &class, upstream_status(&e));
+                    let credential_id = credential.id.clone();
+                    decision.candidates[decision_idx].credential_id = Some(credential_id.clone());
+                    record_failure(decision, decision_idx, &class, status);
+                    record_credential_attempt(
+                        decision,
+                        decision_idx,
+                        &credential_id,
+                        "failed",
+                        Some(&class),
+                        status,
+                    );
                     record_breaker_failure(state, candidate, &class);
                     push_attempt_sample(
                         &mut decision.samples,
@@ -1753,23 +2434,37 @@ async fn run_streaming(
                         None,
                         None,
                     );
+                    if credential_attributable(&class) {
+                        let cursor = attempt.credential_cursor;
+                        if let Some((next_index, next)) =
+                            next_credential(state, &attempt.candidate, cursor)
+                        {
+                            let rate_ok = class.code != "upstream_rate_limited" || rate_budget > 0;
+                            if rate_ok {
+                                if class.code == "upstream_rate_limited" {
+                                    rate_budget -= 1;
+                                }
+                                attempt.credential_cursor = next_index;
+                                attempt.candidate.credential = Some(next);
+                                continue 'credentials;
+                            }
+                        }
+                    }
                     let failure = failure_from_class(&class);
                     if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
                         last_failure = Some(failure);
-                        continue;
+                        continue 'candidates;
                     }
                     return RunEnd::Failed {
                         result: last_result(decision, &last, None, 0, 0, None, sent),
                         failure,
                     };
                 }
-                let failure = ChatFailure::internal();
-                return RunEnd::Failed {
-                    result: last_result(decision, &last, None, 0, 0, None, sent),
-                    failure,
-                };
             }
         };
+        let candidate = &attempt.candidate;
+        let offering_id = candidate.offering_id.clone();
+        let model_id = candidate.model_id.clone();
 
         // The first chunk decides the boundary: inspect before forwarding, so
         // a protocol error on the very first chunk can still fail over.
@@ -1818,6 +2513,8 @@ async fn run_streaming(
         }
 
         decision.candidates[decision_idx].outcome = "chosen";
+        decision.candidates[decision_idx].error_class = None;
+        decision.candidates[decision_idx].status = None;
         decision.chosen_offering_id = Some(offering_id.clone());
 
         // Forwarding starts here: from now on no failover is allowed.
@@ -1977,56 +2674,103 @@ async fn run_buffered(
     let mut sent = false;
     let combo_member = decision.routing.combo.is_some();
 
-    for attempt in attempts {
+    'candidates: for mut attempt in attempts {
         let decision_idx = attempt.decision_idx;
-        let candidate = &attempt.candidate;
-        let attempt_started = Instant::now();
-        last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
-        let offering_id = candidate.offering_id.clone();
-        let model_id = candidate.model_id.clone();
-
-        let (mut stream, first, ttft_ms) = match start_attempt(state, &attempt, &mut cancel, total)
-            .await
-        {
-            AttemptStart::Started {
-                stream,
-                first,
-                ttft_ms,
-            } => {
-                sent = true;
-                (stream, first, ttft_ms)
-            }
-            AttemptStart::Canceled => {
-                return RunEnd::Disconnected(last_result(decision, &last, None, 0, 0, None, sent));
-            }
-            AttemptStart::Failed(e) => {
-                let class = e.classify();
-                if let Some(credential) = &candidate.credential
-                    && let Some(cooldown) = class.cooldown
-                {
-                    record_cooldown(&state.pool, &credential.id, cooldown).await;
+        // Same credential rotation as the streaming loop: retry the offering
+        // with its next eligible credential before moving on.
+        let (mut stream, first, ttft_ms, attempt_started) = 'credentials: loop {
+            let candidate = &attempt.candidate;
+            let attempt_started = Instant::now();
+            last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
+            match start_attempt(state, &attempt, &mut cancel, total).await {
+                AttemptStart::Started {
+                    stream,
+                    first,
+                    ttft_ms,
+                } => {
+                    sent = true;
+                    if let Some(credential_id) = candidate.credential.as_ref().map(|c| c.id.clone())
+                    {
+                        decision.candidates[decision_idx].credential_id =
+                            Some(credential_id.clone());
+                        record_credential_attempt(
+                            decision,
+                            decision_idx,
+                            &credential_id,
+                            "chosen",
+                            None,
+                            None,
+                        );
+                    }
+                    break 'credentials (stream, first, ttft_ms, attempt_started);
                 }
-                record_failure(decision, decision_idx, &class, upstream_status(&e));
-                record_breaker_failure(state, candidate, &class);
-                push_attempt_sample(
-                    &mut decision.samples,
-                    candidate,
-                    attempt_started,
-                    Some(class.code),
-                    None,
-                    None,
-                );
-                let failure = failure_from_class(&class);
-                if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
-                    last_failure = Some(failure);
-                    continue;
+                AttemptStart::Canceled => {
+                    return RunEnd::Disconnected(last_result(
+                        decision, &last, None, 0, 0, None, sent,
+                    ));
                 }
-                return RunEnd::Failed {
-                    result: last_result(decision, &last, None, 0, 0, None, sent),
-                    failure,
-                };
+                AttemptStart::Failed(e) => {
+                    let class = e.classify();
+                    let status = upstream_status(&e);
+                    let credential_id = candidate.credential.as_ref().map(|c| c.id.clone());
+                    if let Some(credential) = &candidate.credential
+                        && let Some(cooldown) = class.cooldown
+                    {
+                        record_cooldown(&state.pool, &credential.id, cooldown).await;
+                    }
+                    if let Some(credential_id) = &credential_id {
+                        decision.candidates[decision_idx].credential_id =
+                            Some(credential_id.clone());
+                        record_credential_attempt(
+                            decision,
+                            decision_idx,
+                            credential_id,
+                            "failed",
+                            Some(&class),
+                            status,
+                        );
+                    }
+                    record_failure(decision, decision_idx, &class, status);
+                    record_breaker_failure(state, candidate, &class);
+                    push_attempt_sample(
+                        &mut decision.samples,
+                        candidate,
+                        attempt_started,
+                        Some(class.code),
+                        None,
+                        None,
+                    );
+                    if credential_attributable(&class) {
+                        let cursor = attempt.credential_cursor;
+                        if let Some((next_index, next)) =
+                            next_credential(state, &attempt.candidate, cursor)
+                        {
+                            let rate_ok = class.code != "upstream_rate_limited" || rate_budget > 0;
+                            if rate_ok {
+                                if class.code == "upstream_rate_limited" {
+                                    rate_budget -= 1;
+                                }
+                                attempt.credential_cursor = next_index;
+                                attempt.candidate.credential = Some(next);
+                                continue 'credentials;
+                            }
+                        }
+                    }
+                    let failure = failure_from_class(&class);
+                    if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
+                        last_failure = Some(failure);
+                        continue 'candidates;
+                    }
+                    return RunEnd::Failed {
+                        result: last_result(decision, &last, None, 0, 0, None, sent),
+                        failure,
+                    };
+                }
             }
         };
+        let candidate = &attempt.candidate;
+        let offering_id = candidate.offering_id.clone();
+        let model_id = candidate.model_id.clone();
 
         // Read the full body under the idle/total budgets. The client has
         // seen nothing yet, so any failure may fail over — except the cap
@@ -2068,6 +2812,8 @@ async fn run_buffered(
         let Some(e) = failure else {
             record_breaker_success(state, candidate);
             decision.candidates[decision_idx].outcome = "chosen";
+            decision.candidates[decision_idx].error_class = None;
+            decision.candidates[decision_idx].status = None;
             decision.chosen_offering_id = Some(offering_id.clone());
             let bytes_out = buffer.len() as u64;
             let output_tokens = attempt_output_tokens(usage.as_ref(), output_chars);
@@ -2280,11 +3026,12 @@ fn push_bounded(buffer: &mut Vec<u8>, chunk: &[u8]) -> bool {
     true
 }
 
-/// Failover is allowed only before the first byte, never for 400/401/403,
-/// and a `429` advances at most once (spec failure rules). The one exception
-/// (M5): inside a combo an `upstream_auth` failure advances to the next
-/// member — the member list is the operator's explicit fallback chain and the
-/// broken credential is not retried.
+/// Failover is allowed only before the first byte and never for 400/422.
+/// A `429` advances at most once (the request-wide `rate_budget`); a
+/// credential-attributable failure first rotates to the offering's next
+/// credential (see [`credential_attributable`]). `upstream_auth` (401/403)
+/// moves to another credential or offering because it is a credential fault,
+/// never a caller fault; the failed credential itself is not retried.
 fn can_fail_over(
     class: &FailureClass,
     failure: &ChatFailure,
@@ -2303,6 +3050,56 @@ fn can_fail_over(
         *rate_budget -= 1;
     }
     true
+}
+
+/// Whether a failure points at the credential rather than the offering:
+/// authentication/authorization, quota, or rate limiting. These rotate to the
+/// same offering's next credential first, then fall over to another offering.
+fn credential_attributable(class: &FailureClass) -> bool {
+    matches!(
+        class.code,
+        "upstream_auth" | "upstream_quota" | "upstream_rate_limited"
+    )
+}
+
+/// The next credential of this offering after `from`, skipping credentials
+/// whose (credential, offering) breaker is open. Deterministic: the ordered
+/// list was built once per candidate. Never returns an index already tried.
+fn next_credential(
+    state: &AppState,
+    candidate: &Candidate,
+    from: usize,
+) -> Option<(usize, Credential)> {
+    candidate
+        .credentials
+        .iter()
+        .enumerate()
+        .skip(from + 1)
+        .find(|(_, credential)| {
+            !state
+                .breaker
+                .is_open(&credential.id, &candidate.offering_id, Instant::now())
+        })
+        .map(|(index, credential)| (index, credential.clone()))
+}
+
+/// Appends one credential attempt to the candidate's `decision_json` record.
+fn record_credential_attempt(
+    decision: &mut Decision,
+    idx: usize,
+    credential_id: &str,
+    outcome: &'static str,
+    class: Option<&FailureClass>,
+    status: Option<i64>,
+) {
+    decision.candidates[idx]
+        .credential_attempts
+        .push(CredentialAttempt {
+            credential_id: credential_id.to_string(),
+            outcome,
+            error_class: class.map(|class| class.code),
+            status,
+        });
 }
 
 /// The upstream's own HTTP status for the decision record, when it answered.
@@ -2462,6 +3259,10 @@ struct Settlement {
     bytes_out: u64,
     bytes_in: u64,
     has_request_body: bool,
+    /// Price rows resolved before dispatch, by offering id. Settlement reuses
+    /// the chosen offering's row instead of re-reading it; a missing entry is
+    /// read from the database.
+    prices: HashMap<String, Option<catalog::PriceRow>>,
 }
 
 impl Settlement {
@@ -2489,6 +3290,7 @@ impl Settlement {
             bytes_out: 0,
             bytes_in,
             has_request_body: bytes_in > 0,
+            prices: HashMap::new(),
         }
     }
 
@@ -2557,13 +3359,19 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         .as_ref()
         .map(|key| key.key_id.clone());
 
+    // The routing price row is reused when the request was served by the
+    // offering it was resolved for. Only an offering outside the resolved set
+    // (an unexpected failover) pays for the read.
     let price = match &settlement.offering_id {
-        Some(offering_id) => match catalog::get_price(&state.pool, offering_id).await {
-            Ok(price) => price,
-            Err(e) => {
-                tracing::error!(error = %e, "reading the settled price failed");
-                None
-            }
+        Some(offering_id) => match settlement.prices.get(offering_id) {
+            Some(price) => price.clone(),
+            None => match catalog::get_price(&state.pool, offering_id).await {
+                Ok(price) => price,
+                Err(e) => {
+                    tracing::error!(error = %e, "reading the settled price failed");
+                    None
+                }
+            },
         },
         None => None,
     };
@@ -2715,6 +3523,252 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     }
 }
 
+/// Computes the D35 preview for a validated draft or saved combo. The
+/// ranking half is exactly [`combos::resolve_pool`], the same function the
+/// runtime `weighted` path calls; this function supplies the catalog, price,
+/// quality, telemetry, and breaker inputs. It never writes anything (no pins,
+/// no audit). Failure mode: `500 internal` on database errors.
+pub(crate) async fn preview_combo(
+    state: &AppState,
+    combo: &combos::Combo,
+    session_key: Option<&str>,
+    limit: usize,
+) -> Result<combos::PreviewResult, ChatFailure> {
+    let now = crate::catalog::now_ts();
+    let candidates = match combo.pool {
+        combos::Pool::All => resolve_pool_candidates(state, &now).await?,
+        combos::Pool::Members => resolve_members(&state.pool, &state.breaker, combo, &now).await?,
+    };
+
+    let default_mix = match state
+        .mix_profiles
+        .resolve_default(&state.pool, state.config.token_mix_profile.as_deref())
+        .await
+    {
+        Ok(profile) => profile,
+        Err(e) => {
+            tracing::error!(error = %e, "resolving the default mix profile failed");
+            mix::code_agent_profile()
+        }
+    };
+    let mix_profile = match combo.mix_profile.as_deref() {
+        Some(selector) => match state
+            .mix_profiles
+            .resolve_selector(&state.pool, selector)
+            .await
+        {
+            Ok(Some(profile)) => profile,
+            Ok(None) | Err(_) => default_mix,
+        },
+        None => default_mix,
+    };
+
+    let mut model_ids: Vec<String> = candidates
+        .iter()
+        .map(|candidate| candidate.model_id.clone())
+        .collect();
+    model_ids.sort();
+    model_ids.dedup();
+    let quality = match benchmarks::quality_for_models(&state.pool, &model_ids).await {
+        Ok(quality) => quality,
+        Err(e) => {
+            tracing::error!(error = %e, "loading model quality failed");
+            HashMap::new()
+        }
+    };
+    let member_weights: HashMap<&str, f64> = combo
+        .members
+        .iter()
+        .map(|member| (member.offering_id.as_str(), member.weight))
+        .collect();
+
+    let mut items = Vec::with_capacity(candidates.len());
+    for candidate in &candidates {
+        let price = catalog::get_price(&state.pool, &candidate.offering_id)
+            .await
+            .ok()
+            .flatten();
+        let mix_price = price
+            .as_ref()
+            .and_then(|price| mix::mix_price(price, &mix_profile));
+        let quality_score =
+            quality
+                .get(&candidate.model_id)
+                .copied()
+                .unwrap_or(routing::QualityScore {
+                    score: 0.5,
+                    source: routing::QualitySource::ModelDefault,
+                    imputed: true,
+                });
+        let mut signal = signal_for(
+            state,
+            candidate,
+            price.as_ref(),
+            mix_price.as_ref(),
+            Some(quality_score),
+            member_weights
+                .get(candidate.offering_id.as_str())
+                .copied()
+                .unwrap_or(1.0),
+            0.0,
+            false,
+            true,
+        );
+        signal.enabled = candidate.enabled;
+        items.push(combos::PoolItem {
+            offering_id: candidate.offering_id.clone(),
+            model: candidate.canonical_name.clone(),
+            provider: candidate.provider_name.clone(),
+            quality: quality_score,
+            mix_price,
+            signal,
+        });
+    }
+
+    let constraints = match combo.pool {
+        combos::Pool::All => combos::PoolConstraints::of(combo),
+        combos::Pool::Members => combos::PoolConstraints::default(),
+    };
+    let outcome = combos::resolve_pool(items, &constraints, &combo.weights);
+    let mut ordered = outcome.ordered;
+    // For explicit members the strategy decides the order: ordered keeps the
+    // stored member order, round_robin rotates it, weighted keeps the score
+    // order above.
+    if combo.pool == combos::Pool::Members {
+        match combo.strategy {
+            Strategy::Ordered => {
+                let positions: HashMap<&str, usize> = combo
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, member)| (member.offering_id.as_str(), index))
+                    .collect();
+                ordered.sort_by_key(|scored| {
+                    positions
+                        .get(scored.item.offering_id.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+            }
+            Strategy::RoundRobin => {
+                ordered = routing::rotate(ordered, combo.rr_cursor as usize);
+            }
+            Strategy::Weighted => {}
+        }
+    }
+    // The score count is taken before truncation: the list shows `limit`
+    // rows but every explanation says "#N of scored".
+    let scored = ordered.len();
+    ordered.truncate(limit.clamp(1, 100));
+
+    let pinned = match (combo.stickiness_enabled, session_key) {
+        (true, Some(key)) => combos::load_pin(&state.pool, &combo.id, key, &now)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    let sticky = combo.stickiness_enabled.then(|| combos::PreviewSticky {
+        enabled: true,
+        key_source: combo.stickiness_key_source.as_str().to_string(),
+        session_key: session_key.map(str::to_owned),
+        pinned: pinned.as_ref().map(|pin| pin.offering_id.clone()),
+        age_s: pinned
+            .as_ref()
+            .and_then(|pin| combos::age_seconds(&pin.chosen_at, &now)),
+    });
+
+    Ok(combos::PreviewResult {
+        profile: mix::MixProfileRef::from(&mix_profile),
+        scored,
+        candidates: ordered
+            .into_iter()
+            .map(|scored| combos::PreviewCandidate {
+                offering_id: scored.item.offering_id,
+                model: scored.item.model,
+                provider: scored.item.provider,
+                quality: scored.item.quality.score,
+                quality_source: scored.item.quality.source.as_str().to_string(),
+                mix_price: scored.item.mix_price.as_ref().map(|mix| mix.per_m),
+                score: combos::PreviewScore::from(&scored.score),
+                explanation: scored.explanation,
+            })
+            .collect(),
+        excluded: outcome
+            .excluded
+            .into_iter()
+            .map(|excluded| combos::PreviewExcluded {
+                offering_id: excluded.offering_id,
+                model: excluded.model,
+                provider: excluded.provider,
+                reason: excluded.reason.as_str().to_string(),
+                detail: excluded.detail,
+            })
+            .collect(),
+        sticky,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn parse_for_measurement(raw: &[u8]) -> bool {
+    parse_request(raw).is_ok()
+}
+
+/// Test-only: runs the real settlement transaction for one synthesized
+/// successful request (the performance harness times it directly). The caller
+/// must have inserted the matching `reservations` row and a priced offering.
+#[cfg(test)]
+pub(crate) async fn settle_for_measurement(
+    state: &AppState,
+    request_id: &str,
+    user_id: &str,
+    offering_id: &str,
+    model_id: &str,
+) {
+    let meta = RequestMeta {
+        request_id: request_id.to_string(),
+        client_request_id: None,
+        user_id: user_id.to_string(),
+        role: crate::auth::Role::Admin,
+        api_key: None,
+        session_hint: None,
+        started_at: catalog::now_ts(),
+        method: "POST".to_string(),
+        path: "/v1/chat/completions".to_string(),
+    };
+    let decision = Decision {
+        chosen_offering_id: Some(offering_id.to_string()),
+        reason: "performance probe".to_string(),
+        ..Decision::default()
+    };
+    let settlement = Settlement {
+        meta,
+        requested_model: Some("bench-model".to_string()),
+        decision,
+        offering_id: Some(offering_id.to_string()),
+        model_id: Some(model_id.to_string()),
+        usage: Some(Usage {
+            input_tokens: Some(900),
+            output_tokens: Some(300),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+        }),
+        output_chars: 1200,
+        input_chars: 3600,
+        sent: true,
+        status: 200,
+        error_class: None,
+        started: Instant::now(),
+        ttft_ms: Some(25),
+        bytes_out: 1500,
+        bytes_in: 4000,
+        has_request_body: true,
+        prices: HashMap::new(),
+    };
+    settle(state, &settlement).await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2810,6 +3864,31 @@ mod tests {
         .await
         .expect("credential");
         (provider.id, credential.id)
+    }
+
+    async fn add_credential(app: &TestApp, uid: &str, provider_id: &str, label: &str) -> String {
+        let actor = Actor {
+            user_id: uid,
+            ip: "127.0.0.1",
+        };
+        catalog::create_credential(
+            &app.state.pool,
+            &app.state.secrets,
+            &actor,
+            provider_id,
+            &CredentialInput {
+                label: label.to_string(),
+                secret: format!("sk-{label}"),
+                headers: None,
+                max_concurrency: None,
+                balance_usd: None,
+                balance_source: None,
+                balance_low_threshold: None,
+            },
+        )
+        .await
+        .expect("credential")
+        .id
     }
 
     async fn model(
@@ -3691,7 +4770,192 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_auth_failures_are_never_retried() {
+    async fn auth_failure_falls_over_to_the_next_credential_of_the_same_offering() {
+        let stub = Stub::spawn(vec![
+            Scenario::Status {
+                code: 401,
+                headers: Vec::new(),
+                body: "{}".to_string(),
+            },
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(1, 1)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (provider_id, cred_a) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let cred_b = add_credential(&s.app, &s.uid, &provider_id, "second").await;
+        let (first, second) = if cred_a < cred_b {
+            (cred_a.clone(), cred_b.clone())
+        } else {
+            (cred_b.clone(), cred_a.clone())
+        };
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(response_body).await;
+        assert!(text.contains("c0"), "{text}");
+        assert_eq!(
+            stub.request_count(),
+            2,
+            "the same offering is retried with the second credential"
+        );
+
+        // One settlement row: a credential retry is not a second request.
+        let rows = usage_rows(&s.app).await;
+        assert_eq!(rows.len(), 1, "exactly one settled row");
+        assert_eq!(rows[0].offering_id.as_deref(), Some(offering_id.as_str()));
+        assert_eq!(rows[0].error_class, None);
+        assert_eq!(log_rows(&s.app).await.len(), 1);
+
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        let attempts = decision["candidates"][0]["credential_attempts"]
+            .as_array()
+            .expect("credential_attempts array");
+        assert_eq!(attempts.len(), 2, "{decision}");
+        assert_eq!(attempts[0]["credential_id"], first);
+        assert_eq!(attempts[0]["outcome"], "failed");
+        assert_eq!(attempts[0]["error_class"], "upstream_auth");
+        assert_eq!(attempts[0]["status"], 401);
+        assert_eq!(attempts[1]["credential_id"], second);
+        assert_eq!(attempts[1]["outcome"], "chosen");
+        assert_eq!(decision["candidates"][0]["outcome"], "chosen");
+        assert_eq!(decision["candidates"][0]["credential_id"], second);
+
+        // The credential that failed is cooled down; the serving one is not.
+        assert!(cooldown_of(&s.app, &first).await.is_some());
+        assert!(cooldown_of(&s.app, &second).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn both_credentials_failing_auth_end_in_502_with_both_recorded() {
+        let stub = Stub::spawn(vec![
+            Scenario::Status {
+                code: 401,
+                headers: Vec::new(),
+                body: "{}".to_string(),
+            },
+            Scenario::Status {
+                code: 403,
+                headers: Vec::new(),
+                body: "{}".to_string(),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (provider_id, cred_a) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let cred_b = add_credential(&s.app, &s.uid, &provider_id, "second").await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.body["error"]["code"], "upstream_auth");
+        assert_eq!(
+            stub.request_count(),
+            2,
+            "both credentials are tried exactly once"
+        );
+
+        assert_eq!(usage_rows(&s.app).await.len(), 1, "one settlement row");
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        let attempts = decision["candidates"][0]["credential_attempts"]
+            .as_array()
+            .expect("credential_attempts array");
+        assert_eq!(attempts.len(), 2, "{decision}");
+        assert_eq!(attempts[0]["outcome"], "failed");
+        assert_eq!(attempts[1]["outcome"], "failed");
+        let recorded: Vec<&str> = attempts
+            .iter()
+            .filter_map(|attempt| attempt["credential_id"].as_str())
+            .collect();
+        assert!(recorded.contains(&cred_a.as_str()));
+        assert!(recorded.contains(&cred_b.as_str()));
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
+        assert_eq!(decision["candidates"][0]["error_class"], "upstream_auth");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_on_the_only_credential_still_cools_it() {
+        let stub = Stub::spawn(vec![Scenario::Status {
+            code: 401,
+            headers: Vec::new(),
+            body: "{}".to_string(),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, cred1) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.body["error"]["code"], "upstream_auth");
+        assert_eq!(stub.request_count(), 1, "nothing else to try");
+
+        // The broken credential is cooled down.
+        let cooldown = cooldown_of(&s.app, &cred1).await.expect("cooldown set");
+        assert!(!cooldown.is_empty());
+
+        let row = &usage_rows(&s.app).await[0];
+        assert_eq!(row.error_class.as_deref(), Some("upstream_auth"));
+        assert_eq!(row.status, Some(502));
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        assert_eq!(decision["candidates"][0]["error_class"], "upstream_auth");
+        let attempts = decision["candidates"][0]["credential_attempts"]
+            .as_array()
+            .expect("credential_attempts array");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["credential_id"], cred1);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_falls_over_to_the_next_offering() {
         let stub = Stub::spawn(vec![
             Scenario::Status {
                 code: 401,
@@ -3709,7 +4973,7 @@ mod tests {
         let (p1, cred1) =
             provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
         let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
-        offering(
+        let off1 = offering(
             &s.app,
             &s.uid,
             &p1,
@@ -3719,7 +4983,7 @@ mod tests {
             None,
         )
         .await;
-        offering(
+        let off2 = offering(
             &s.app,
             &s.uid,
             &p2,
@@ -3735,24 +4999,78 @@ mod tests {
             chat_request(&s.cookie, chat_body("m", true)),
         )
         .await;
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.body["error"]["code"], "upstream_auth");
+        assert_eq!(response.status, StatusCode::OK);
         assert_eq!(
             stub.request_count(),
-            1,
-            "401/403 are never retried, even on another candidate"
+            2,
+            "a credential fault advances to the next offering"
         );
 
-        // The broken credential is cooled down, though.
-        let cooldown = cooldown_of(&s.app, &cred1).await.expect("cooldown set");
-        assert!(!cooldown.is_empty());
-
-        let row = &usage_rows(&s.app).await[0];
-        assert_eq!(row.error_class.as_deref(), Some("upstream_auth"));
-        assert_eq!(row.status, Some(502));
+        assert_eq!(usage_rows(&s.app).await.len(), 1);
+        assert!(cooldown_of(&s.app, &cred1).await.is_some());
         let decision = decision_of(&log_rows(&s.app).await[0]);
+        assert_eq!(decision["candidates"][0]["id"], off1);
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
         assert_eq!(decision["candidates"][0]["error_class"], "upstream_auth");
-        assert_eq!(decision["candidates"][1]["outcome"], "not_tried");
+        assert_eq!(decision["candidates"][1]["id"], off2);
+        assert_eq!(decision["candidates"][1]["outcome"], "chosen");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_on_one_credential_falls_over_to_the_other() {
+        let stub = Stub::spawn(vec![
+            Scenario::Status {
+                code: 429,
+                headers: vec![("retry-after".to_string(), "5".to_string())],
+                body: "{}".to_string(),
+            },
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(2, 3)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (provider_id, cred_a) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let cred_b = add_credential(&s.app, &s.uid, &provider_id, "second").await;
+        let (first, second) = if cred_a < cred_b {
+            (cred_a.clone(), cred_b.clone())
+        } else {
+            (cred_b.clone(), cred_a.clone())
+        };
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(stub.request_count(), 2);
+        assert_eq!(usage_rows(&s.app).await.len(), 1, "one settlement row");
+
+        // Retry-After cools only the credential that was rate limited.
+        assert!(cooldown_of(&s.app, &first).await.is_some());
+        assert!(cooldown_of(&s.app, &second).await.is_none());
+        let decision = decision_of(&log_rows(&s.app).await[0]);
+        let attempts = decision["candidates"][0]["credential_attempts"]
+            .as_array()
+            .expect("credential_attempts array");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["error_class"], "upstream_rate_limited");
+        assert_eq!(attempts[1]["outcome"], "chosen");
+        assert_eq!(decision["candidates"][0]["outcome"], "chosen");
     }
 
     #[tokio::test]
@@ -4737,15 +6055,12 @@ mod tests {
             ),
             "429 fails over at most once"
         );
-        assert!(!can_fail_over(
-            &auth,
-            &failure_from_class(&auth),
-            &mut budget,
-            false
-        ));
-        // M5: inside a combo the member list is the operator's explicit
-        // fallback chain — an auth failure advances to the next member (the
-        // broken credential itself is still never retried).
+        assert!(
+            can_fail_over(&auth, &failure_from_class(&auth), &mut budget, false),
+            "an auth failure advances to the next credential/offering"
+        );
+        // The combo flag is no longer needed for auth; it remains part of the
+        // signature and the explicit member chain still advances.
         let mut budget = 1;
         assert!(can_fail_over(
             &auth,
@@ -4753,6 +6068,9 @@ mod tests {
             &mut budget,
             true
         ));
+        assert!(credential_attributable(&auth));
+        assert!(credential_attributable(&rate_limited));
+        assert!(!credential_attributable(&retryable));
     }
 
     #[test]
@@ -4781,6 +6099,7 @@ mod tests {
             user_id: "user-1".to_string(),
             role: crate::auth::Role::Admin,
             api_key: None,
+            session_hint: None,
             started_at: "2026-11-16T10:00:00.000Z".to_string(),
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
@@ -5920,6 +7239,7 @@ mod tests {
                 user_id: s.uid.clone(),
                 role: Role::Admin,
                 api_key: None,
+                session_hint: None,
                 started_at: started_at.to_string(),
                 method: "POST".to_string(),
                 path: "/v1/chat/completions".to_string(),
@@ -5943,6 +7263,7 @@ mod tests {
             bytes_out: 0,
             bytes_in: 0,
             has_request_body: true,
+            prices: HashMap::new(),
         };
 
         // The tiny request settles first (at 00:00:02) and opens the new
@@ -6001,6 +7322,184 @@ mod tests {
         );
     }
 
+    /// Settlement reuses the price row resolved during candidate resolution
+    /// instead of reading `prices` a second time. The cost is identical to a
+    /// fresh read, and an offering missing from the carried set (a failover
+    /// outside resolution) still falls back to the database read.
+    #[tokio::test]
+    async fn settlement_reuses_the_routing_price_row_and_falls_back() {
+        let s = seeded().await;
+        let (provider_id, _credential_id) =
+            provider_with_credential(&s.app, &s.uid, "p1", "https://up.example/v1", None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, Some(128)).await;
+        let offering_id = offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(1.0),
+                output_per_m: Some(2.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("price");
+        let resolved = catalog::get_price(&s.app.state.pool, &offering_id)
+            .await
+            .expect("read price")
+            .expect("priced");
+
+        // An admin edit after routing must not change what this request is
+        // charged: settlement uses the row it already resolved.
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            &offering_id,
+            &PriceInput {
+                input_per_m: Some(100.0),
+                output_per_m: Some(200.0),
+                cache_read_per_m: None,
+                cache_write_per_m: None,
+                reasoning_per_m: None,
+                request_fee: None,
+                currency: None,
+            },
+        )
+        .await
+        .expect("new price");
+
+        let usage = Usage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(1_000_000),
+            ..Usage::default()
+        };
+        let settlement =
+            |request_id: &str, prices: HashMap<String, Option<catalog::PriceRow>>| Settlement {
+                meta: RequestMeta {
+                    request_id: request_id.to_string(),
+                    client_request_id: None,
+                    user_id: s.uid.clone(),
+                    role: Role::Admin,
+                    api_key: None,
+                    session_hint: None,
+                    started_at: "2026-01-01T00:00:01.000Z".to_string(),
+                    method: "POST".to_string(),
+                    path: "/v1/chat/completions".to_string(),
+                },
+                requested_model: Some("m".to_string()),
+                decision: Decision::default(),
+                offering_id: Some(offering_id.clone()),
+                model_id: Some(model_id.clone()),
+                usage: Some(usage.clone()),
+                output_chars: 0,
+                input_chars: 4,
+                sent: true,
+                status: 200,
+                error_class: None,
+                started: Instant::now(),
+                ttft_ms: None,
+                bytes_out: 0,
+                bytes_in: 0,
+                has_request_body: true,
+                prices,
+            };
+
+        let carried = HashMap::from([(offering_id.clone(), Some(resolved))]);
+        settle(&s.app.state, &settlement("carried-price", carried)).await;
+        let carried_cost: Option<f64> =
+            sqlx::query_scalar("SELECT cost_usd FROM usage_events WHERE request_id = ?")
+                .bind("carried-price")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("usage row");
+        assert_eq!(
+            carried_cost,
+            Some(3.0),
+            "1M input at $1/M + 1M output at $2/M from the routing row"
+        );
+
+        // No carried row: the database fallback reads the current price.
+        settle(&s.app.state, &settlement("fallback-price", HashMap::new())).await;
+        let fallback_cost: Option<f64> =
+            sqlx::query_scalar("SELECT cost_usd FROM usage_events WHERE request_id = ?")
+                .bind("fallback-price")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("usage row");
+        assert_eq!(
+            fallback_cost,
+            Some(300.0),
+            "the fallback read sees the current $100/$200 row"
+        );
+    }
+
+    /// The batched credential load must keep the original per-provider
+    /// preference and id ordering: first not breaker-open, then not cooled,
+    /// then id order.
+    #[test]
+    fn credential_pick_prefers_healthy_then_cooled_then_breaker_open() {
+        use crate::breaker::{BreakerConfig, BreakerRegistry};
+
+        let breaker = BreakerRegistry::new(BreakerConfig {
+            threshold: 1,
+            cooldown: Duration::from_secs(60),
+        });
+        let row = |id: &str, cooled: bool| CredentialRow {
+            id: id.to_string(),
+            provider_id: "provider".to_string(),
+            secret_cipher: "cipher".to_string(),
+            headers_json: None,
+            cooldown_until: cooled.then(|| "2999-01-01T00:00:00Z".to_string()),
+            balance_usd: None,
+            balance_low_threshold: None,
+        };
+        let now = "2026-01-01T00:00:00Z";
+
+        // A cooled credential with a lower id sinks below a healthy one.
+        let rows = vec![row("a", true), row("b", false)];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("credential")
+                .id,
+            "b"
+        );
+        assert!(pick_credential(&[], "offering", now, &breaker).is_none());
+
+        // When all are cooled, the first in id order wins.
+        let rows = vec![row("a", true), row("b", true)];
+        let picked = pick_credential(&rows, "offering", now, &breaker).expect("credential");
+        assert_eq!(picked.id, "a");
+        assert!(picked.cooled);
+
+        // An open breaker pair sinks below a closed one.
+        breaker.record_failure("a", "offering", Instant::now());
+        let rows = vec![row("a", false), row("b", false)];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("credential")
+                .id,
+            "b"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // M5: combo models and the circuit breaker
     // -----------------------------------------------------------------------
@@ -6032,6 +7531,11 @@ mod tests {
                     })
                     .collect(),
                 enabled: None,
+                pool: None,
+                min_quality: None,
+                max_mix_price_per_m: None,
+                mix_profile: None,
+                stickiness: None,
             },
         )
         .await
@@ -6236,6 +7740,11 @@ mod tests {
                     weight: None,
                 }],
                 enabled: Some(false),
+                pool: None,
+                min_quality: None,
+                max_mix_price_per_m: None,
+                mix_profile: None,
+                stickiness: None,
             },
         )
         .await
@@ -6346,6 +7855,223 @@ mod tests {
         assert!(not_chosen.contains("below the leader"), "{not_chosen}");
         let reason = decision["reason"].as_str().expect("reason");
         assert!(reason.contains("best weighted score"), "{reason}");
+    }
+
+    /// Prices one offering component-wise for the mix-routing tests.
+    async fn set_price(
+        app: &TestApp,
+        uid: &str,
+        offering_id: &str,
+        input_per_m: f64,
+        output_per_m: f64,
+        cache_read_per_m: Option<f64>,
+    ) {
+        let actor = Actor {
+            user_id: uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &app.state.pool,
+            &actor,
+            offering_id,
+            &PriceInput {
+                input_per_m: Some(input_per_m),
+                output_per_m: Some(output_per_m),
+                cache_read_per_m,
+                ..PriceInput::default()
+            },
+        )
+        .await
+        .expect("price");
+    }
+
+    /// The key D34 regression: a cache-priced offering costs *more* on the old
+    /// input+output component sum but *less* at the default `code-agent` mix,
+    /// so mix routing must pick it where the old sum would pick the other.
+    ///
+    /// cache:   $3 input / $15 output / $0.30 cache → sum 18, mix $0.5775/M
+    /// nocache: $1 input / $2 output, no cache     → sum 3,  mix $1.004/M
+    #[tokio::test]
+    async fn mix_price_reorders_routing_where_the_component_sum_ranks_the_other_way() {
+        let stub = Stub::spawn(vec![Scenario::Stream {
+            events: vec![event(0)],
+            usage: Some(json!({"prompt_tokens": 100, "completion_tokens": 10})),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let cache = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "cache-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let nocache = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "nocache-model",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        set_price(&s.app, &s.uid, &cache, 3.0, 15.0, Some(0.3)).await;
+        set_price(&s.app, &s.uid, &nocache, 1.0, 2.0, None).await;
+        // The old scoring price would rank nocache first (3 < 18).
+        let cache_row = catalog::get_price(&s.app.state.pool, &cache)
+            .await
+            .expect("price")
+            .expect("row");
+        let nocache_row = catalog::get_price(&s.app.state.pool, &nocache)
+            .await
+            .expect("price")
+            .expect("row");
+        assert!(
+            scoring_price(Some(&nocache_row)).expect("sum")
+                < scoring_price(Some(&cache_row)).expect("sum"),
+            "the fixture must invert the old component-sum order"
+        );
+
+        combo(
+            &s,
+            "mix-cheapest",
+            "weighted",
+            Some(json!({"preset": "cheapest"})),
+            &[(cache.as_str(), None), (nocache.as_str(), None)],
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("combo:mix-cheapest", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body_text(response_body).await;
+
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(
+            log.resolved_offering_id.as_deref(),
+            Some(cache.as_str()),
+            "the mix price, not the component sum, decides"
+        );
+        let decision = decision_of(log);
+        assert_eq!(
+            decision["routing"]["mix_profile"]["profile_name"],
+            "code-agent"
+        );
+        assert_eq!(
+            decision["routing"]["mix_profile"]["profile_id"],
+            "mix-code-agent"
+        );
+
+        let candidates = decision["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates[0]["id"], cache);
+        assert_eq!(candidates[0]["price_basis"], "mix");
+        let mix = &candidates[0]["mix_price"];
+        assert!(
+            (mix["per_m"].as_f64().expect("per_m") - 0.5775).abs() < 1e-9,
+            "{mix}"
+        );
+        assert_eq!(mix["profile_name"], "code-agent");
+        assert_eq!(candidates[1]["id"], nocache);
+        assert!(
+            (candidates[1]["mix_price"]["per_m"].as_f64().expect("per_m") - 1.004).abs() < 1e-9,
+            "cache-less falls back to the input price"
+        );
+        let explanation = candidates[0]["explanation"].as_str().expect("explanation");
+        assert!(
+            explanation.contains("price from mix $0.578/M at code-agent (8.1/0.4/91.5)"),
+            "{explanation}"
+        );
+        let reason = decision["reason"].as_str().expect("reason");
+        assert!(
+            reason.contains("mix $0.578/M at code-agent (8.1/0.4/91.5)"),
+            "{reason}"
+        );
+
+        // D34: billing stays component-based (D22) — the request's 100
+        // prompt and 10 completion tokens bill at $3/$15, never at the mix.
+        let usage = usage_rows(&s.app).await;
+        assert_eq!(usage.len(), 1);
+        let expected = 100.0 * 3.0 / 1_000_000.0 + 10.0 * 15.0 / 1_000_000.0;
+        let cost = usage[0].cost_usd.expect("priced");
+        assert!((cost - expected).abs() < 1e-12, "{cost} != {expected}");
+        assert!((cost - 0.00045).abs() < 1e-12);
+        assert!(
+            (cost - 110.0 * 0.5775 / 1_000_000.0).abs() > 1e-9,
+            "the mix price is not the billed cost"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_combo_mix_profile_overrides_the_global_default() {
+        // Same fixture as the regression test, but the combo selects `chat`
+        // (74/26/0): the cache-heavy offering is expensive at that shape and
+        // the cache-less one wins, proving the combo-level override applies.
+        let stub = Stub::spawn(vec![Scenario::Stream {
+            events: vec![event(0)],
+            usage: Some(usage_json(10, 5)),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let cache = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "cache-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let nocache = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "nocache-model",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        set_price(&s.app, &s.uid, &cache, 3.0, 15.0, Some(0.3)).await;
+        set_price(&s.app, &s.uid, &nocache, 1.0, 2.0, None).await;
+        combo(
+            &s,
+            "chat-cheapest",
+            "weighted",
+            Some(json!({"preset": "cheapest", "mix_profile": "chat"})),
+            &[(cache.as_str(), None), (nocache.as_str(), None)],
+        )
+        .await;
+
+        let (status, _, response_body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("combo:chat-cheapest", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body_text(response_body).await;
+
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.resolved_offering_id.as_deref(), Some(nocache.as_str()));
+        let decision = decision_of(log);
+        assert_eq!(decision["routing"]["mix_profile"]["profile_name"], "chat");
+        let candidates = decision["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates[0]["id"], nocache);
+        assert!((candidates[0]["mix_price"]["per_m"].as_f64().expect("per_m") - 1.26).abs() < 1e-9);
+        assert!((candidates[1]["mix_price"]["per_m"].as_f64().expect("per_m") - 6.12).abs() < 1e-9);
     }
 
     #[tokio::test]
@@ -6896,5 +8622,555 @@ mod tests {
                 .expect("explanation")
                 .contains("served the request")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // D35: catalog pools, preview parity, and stickiness
+    // -----------------------------------------------------------------------
+
+    async fn create_pool_combo(
+        s: &Seeded,
+        name: &str,
+        max_mix_price_per_m: Option<f64>,
+        sticky: bool,
+    ) -> String {
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        crate::combos::create(
+            &s.app.state.pool,
+            &actor,
+            &crate::combos::ComboInput {
+                name: name.to_string(),
+                strategy: "weighted".to_string(),
+                weights: Some(json!({"preset": "cheapest"})),
+                members: Vec::new(),
+                enabled: None,
+                pool: Some("all".to_string()),
+                min_quality: None,
+                max_mix_price_per_m,
+                mix_profile: None,
+                stickiness: sticky.then(|| crate::combos::StickinessInput {
+                    enabled: Some(true),
+                    ttl_seconds: Some(1800),
+                    key_source: Some("auto".to_string()),
+                }),
+            },
+        )
+        .await
+        .expect("pool combo")
+        .id
+    }
+
+    async fn price_offering(s: &Seeded, offering_id: &str, per_m: f64) {
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::set_manual_price(
+            &s.app.state.pool,
+            &actor,
+            offering_id,
+            &PriceInput {
+                input_per_m: Some(per_m),
+                output_per_m: Some(per_m),
+                ..PriceInput::default()
+            },
+        )
+        .await
+        .expect("price");
+    }
+
+    fn chat_request_with_session(
+        cookie: &str,
+        body: serde_json::Value,
+        session: &str,
+    ) -> axum::http::Request<Body> {
+        let mut request = chat_request(cookie, body);
+        request.headers_mut().insert(
+            "x-session-id",
+            axum::http::HeaderValue::from_str(session).expect("session header"),
+        );
+        request
+    }
+
+    #[tokio::test]
+    async fn catalog_pool_preview_matches_the_runtime_choice() {
+        let stub = Stub::spawn(vec![Scenario::Stream {
+            events: vec![event(0)],
+            usage: Some(usage_json(3, 4)),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let expensive = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let cheap = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &expensive, 10.0).await;
+        price_offering(&s, &cheap, 1.0).await;
+        create_pool_combo(&s, "pool", Some(5.0), false).await;
+
+        let preview = send(
+            s.app.router(),
+            api_request(
+                Method::POST,
+                "/api/combos/preview",
+                Some(json!({
+                    "name": "pool",
+                    "strategy": "weighted",
+                    "weights": {"preset": "cheapest"},
+                    "members": [],
+                    "pool": "all",
+                    "max_mix_price_per_m": 5.0,
+                    "limit": 5
+                })),
+                Some(&s.cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+        assert_eq!(
+            preview.body["candidates"][0]["offering_id"],
+            cheap.as_str(),
+            "{}",
+            preview.body
+        );
+        assert_eq!(preview.body["profile"]["profile_name"], "code-agent");
+        assert_eq!(
+            preview.body["scored"], 1,
+            "the over-cap offering is excluded before scoring: {}",
+            preview.body
+        );
+        assert!(
+            preview.body["candidates"][0]["score"]["total"]
+                .as_f64()
+                .is_some()
+        );
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("combo:pool", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.resolved_offering_id.as_deref(), Some(cheap.as_str()));
+        let decision = decision_of(log);
+        assert_eq!(decision["candidates"][0]["id"], cheap.as_str());
+        assert_eq!(decision["routing"]["strategy"], "weighted");
+        assert_eq!(decision["sticky"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn preview_scored_count_survives_the_candidate_limit() {
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", "http://127.0.0.1:1", None).await;
+        let (p2, _) =
+            provider_with_credential(&s.app, &s.uid, "p2", "http://127.0.0.1:1", None).await;
+        let first = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "first",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let second = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "second",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &first, 1.0).await;
+        price_offering(&s, &second, 2.0).await;
+
+        let preview = send(
+            s.app.router(),
+            api_request(
+                Method::POST,
+                "/api/combos/preview",
+                Some(json!({
+                    "name": "limited",
+                    "strategy": "weighted",
+                    "weights": {"preset": "cheapest"},
+                    "members": [],
+                    "pool": "all",
+                    "max_mix_price_per_m": 100.0,
+                    "limit": 1
+                })),
+                Some(&s.cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+        // Two offerings pass the filters; the list shows one because of
+        // `limit`, and every explanation says "#1 of 2".
+        assert_eq!(preview.body["scored"], 2, "{}", preview.body);
+        assert_eq!(
+            preview.body["candidates"]
+                .as_array()
+                .expect("candidates")
+                .len(),
+            1
+        );
+        assert!(
+            preview.body["candidates"][0]["explanation"]
+                .as_str()
+                .is_some_and(|text| text.contains("of 2")),
+            "{}",
+            preview.body
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_pins_hold_per_session_across_a_price_change() {
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(2)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let first = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let second = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &first, 1.0).await;
+        price_offering(&s, &second, 10.0).await;
+        create_pool_combo(&s, "sticky", Some(50.0), true).await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        assert_eq!(
+            log_rows(&s.app).await[0].resolved_offering_id.as_deref(),
+            Some(first.as_str())
+        );
+
+        // Re-price: per-turn re-picking would switch to `second`, the pin
+        // must keep the warm-cache offering for the same session.
+        price_offering(&s, &first, 40.0).await;
+        price_offering(&s, &second, 1.0).await;
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let pinned_rows = log_rows(&s.app).await;
+        let pinned_log = pinned_rows.last().expect("second request log");
+        assert_eq!(
+            pinned_log.resolved_offering_id.as_deref(),
+            Some(first.as_str()),
+            "the pin holds across the price change"
+        );
+        let decision = decision_of(pinned_log);
+        assert_eq!(decision["sticky"]["enabled"], true);
+        assert_eq!(decision["sticky"]["key_source"], "auto");
+        assert_eq!(decision["sticky"]["pinned"], first.as_str());
+
+        // A different session has no pin and follows the new prices.
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky", true), "sess-b"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let other_rows = log_rows(&s.app).await;
+        let other_log = other_rows.last().expect("third request log");
+        assert_eq!(
+            other_log.resolved_offering_id.as_deref(),
+            Some(second.as_str())
+        );
+        let pins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM combo_sticky_choices")
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("pin count");
+        assert_eq!(pins, 2, "one pin per session");
+    }
+
+    #[tokio::test]
+    async fn a_failed_pinned_attempt_moves_the_pin_to_the_server_that_served() {
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Status {
+                code: 500,
+                headers: Vec::new(),
+                body: "{}".to_string(),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let pinned = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let fallback = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &pinned, 1.0).await;
+        price_offering(&s, &fallback, 10.0).await;
+        let combo_id = create_pool_combo(&s, "failover", Some(50.0), true).await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:failover", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:failover", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let rows = log_rows(&s.app).await;
+        let log = rows.last().expect("second request log");
+        assert_eq!(log.resolved_offering_id.as_deref(), Some(fallback.as_str()));
+        let decision = decision_of(log);
+        assert_eq!(decision["candidates"][0]["id"], pinned.as_str());
+        assert_eq!(decision["candidates"][0]["outcome"], "failed");
+        assert_eq!(decision["sticky"]["pinned"], fallback.as_str());
+        let stored = crate::combos::load_pin(
+            &s.app.state.pool,
+            &combo_id,
+            "sess-a",
+            &crate::catalog::now_ts(),
+        )
+        .await
+        .expect("load pin")
+        .expect("pin exists");
+        assert_eq!(stored.offering_id, fallback);
+    }
+
+    #[tokio::test]
+    async fn an_expired_pin_re_picks_and_records_why() {
+        let stub = Stub::spawn(vec![Scenario::Stream {
+            events: vec![event(0)],
+            usage: Some(usage_json(3, 4)),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let stale = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let fresh = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &stale, 10.0).await;
+        price_offering(&s, &fresh, 1.0).await;
+        let combo_id = create_pool_combo(&s, "expiry", Some(50.0), true).await;
+        crate::combos::upsert_pin(
+            &s.app.state.pool,
+            &combo_id,
+            "sess-old",
+            &stale,
+            60,
+            "2020-01-01T00:00:00.000Z",
+        )
+        .await
+        .expect("old pin");
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:expiry", true), "sess-old"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.resolved_offering_id.as_deref(), Some(fresh.as_str()));
+        let decision = decision_of(log);
+        assert_eq!(decision["sticky"]["replaced_why"], "expired");
+        assert_eq!(decision["sticky"]["pinned"], fresh.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_pin_the_caller_cannot_access_is_ignored() {
+        let stub = Stub::spawn(vec![Scenario::Stream {
+            events: vec![event(0)],
+            usage: Some(usage_json(3, 4)),
+        }])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let denied = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let allowed = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &denied, 1.0).await;
+        price_offering(&s, &allowed, 10.0).await;
+        let combo_id = create_pool_combo(&s, "grants", Some(50.0), true).await;
+
+        // The caller is denied the first offering (a deny row restricts even
+        // an admin, decision D9).
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        crate::access::create_grant(
+            &s.app.state.pool,
+            &actor,
+            &crate::access::GrantInput {
+                subject_type: "user".to_string(),
+                subject_id: s.uid.clone(),
+                resource_type: "offering".to_string(),
+                resource_id: denied.clone(),
+                mode: "deny".to_string(),
+            },
+        )
+        .await
+        .expect("deny grant");
+
+        // Pin the offering the caller may not use.
+        crate::combos::upsert_pin(
+            &s.app.state.pool,
+            &combo_id,
+            "sess-grant",
+            &denied,
+            1800,
+            &crate::catalog::now_ts(),
+        )
+        .await
+        .expect("pin");
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:grants", true), "sess-grant"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.resolved_offering_id.as_deref(), Some(allowed.as_str()));
+        let decision = decision_of(log);
+        assert_eq!(decision["sticky"]["pinned"], allowed.as_str());
+        assert_eq!(decision["sticky"]["replaced_why"], "not_eligible");
     }
 }

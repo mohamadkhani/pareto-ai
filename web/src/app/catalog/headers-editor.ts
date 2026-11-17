@@ -1,14 +1,11 @@
 import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { UiButton } from '../ui/button';
+import { UiInput } from '../ui/input';
 
 /** One editable custom-header row. */
 export interface HeaderRow {
   name: string;
   value: string;
-}
-
-/** Converts a header map to editable rows (order preserved from the map). */
-export function headerRowsOf(headers: Record<string, string> | null): HeaderRow[] {
-  return Object.entries(headers ?? {}).map(([name, value]) => ({ name, value }));
 }
 
 /** Converts rows back to a map, dropping rows without a name or a value. */
@@ -31,58 +28,54 @@ export function headerMapOf(rows: readonly HeaderRow[]): Record<string, string> 
  */
 @Component({
   selector: 'app-headers-editor',
+  imports: [UiButton, UiInput],
   changeDetection: ChangeDetectionStrategy.OnPush,
   styles: `
     .rows {
       display: flex;
       flex-direction: column;
-      gap: 0.45rem;
+      gap: var(--space-2);
     }
 
     .row {
       display: flex;
-      gap: 0.45rem;
+      align-items: flex-start;
+      gap: var(--space-2);
     }
 
-    .row input {
+    .row ui-input {
       flex: 1;
     }
 
     .empty {
       margin: 0;
-      color: var(--muted);
-      font-size: 0.85rem;
-    }
-
-    .add {
-      margin-top: 0.5rem;
+      color: var(--text-muted);
+      font-size: var(--text-small);
     }
   `,
   template: `
     <div class="rows">
       @for (row of rows(); track $index; let i = $index) {
         <div class="row">
-          <input
-            type="text"
+          <ui-input
             [value]="row.name"
             placeholder="Header name"
-            [attr.aria-label]="'Header name ' + (i + 1)"
-            (input)="updateName(i, $event)"
+            [ariaLabel]="'Header name ' + (i + 1)"
+            (valueChange)="updateName(i, $event)"
           />
-          <input
-            type="text"
+          <ui-input
             [value]="readOnlyValues() ? '' : row.value"
             [placeholder]="readOnlyValues() && row.value === '' ? 'stored (write-only)' : 'Value'"
-            [attr.aria-label]="'Header value ' + (i + 1)"
-            (input)="updateValue(i, $event)"
+            [ariaLabel]="'Header value ' + (i + 1)"
+            (valueChange)="updateValue(i, $event)"
           />
-          <button type="button" class="btn" (click)="removeRow(i)">Remove</button>
+          <ui-button size="sm" (clicked)="removeRow(i)">Remove</ui-button>
         </div>
       } @empty {
         <p class="empty">No custom headers.</p>
       }
-      <div class="add">
-        <button type="button" class="btn" (click)="addRow()">Add header</button>
+      <div>
+        <ui-button size="sm" (clicked)="addRow()">Add header</ui-button>
       </div>
     </div>
   `,
@@ -95,12 +88,12 @@ export class HeadersEditor {
   /** Emitted with the new rows after any edit. */
   readonly rowsChange = output<HeaderRow[]>();
 
-  protected updateName(index: number, event: Event): void {
-    this.replace(index, { name: inputValue(event), value: this.rows()[index].value });
+  protected updateName(index: number, name: string): void {
+    this.replace(index, { name, value: this.rows()[index].value });
   }
 
-  protected updateValue(index: number, event: Event): void {
-    this.replace(index, { name: this.rows()[index].name, value: inputValue(event) });
+  protected updateValue(index: number, value: string): void {
+    this.replace(index, { name: this.rows()[index].name, value });
   }
 
   protected addRow(): void {
@@ -114,8 +107,4 @@ export class HeadersEditor {
   private replace(index: number, row: HeaderRow): void {
     this.rowsChange.emit(this.rows().map((existing, i) => (i === index ? row : existing)));
   }
-}
-
-function inputValue(event: Event): string {
-  return (event.target as HTMLInputElement).value;
 }

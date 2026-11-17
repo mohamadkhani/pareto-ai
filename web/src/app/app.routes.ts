@@ -1,7 +1,8 @@
+import { inject } from '@angular/core';
 import { Routes } from '@angular/router';
 import { Audit } from './audit/audit';
+import { AuthService } from './auth/auth.service';
 import { authGuard, loginGuard } from './auth/auth.guard';
-import { Benchmarks } from './routing/benchmarks';
 import { ChangePassword } from './change-password/change-password';
 import { Combos } from './routing/combos';
 import { Grants } from './grants/grants';
@@ -10,12 +11,19 @@ import { Limits } from './money/limits';
 import { Login } from './login/login';
 import { Logs } from './usage/logs';
 import { Models } from './catalog/models';
-import { Offerings } from './catalog/offerings';
 import { Providers } from './catalog/providers';
-import { Sync } from './catalog/sync';
 import { Usage } from './usage/usage';
 import { Users } from './users/users';
 import { Shell } from './shell/shell';
+
+/**
+ * Where `/` lands for a signed-in account. Admins start on the audit log; a
+ * `user` account starts on usage, a page it is allowed to read. A plain
+ * redirect to `audit` would greet self-service accounts with 403s.
+ */
+export function landingRedirect(): string {
+  return inject(AuthService).isAdmin() ? 'audit' : 'usage';
+}
 
 export const routes: Routes = [
   { path: 'login', canActivate: [loginGuard], component: Login },
@@ -29,22 +37,32 @@ export const routes: Routes = [
     children: [
       // Admin-only pages; the server enforces admin on every catalog call.
       { path: 'providers', component: Providers },
+      // D31: models, prices, and quality live on one page; `/offerings`,
+      // `/benchmarks`, and `/sync` are retired (their actions moved to the
+      // Models toolbar and detail dialog).
       { path: 'models', component: Models },
-      { path: 'offerings', component: Offerings },
-      { path: 'sync', component: Sync },
       { path: 'combos', component: Combos },
-      { path: 'benchmarks', component: Benchmarks },
       { path: 'audit', component: Audit },
       { path: 'users', component: Users },
       { path: 'grants', component: Grants },
       { path: 'logs', component: Logs },
+      // Review surface for the design system; linked from the shell for admins
+      // and marked admin-only here, with the component showing Forbidden.
+      // Lazy-loaded: it renders every primitive twice and is not needed on
+      // first paint (it kept the initial bundle over the 600 kB budget).
+      {
+        path: 'styleguide',
+        canActivate: [authGuard],
+        data: { adminOnly: true },
+        loadComponent: () => import('./styleguide/styleguide').then((m) => m.Styleguide),
+      },
       // Self-service pages; an admin opening another account's keys uses the
       // `/users/:id/keys` form.
       { path: 'keys', component: Keys },
       { path: 'users/:id/keys', component: Keys },
       { path: 'limits', component: Limits },
       { path: 'usage', component: Usage },
-      { path: '', pathMatch: 'full', redirectTo: 'audit' },
+      { path: '', pathMatch: 'full', redirectTo: landingRedirect },
     ],
   },
   { path: '**', redirectTo: '' },

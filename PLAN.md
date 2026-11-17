@@ -23,6 +23,19 @@ with fallback, per-user budgets, and admin oversight.
 | M4 users, keys, money | **Done** (backend + UI + alignment; 245 backend tests, 144 UI tests) — closed `b1e58f0` (backend `30f95ec`) | 2026-11-16 |
 | M5 routing | **Done** (backend deep review + UI alignment closed; 318 backend tests, 175 UI tests) — closed `d864224` (backend `03c0c3d`) | 2026-11-16 |
 
+### Post-M5: console redesign and cost-aware routing
+
+| Stage | State | Date |
+| --- | --- | --- |
+| Design system (D28-D30) | **Done**: tokens, light/dark themes, self-hosted fonts, 15 primitives, `/styleguide` | 2026-11-16 |
+| Page redesign | **Done**: shell/nav groups, auth, merged Models, Providers with Load models, Access/Observability, Combos + preview; Offerings/Benchmarks/Sync pages retired | 2026-11-17 |
+| Token-mix pricing (D34) | **Done**: profiles, mix price in overview + routing, combo override | 2026-11-17 |
+| Rule combos + stickiness (D35) | **Done**: constraints over the catalog, session pinning, preview API | 2026-11-17 |
+| Model discovery + overview API | **Done** | 2026-11-17 |
+| Automatic benchmark sync (D33) | **Done**: Arena + BenchLM live, BenchmarkList implemented (fetch blocked from this host) | 2026-11-17 |
+| SQLite performance (D36) | **Done**: WAL + `synchronous=NORMAL`, 22 → 17 statements, ~1.9k req/s at c1 | 2026-11-17 |
+| Live provider verification | **Done**: OpenRouter discovery/prices/chat (`:free`), SailResearch discovery/chat, budgets/caps; findings fixed | 2026-11-17 |
+
 Environment note: crates.io is unreachable from this network, so dependency
 commands run with `--offline` against the local cargo cache; `pnpm` works
 normally (it replaced npm per D21). Details in [`README.md`](README.md).

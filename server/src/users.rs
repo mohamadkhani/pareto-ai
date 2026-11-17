@@ -749,9 +749,13 @@ mod tests {
         .await
         .expect("self change");
         assert!(
-            crate::api_keys::authenticate(&pool, &created.key)
-                .await
-                .is_ok(),
+            crate::api_keys::authenticate(
+                &pool,
+                &created.key,
+                &crate::api_keys::KeyUsageStamps::new()
+            )
+            .await
+            .is_ok(),
             "a self change keeps API keys"
         );
 
@@ -768,9 +772,13 @@ mod tests {
         )
         .await
         .expect("reset");
-        let rejected = crate::api_keys::authenticate(&pool, &created.key)
-            .await
-            .expect_err("revoked by the reset");
+        let rejected = crate::api_keys::authenticate(
+            &pool,
+            &created.key,
+            &crate::api_keys::KeyUsageStamps::new(),
+        )
+        .await
+        .expect_err("revoked by the reset");
         assert!(
             matches!(rejected, crate::api_keys::KeyRejection::Revoked),
             "{rejected:?}"

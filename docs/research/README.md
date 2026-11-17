@@ -26,6 +26,8 @@ re-checked instead of re-litigated. When a fact is not verified, it is marked
 | [09-environment.md](09-environment.md) | Dated environment knowledge: network, toolchain, cached crates, build quirks |
 | [10-milestones.md](10-milestones.md) | Orchestration log: runs, review findings, commits |
 | [11-user-preferences.md](11-user-preferences.md) | Dated user preferences: pnpm, Justfile, and their corrections |
+| [12-token-mix.md](12-token-mix.md) | Token-usage mixes (input/output/cached shares) behind a blended "mix price", and the presets to ship |
+| [13-performance.md](13-performance.md) | Measured hot-path cost: queries per request, latency/RPS, SQLite write path, migration-trigger verdict |
 
 Raw review artifacts live in [`../reviews/`](../reviews/) and are cited by the
 milestone log; specs live in [`../specs/`](../specs/).

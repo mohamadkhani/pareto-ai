@@ -9,154 +9,148 @@
   </header>
 
   @if (forbidden()) {
-    <div class="card">
-      <h2>Forbidden</h2>
-      <p class="empty-note">This report is restricted to administrators.</p>
-    </div>
+    <ui-empty title="Forbidden" description="This report is restricted to administrators." />
   } @else {
     @if (actionError()) {
-      <div class="banner error" role="alert">{{ actionError() }}</div>
+      <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+        {{ actionError() }}
+      </ui-banner>
     }
 
     <div class="toolbar">
       @if (isAdmin()) {
-        <div class="field">
-          <label for="usage-scope">Report</label>
-          <select id="usage-scope" [value]="scope()" (change)="onScopeChange($event)">
+        <ui-field label="Report" [controlId]="'usage-scope'">
+          <ui-select [value]="scope()" (valueChange)="onScopeChange($event)">
             <option value="me">My usage</option>
             <option value="all">All users</option>
             @for (user of users(); track user.id) {
               <option [value]="user.id">{{ user.email }}</option>
             }
-          </select>
-        </div>
-        @if (scope() !== 'me') {
-          <div class="field">
-            <label for="usage-group">Group by</label>
-            <select id="usage-group" [value]="groupBy()" (change)="onGroupByChange($event)">
-              @for (option of groupByOptions; track option) {
-                <option [value]="option">{{ option }}</option>
-              }
-            </select>
-          </div>
-        }
+          </ui-select>
+        </ui-field>
       }
-      <div class="field">
-        <label for="usage-from">From</label>
+      <ui-field label="From" [controlId]="'usage-from'">
         <input id="usage-from" type="date" [value]="from()" (input)="onFromChange($event)" />
-      </div>
-      <div class="field">
-        <label for="usage-to">To</label>
+      </ui-field>
+      <ui-field label="To" [controlId]="'usage-to'">
         <input id="usage-to" type="date" [value]="to()" (input)="onToChange($event)" />
-      </div>
+      </ui-field>
       <span class="spacer"></span>
-      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">
-        {{ loading() ? 'Loading…' : 'Apply' }}
-      </button>
+      <ui-button [loading]="loading()" (clicked)="reload()">Apply</ui-button>
     </div>
 
+    @if (isAdmin() && scope() !== 'me') {
+      <ui-tabs
+        class="group-tabs"
+        [tabs]="groupTabs"
+        [selected]="groupBy()"
+        (selectedChange)="onGroupByChange($event)"
+        label="Group by"
+      />
+    }
+
     @if (loadError()) {
-      <div class="banner error" role="alert">
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
         {{ loadError() }}
-        <button type="button" class="btn" (click)="reload()">Try again</button>
-      </div>
+      </ui-banner>
     } @else if (totals(); as totals) {
-      <div class="card totals-card">
-        <div class="totals-grid">
-          <div class="total">
-            <span class="total-label">Requests</span>
-            <span class="total-value">{{ totals.requests }}</span>
-          </div>
-          <div class="total">
-            <span class="total-label">Input tokens</span>
-            <span class="total-value">{{ formatTokens(totals.input_tokens) }}</span>
-          </div>
-          <div class="total">
-            <span class="total-label">Output tokens</span>
-            <span class="total-value">{{ formatTokens(totals.output_tokens) }}</span>
-          </div>
-          <div class="total">
-            <span class="total-label">Cost</span>
-            <span class="total-value">{{ formatUsd(totals.cost_usd) }}</span>
-          </div>
-        </div>
-        <p class="pricing-line">
-          <span class="badge ok">{{ totals.priced_requests }} priced</span>
-          @if (totals.refused_requests > 0) {
-            <span class="badge warn">{{ totals.refused_requests }} refused</span>
-          }
-          @if (totals.partial_requests > 0) {
-            <span class="badge warn">{{ totals.partial_requests }} partial</span>
-          }
-          @if (totals.unpriced_requests > 0) {
-            <span class="badge error">{{ totals.unpriced_requests }} unpriced</span>
-          }
-          @if (
-            totals.refused_requests === 0 &&
-            totals.partial_requests === 0 &&
-            totals.unpriced_requests === 0
-          ) {
-            <span class="badge">{{
-              totals.priced_requests === 0 ? 'no requests yet' : 'all priced'
-            }}</span>
-          }
-        </p>
+      <div class="totals-grid">
+        <ui-card padding="sm" class="total-card">
+          <span class="total-label">Requests</span>
+          <span class="total-value">{{ totals.requests }}</span>
+        </ui-card>
+        <ui-card padding="sm" class="total-card">
+          <span class="total-label">Input tokens</span>
+          <span class="total-value">{{ formatTokens(totals.input_tokens) }}</span>
+        </ui-card>
+        <ui-card padding="sm" class="total-card">
+          <span class="total-label">Output tokens</span>
+          <span class="total-value">{{ formatTokens(totals.output_tokens) }}</span>
+        </ui-card>
+        <ui-card padding="sm" class="total-card">
+          <span class="total-label">Cost</span>
+          <span class="total-value">{{ formatUsd(totals.cost_usd) }}</span>
+        </ui-card>
+      </div>
+
+      <div class="pricing-line">
+        <ui-badge tone="success">{{ totals.priced_requests }} priced</ui-badge>
+        @if (totals.refused_requests > 0) {
+          <ui-badge tone="warning">{{ totals.refused_requests }} refused</ui-badge>
+        }
+        @if (totals.partial_requests > 0) {
+          <ui-badge tone="warning">{{ totals.partial_requests }} partial</ui-badge>
+        }
+        @if (totals.unpriced_requests > 0) {
+          <ui-badge tone="danger">{{ totals.unpriced_requests }} unpriced</ui-badge>
+        }
+        @if (
+          totals.refused_requests === 0 &&
+          totals.partial_requests === 0 &&
+          totals.unpriced_requests === 0
+        ) {
+          <ui-badge tone="neutral">{{
+            totals.priced_requests === 0 ? 'no requests yet' : 'all priced'
+          }}</ui-badge>
+        }
       </div>
 
       @if (rows().length === 0) {
-        <div class="card">
-          <h2>No usage in this range</h2>
-          <p class="empty-note">Widen the date range or send a request through the gateway.</p>
-        </div>
+        <ui-empty
+          title="No usage in this range"
+          description="Widen the date range or send a request through the gateway."
+        />
       } @else {
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th scope="col">{{ keyHeader() }}</th>
-              <th scope="col">Requests</th>
-              <th scope="col">Input tokens</th>
-              <th scope="col">Output tokens</th>
-              <th scope="col">Cost</th>
-              <th scope="col">Refused</th>
-              <th scope="col">Unpriced</th>
-              <th scope="col">Partial</th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (row of rows(); track row.key) {
+        <ui-table [sticky]="true">
+          <table>
+            <thead>
               <tr>
-                <td>
-                  <code>{{ row.key }}</code>
-                </td>
-                <td>{{ row.totals.requests }}</td>
-                <td>{{ formatTokens(row.totals.input_tokens) }}</td>
-                <td>{{ formatTokens(row.totals.output_tokens) }}</td>
-                <td>{{ formatUsd(row.totals.cost_usd) }}</td>
-                <td>
-                  @if (row.totals.refused_requests > 0) {
-                    <span class="badge warn">{{ row.totals.refused_requests }}</span>
-                  } @else {
-                    0
-                  }
-                </td>
-                <td>
-                  @if (row.totals.unpriced_requests > 0) {
-                    <span class="badge error">{{ row.totals.unpriced_requests }}</span>
-                  } @else {
-                    0
-                  }
-                </td>
-                <td>
-                  @if (row.totals.partial_requests > 0) {
-                    <span class="badge warn">{{ row.totals.partial_requests }}</span>
-                  } @else {
-                    0
-                  }
-                </td>
+                <th scope="col">{{ keyHeader() }}</th>
+                <th scope="col">Requests</th>
+                <th scope="col">Input tokens</th>
+                <th scope="col">Output tokens</th>
+                <th scope="col">Cost</th>
+                <th scope="col">Refused</th>
+                <th scope="col">Unpriced</th>
+                <th scope="col">Partial</th>
               </tr>
-            }
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              @for (row of rows(); track row.key) {
+                <tr>
+                  <td>
+                    <code>{{ row.key }}</code>
+                  </td>
+                  <td>{{ row.totals.requests }}</td>
+                  <td>{{ formatTokens(row.totals.input_tokens) }}</td>
+                  <td>{{ formatTokens(row.totals.output_tokens) }}</td>
+                  <td>{{ formatUsd(row.totals.cost_usd) }}</td>
+                  <td>
+                    @if (row.totals.refused_requests > 0) {
+                      <ui-badge tone="warning">{{ row.totals.refused_requests }}</ui-badge>
+                    } @else {
+                      0
+                    }
+                  </td>
+                  <td>
+                    @if (row.totals.unpriced_requests > 0) {
+                      <ui-badge tone="danger">{{ row.totals.unpriced_requests }}</ui-badge>
+                    } @else {
+                      0
+                    }
+                  </td>
+                  <td>
+                    @if (row.totals.partial_requests > 0) {
+                      <ui-badge tone="warning">{{ row.totals.partial_requests }}</ui-badge>
+                    } @else {
+                      0
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </ui-table>
       }
     } @else {
       <p class="empty-note">Loading…</p>

@@ -6,9 +6,10 @@ import type {
   CredentialInput,
   CredentialPatch,
   CredentialTestResult,
+  DiscoveryInput,
+  DiscoverySummary,
   Model,
   ModelInput,
-  ModelPatch,
   Offering,
   OfferingInput,
   OfferingPatch,
@@ -20,6 +21,7 @@ import type {
   SyncOutcome,
   SyncStatus,
 } from './catalog.types';
+import type { ModelsOverview } from './overview.types';
 
 /**
  * Copies a credential response field by field so a stray `secret` (or any
@@ -81,11 +83,6 @@ export class CatalogService {
   /** Lists every provider. Throws `ApiError` on failure. */
   listProviders(): Promise<Provider[]> {
     return requestJson<Provider[]>('/api/providers');
-  }
-
-  /** Reads one provider by id. */
-  getProvider(id: string): Promise<Provider> {
-    return requestJson<Provider>(`/api/providers/${id}`);
   }
 
   /** Registers a provider and returns the created row. */
@@ -165,6 +162,19 @@ export class CatalogService {
     });
   }
 
+  /**
+   * Discovers the provider's models through its OpenAI-compatible `/models`
+   * endpoint. Idempotent: manual catalog edits, overrides, enabled flags, and
+   * prices are never overwritten. A failed upstream fetch is a 502.
+   */
+  discoverModels(providerId: string, input: DiscoveryInput = {}): Promise<DiscoverySummary> {
+    return requestJson<DiscoverySummary>(`/api/providers/${providerId}/discover-models`, {
+      method: 'POST',
+      body: input,
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
   // --- models --------------------------------------------------------------
 
   /** Lists every catalog model. */
@@ -173,9 +183,18 @@ export class CatalogService {
     return response.map(toModel);
   }
 
-  /** Reads one model by id. */
-  async getModel(id: string): Promise<Model> {
-    return toModel(await requestJson<Model>(`/api/models/${id}`));
+  /**
+   * The merged models overview: per-offering rows for one provider, or one
+   * aggregated row per model when `providerId` is null (D31). `mixId` selects
+   * the token-mix profile for every `mix_price`; null uses the resolved
+   * default (D34).
+   */
+  modelsOverview(providerId: string | null, mixId: string | null = null): Promise<ModelsOverview> {
+    const params = new URLSearchParams({ provider: providerId ?? 'all' });
+    if (mixId !== null && mixId !== '') {
+      params.set('mix', mixId);
+    }
+    return requestJson<ModelsOverview>(`/api/models/overview?${params.toString()}`);
   }
 
   /** Creates a model and returns the created row. */
@@ -187,25 +206,6 @@ export class CatalogService {
         csrfToken: this.auth.csrfToken(),
       }),
     );
-  }
-
-  /** Applies a partial model update and returns the updated row. */
-  async updateModel(id: string, patch: ModelPatch): Promise<Model> {
-    return toModel(
-      await requestJson<Model>(`/api/models/${id}`, {
-        method: 'PATCH',
-        body: patch,
-        csrfToken: this.auth.csrfToken(),
-      }),
-    );
-  }
-
-  /** Deletes a model; its offerings cascade. */
-  deleteModel(id: string): Promise<void> {
-    return requestNoContent(`/api/models/${id}`, {
-      method: 'DELETE',
-      csrfToken: this.auth.csrfToken(),
-    });
   }
 
   // --- offerings and prices ------------------------------------------------

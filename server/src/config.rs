@@ -78,6 +78,11 @@ pub struct Config {
     /// How long an open circuit breaker excludes the pair
     /// (`GATEWAY_BREAKER_COOLDOWN_MS`, default 60s).
     pub breaker_cooldown: Duration,
+    /// Default token-mix profile selector (name or id) from
+    /// `GATEWAY_TOKEN_MIX_PROFILE`. It wins over the
+    /// `pricing.default_mix_profile` setting (decision D34); absent/blank
+    /// means the setting decides.
+    pub token_mix_profile: Option<String>,
     /// Version reported by the health endpoint.
     pub version: String,
 }
@@ -145,6 +150,10 @@ impl Config {
             telemetry_refresh: parse_ms("GATEWAY_TELEMETRY_REFRESH_MS", DEFAULT_TELEMETRY_REFRESH)?,
             breaker_threshold: parse_u32("GATEWAY_BREAKER_THRESHOLD", DEFAULT_BREAKER_THRESHOLD)?,
             breaker_cooldown: parse_ms("GATEWAY_BREAKER_COOLDOWN_MS", DEFAULT_BREAKER_COOLDOWN)?,
+            token_mix_profile: env::var("GATEWAY_TOKEN_MIX_PROFILE")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }

@@ -38,6 +38,22 @@ export function formatUsd(value: number | null): string {
   return value === null ? '—' : `$${value.toFixed(2)}`;
 }
 
+/**
+ * USD per 1M tokens for the models table. Exact whole-cent values keep two
+ * decimals; sub-cent prices keep up to six significant decimals so a real
+ * price never collapses to `$0.00`. Unknown is always '—', never `$0`.
+ */
+export function formatPricePerM(value: number | null): string {
+  if (value === null) {
+    return '—';
+  }
+  if (Math.abs(value) >= 1) {
+    return `$${value.toFixed(2)}`;
+  }
+  const trimmed = value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  return `$${trimmed}`;
+}
+
 /** Splits a comma-separated tag field into trimmed, non-empty tags. */
 export function parseTags(value: string): string[] {
   return value

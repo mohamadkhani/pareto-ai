@@ -34,15 +34,18 @@ export class AuthService {
   readonly isAdmin = computed(() => this.user()?.role === 'admin');
 
   private restoreInFlight: Promise<boolean> | null = null;
+  /** Increments per restore so a superseded response cannot overwrite newer state. */
+  private restoreGeneration = 0;
 
   /**
    * Restores the session from `GET /api/auth/me`. Concurrent calls share one
    * request; a failed restore resolves to "not signed in" and never throws.
    * `force` re-reads the server state even when a session is already cached
-   * (used after a password change to pick up `must_change_password`).
+   * (used after a password change to pick up `must_change_password`): it always
+   * starts a fresh request instead of joining one that began before the change.
    */
   loadMe(force = false): Promise<boolean> {
-    if (this.restoreInFlight !== null) {
+    if (!force && this.restoreInFlight !== null) {
       return this.restoreInFlight;
     }
     if (!force && this.status() === 'authenticated') {
@@ -51,9 +54,14 @@ export class AuthService {
     if (!force && this.status() === 'anonymous') {
       return Promise.resolve(false);
     }
+    const generation = ++this.restoreGeneration;
     this.status.set('loading');
-    this.restoreInFlight = requestJson<AuthSession>('/api/auth/me')
+    const restore = requestJson<AuthSession>('/api/auth/me')
       .then((session) => {
+        if (generation !== this.restoreGeneration) {
+          // A newer restore already answered; do not overwrite its state.
+          return this.status() === 'authenticated';
+        }
         this.user.set(session.user);
         this.csrfToken.set(session.csrf_token);
         this.status.set('authenticated');
@@ -61,13 +69,18 @@ export class AuthService {
       })
       .catch(() => {
         // 401 just means "not signed in"; network trouble surfaces on login.
-        this.status.set('anonymous');
-        return false;
+        if (generation === this.restoreGeneration) {
+          this.status.set('anonymous');
+        }
+        return this.status() === 'authenticated';
       })
       .finally(() => {
-        this.restoreInFlight = null;
+        if (generation === this.restoreGeneration) {
+          this.restoreInFlight = null;
+        }
       });
-    return this.restoreInFlight;
+    this.restoreInFlight = restore;
+    return restore;
   }
 
   /**
@@ -90,6 +103,9 @@ export class AuthService {
    * clearing the forced-rotation flag server-side. Throws `ApiError`
    * (`invalid_credentials` when the current password is wrong, `invalid_request`
    * for a too-short new password) on failure.
+   *
+   * The local user is updated on success so the guard lets the account through
+   * immediately, even before (or without) a following `loadMe(true)`.
    */
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     await requestNoContent('/api/auth/change-password', {
@@ -97,6 +113,10 @@ export class AuthService {
       body: { current_password: currentPassword, new_password: newPassword },
       csrfToken: this.csrfToken(),
     });
+    const user = this.user();
+    if (user?.must_change_password) {
+      this.user.set({ ...user, must_change_password: false });
+    }
   }
 
   /**

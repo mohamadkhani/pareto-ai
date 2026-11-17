@@ -2,6 +2,15 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { AuthService } from '../auth/auth.service';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatUsd } from '../catalog/format';
+import { UiBadge } from '../ui/badge';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiCard } from '../ui/card';
+import { UiEmpty } from '../ui/empty';
+import { UiField } from '../ui/field';
+import { UiSelect } from '../ui/select';
+import { UiTable } from '../ui/table';
+import { type TabItem, UiTabs } from '../ui/tabs';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { UsageService } from './usage.service';
@@ -52,6 +61,7 @@ function groupKey(group: UsageGroup, groupBy: UsageGroupBy): string {
 /** Usage reports: what was spent, by day, user, or offering. */
 @Component({
   selector: 'app-usage',
+  imports: [UiBadge, UiBanner, UiButton, UiCard, UiEmpty, UiField, UiSelect, UiTable, UiTabs],
   templateUrl: './usage.html',
   styleUrl: './usage.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -75,7 +85,12 @@ export class Usage {
   protected readonly actionError = signal<string | null>(null);
 
   protected readonly formatUsd = formatUsd;
-  protected readonly groupByOptions: readonly UsageGroupBy[] = ['day', 'user', 'offering'];
+  /** Tabs shown for the admin aggregate's grouping. */
+  protected readonly groupTabs: readonly TabItem[] = [
+    { id: 'day', label: 'Day' },
+    { id: 'user', label: 'User' },
+    { id: 'offering', label: 'Offering' },
+  ];
 
   /** The row-label column header follows the active report. */
   protected readonly keyHeader = computed(() =>
@@ -130,21 +145,13 @@ export class Usage {
     }
   }
 
-  protected onScopeChange(event: Event): void {
-    const select = event.target;
-    if (!(select instanceof HTMLSelectElement)) {
-      return;
-    }
-    this.scope.set(select.value);
+  protected onScopeChange(value: string): void {
+    this.scope.set(value);
     void this.reload();
   }
 
-  protected onGroupByChange(event: Event): void {
-    const select = event.target;
-    if (!(select instanceof HTMLSelectElement)) {
-      return;
-    }
-    this.groupBy.set(select.value as UsageGroupBy);
+  protected onGroupByChange(value: string): void {
+    this.groupBy.set(value as UsageGroupBy);
     void this.reload();
   }
 

@@ -2,7 +2,8 @@
   <header class="page-head">
     <h1>Models</h1>
     <p class="hint">
-      Canonical catalog entries. Modalities and capabilities are comma-separated tags.
+      One page for the catalog, prices, and quality (D31). Filter by provider for per-offering rows,
+      or stay on all providers for average and minimum prices across the catalog.
     </p>
   </header>
 
@@ -13,157 +14,770 @@
     </div>
   } @else {
     @if (actionError()) {
-      <div class="banner error" role="alert">{{ actionError() }}</div>
+      <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+        {{ actionError() }}
+      </ui-banner>
+    }
+    @if (notice()) {
+      <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+        {{ notice() }}
+      </ui-banner>
     }
 
-    <div class="toolbar">
-      <button type="button" class="btn primary" (click)="openCreate()">New model</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn" (click)="reload()" [disabled]="loading()">Refresh</button>
+    <div class="models-toolbar">
+      <ui-field label="Provider">
+        <ui-select
+          [id]="'models-provider-filter'"
+          [value]="providerId()"
+          (valueChange)="onProviderFilter($event)"
+        >
+          <option value="all">All providers</option>
+          @for (provider of providers(); track provider.id) {
+            <option [value]="provider.id">{{ provider.name }}</option>
+          }
+        </ui-select>
+      </ui-field>
+
+      <ui-field label="Price basis">
+        <ui-select
+          [id]="'models-price-basis'"
+          [value]="priceBasis()"
+          (valueChange)="onBasisChange($event)"
+        >
+          <option value="components">Component prices</option>
+          @for (profile of profiles(); track profile.id) {
+            <option [value]="profile.id">{{ profileOptionLabel(profile) }}</option>
+          }
+        </ui-select>
+      </ui-field>
+
+      <ui-button (clicked)="openProfiles()">Manage profiles</ui-button>
+
+      <span class="toolbar-spacer"></span>
+
+      <ui-button variant="primary" (clicked)="openModelForm()">New model</ui-button>
+      <ui-button [loading]="syncingPrices()" (clicked)="syncPrices()">Sync prices</ui-button>
+      <ui-button
+        [disabled]="!benchmarkSyncAvailable()"
+        [loading]="syncingBenchmarks()"
+        [attr.title]="
+          benchmarkSyncAvailable()
+            ? 'Fetch the configured benchmark sources'
+            : 'Benchmark sync is not available in this build'
+        "
+        (clicked)="syncBenchmarks()"
+      >
+        Sync benchmarks
+      </ui-button>
+      <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
     </div>
 
-    @if (formState(); as state) {
-      <form class="card form-card" [formGroup]="form" (ngSubmit)="save()" novalidate>
-        <h2>{{ state.mode === 'create' ? 'New model' : 'Edit ' + state.model.canonical_name }}</h2>
-        <div class="form-grid">
-          <div class="field">
-            <label for="model-name">Canonical name</label>
-            <input
-              id="model-name"
-              type="text"
-              formControlName="canonical_name"
-              placeholder="openai/gpt-5"
-            />
-            @if (showError('canonical_name')) {
-              <p class="field-error" role="alert">{{ fieldError('canonical_name') }}</p>
+    <div class="sync-status" aria-live="polite">
+      <span class="sync-status__item">
+        <span class="sync-status__label">Prices</span>
+        <span class="sync-status__value">{{ lastRunLabel() }}</span>
+      </span>
+      @for (run of benchmarkRuns(); track run.source) {
+        <span class="sync-status__item">
+          <span class="sync-status__label">{{ run.source }}</span>
+          <ui-badge [tone]="syncTone(run.status)">{{ run.status }}</ui-badge>
+          @if (run.fresh === false && run.status !== 'never') {
+            <ui-badge tone="warning">stale</ui-badge>
+          }
+          <span class="sync-status__value">
+            {{ benchmarkCounts(run) || 'no counts' }}
+            @if (run.finished_at !== null) {
+              · {{ formatAge(run.finished_at) }}
             }
-          </div>
-          <div class="field">
-            <label for="model-family">Family</label>
-            <input id="model-family" type="text" formControlName="family" placeholder="gpt-5" />
-          </div>
-          <div class="field">
-            <label for="model-input-modalities">Input modalities</label>
-            <input
-              id="model-input-modalities"
-              type="text"
-              formControlName="modalities_input"
-              placeholder="text, image"
-            />
-          </div>
-          <div class="field">
-            <label for="model-output-modalities">Output modalities</label>
-            <input
-              id="model-output-modalities"
-              type="text"
-              formControlName="modalities_output"
-              placeholder="text"
-            />
-          </div>
-          <div class="field">
-            <label for="model-context">Context length</label>
-            <input
-              id="model-context"
-              type="number"
-              min="1"
-              step="1"
-              formControlName="context_length"
-              placeholder="unknown"
-            />
-            @if (showError('context_length')) {
-              <p class="field-error" role="alert">{{ fieldError('context_length') }}</p>
-            }
-          </div>
-          <div class="field">
-            <label for="model-max-output">Max output tokens</label>
-            <input
-              id="model-max-output"
-              type="number"
-              min="1"
-              step="1"
-              formControlName="max_output_tokens"
-              placeholder="unknown"
-            />
-            @if (showError('max_output_tokens')) {
-              <p class="field-error" role="alert">{{ fieldError('max_output_tokens') }}</p>
-            }
-          </div>
-          <div class="field full">
-            <label for="model-capabilities">Capabilities</label>
-            <input
-              id="model-capabilities"
-              type="text"
-              formControlName="capabilities"
-              placeholder="tools, json_mode, reasoning"
-            />
-          </div>
-        </div>
-        <div class="form-actions">
-          <button type="submit" class="btn primary" [disabled]="saving()">
-            {{ saving() ? 'Saving…' : 'Save' }}
-          </button>
-          <button type="button" class="btn" (click)="closeForm()">Cancel</button>
-        </div>
-      </form>
-    }
+          </span>
+          @if (run.license !== null) {
+            <span class="sync-status__license">{{ run.license }}</span>
+          }
+          @if (run.attribution_url !== null) {
+            <a [href]="run.attribution_url" target="_blank" rel="noopener noreferrer">
+              attribution
+            </a>
+          } @else if (run.source_url !== null) {
+            <a [href]="run.source_url" target="_blank" rel="noopener noreferrer">source</a>
+          }
+          @if (run.error !== null) {
+            <span class="sync-status__error">{{ run.error }}</span>
+          }
+        </span>
+      }
+      @if (!benchmarkSyncAvailable()) {
+        <span class="sync-status__item">Benchmark sync is not available in this build.</span>
+      }
+    </div>
 
     @if (loadError()) {
-      <div class="banner error" role="alert">
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
         {{ loadError() }}
-        <button type="button" class="btn" (click)="reload()">Try again</button>
-      </div>
-    } @else if (loading() && models().length === 0) {
+      </ui-banner>
+    } @else if (loading() && rows().length === 0) {
       <p class="empty-note">Loading…</p>
-    } @else if (models().length === 0) {
-      <div class="card">
-        <h2>No models yet</h2>
-        <p class="empty-note">Add a model by hand or sync the OpenRouter catalog.</p>
-      </div>
+    } @else if (rows().length === 0) {
+      @if (providers().length === 0) {
+        <ui-empty
+          title="No catalog yet"
+          description="Connect a provider and load its models, then prices and quality appear here."
+        >
+          <span ui-empty-action>
+            <a class="empty-link" routerLink="/providers">Go to Providers</a>
+          </span>
+        </ui-empty>
+      } @else if (scope() === 'provider') {
+        <ui-empty
+          title="No offerings for this provider"
+          description="This provider has no catalog offerings yet. Load its models from the Providers page, or switch back to all providers."
+        >
+          <span ui-empty-action>
+            <a class="empty-link" routerLink="/providers">Go to Providers</a>
+          </span>
+        </ui-empty>
+      } @else {
+        <ui-empty
+          title="No models yet"
+          description="Add a model by hand or load a provider's models from the Providers page."
+        >
+          <span ui-empty-action>
+            <ui-button size="sm" (clicked)="openModelForm()">New model</ui-button>
+          </span>
+        </ui-empty>
+      }
     } @else {
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th scope="col">Canonical name</th>
-            <th scope="col">Family</th>
-            <th scope="col">Modalities</th>
-            <th scope="col">Context</th>
-            <th scope="col">Max output</th>
-            <th scope="col">Capabilities</th>
-            <th scope="col"><span class="visually-hidden">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (model of models(); track model.id) {
+      @if (allUnpriced()) {
+        <ui-banner tone="info">
+          No priced offerings yet. Unpriced offerings are labelled “unpriced” and are never counted
+          as $0.00 or included in an average; set a manual price from a row's details.
+        </ui-banner>
+      }
+
+      <ui-table [sticky]="true">
+        <table>
+          <thead>
             <tr>
-              <td>
-                <code>{{ model.canonical_name }}</code>
-              </td>
-              <td>{{ model.family ?? '—' }}</td>
-              <td>
-                {{ model.modalities_input.join(', ') || '—' }}
-                →
-                {{ model.modalities_output.join(', ') || '—' }}
-              </td>
-              <td>{{ model.context_length ?? '—' }}</td>
-              <td>{{ model.max_output_tokens ?? '—' }}</td>
-              <td>
-                @if (capabilityDisplay(model.capabilities)) {
-                  <code>{{ capabilityDisplay(model.capabilities) }}</code>
+              <th scope="col" [attr.aria-sort]="sortAria('name')">
+                <button type="button" class="sort-button" (click)="setSort('name')">
+                  Model
+                  <span class="sort-indicator" aria-hidden="true">{{ sortIndicator('name') }}</span>
+                </button>
+              </th>
+              <th scope="col">Provider</th>
+              <th scope="col" [attr.aria-sort]="sortAria('context')">
+                <button type="button" class="sort-button" (click)="setSort('context')">
+                  Context
+                  <span class="sort-indicator" aria-hidden="true">{{
+                    sortIndicator('context')
+                  }}</span>
+                </button>
+              </th>
+              <th scope="col" class="num" [attr.aria-sort]="sortAria('mix')">
+                @if (mixSelected()) {
+                  <button type="button" class="sort-button" (click)="setSort('mix')">
+                    Mix price $/M
+                    <span class="basis-label">{{ basisLabel() }}</span>
+                    <span class="sort-indicator" aria-hidden="true">{{
+                      sortIndicator('mix')
+                    }}</span>
+                  </button>
                 } @else {
-                  —
+                  <button type="button" class="sort-button" (click)="setSort('input')">
+                    Input $/M
+                    <span class="sort-indicator" aria-hidden="true">{{
+                      sortIndicator('input')
+                    }}</span>
+                  </button>
                 }
-              </td>
-              <td class="actions">
-                <button type="button" class="btn" (click)="openEdit(model)">Edit</button>
-                <app-delete-confirm
-                  [pending]="deletingId() === model.id"
-                  (confirmed)="deleteModel(model)"
-                />
-              </td>
+              </th>
+              @if (!mixSelected()) {
+                <th scope="col" class="num" [attr.aria-sort]="sortAria('output')">
+                  <button type="button" class="sort-button" (click)="setSort('output')">
+                    Output $/M
+                    <span class="sort-indicator" aria-hidden="true">{{
+                      sortIndicator('output')
+                    }}</span>
+                  </button>
+                </th>
+                <th scope="col" class="num" [attr.aria-sort]="sortAria('cache')">
+                  <button type="button" class="sort-button" (click)="setSort('cache')">
+                    Cache $/M
+                    <span class="sort-indicator" aria-hidden="true">{{
+                      sortIndicator('cache')
+                    }}</span>
+                  </button>
+                </th>
+              }
+              <th scope="col" [attr.aria-sort]="sortAria('quality')">
+                <button type="button" class="sort-button" (click)="setSort('quality')">
+                  Quality
+                  <span class="sort-indicator" aria-hidden="true">{{
+                    sortIndicator('quality')
+                  }}</span>
+                </button>
+              </th>
+              <th scope="col">Status</th>
+              <th scope="col"><span class="visually-hidden">Actions</span></th>
             </tr>
-          }
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            @for (row of rows(); track rowKey(row)) {
+              <tr>
+                <td>
+                  <span class="model-name">{{ row.canonical_name }}</span>
+                  <span class="model-family">{{ row.family ?? '—' }}</span>
+                </td>
+                <td>
+                  <span>{{ providerLabel(row) }}</span>
+                  @if (scope() === 'all') {
+                    <ui-badge tone="info">avg</ui-badge>
+                  }
+                </td>
+                <td class="num">{{ row.context_length ?? '—' }}</td>
+                <td class="num price-cell">
+                  @if (mixSelected()) {
+                    @if (mixPrice(row); as mix) {
+                      <span class="price">{{ formatPrice(mix.per_m) }}</span>
+                      <ui-badge [tone]="basisTone(mix)">{{ mix.basis }}</ui-badge>
+                      @if (mixPriceMin(row); as min) {
+                        <span class="price-min">min {{ formatPrice(min.per_m) }}</span>
+                      }
+                    } @else if (rowVariable(row)) {
+                      <ui-badge tone="warning" [title]="variableTooltip">variable</ui-badge>
+                    } @else if (rowUnpriced(row)) {
+                      <ui-badge tone="warning">unpriced</ui-badge>
+                    } @else {
+                      <span class="price-missing" title="A positive-share component has no price.">
+                        no mix price
+                      </span>
+                    }
+                  } @else if (inputPrice(row) !== null) {
+                    <span class="price">{{ formatPrice(inputPrice(row)) }}</span>
+                    @if (minPrice(row, 'input_per_m'); as min) {
+                      <span class="price-min">min {{ formatPrice(min) }}</span>
+                    }
+                    @if (rowVariable(row)) {
+                      <ui-badge tone="warning" [title]="variableTooltip">variable</ui-badge>
+                    }
+                  } @else if (rowVariable(row)) {
+                    <ui-badge tone="warning" [title]="variableTooltip">variable</ui-badge>
+                  } @else {
+                    <ui-badge tone="warning">unpriced</ui-badge>
+                  }
+                </td>
+                @if (!mixSelected()) {
+                  <td class="num price-cell">
+                    @if (outputPrice(row) !== null) {
+                      <span class="price">{{ formatPrice(outputPrice(row)) }}</span>
+                      @if (minPrice(row, 'output_per_m'); as min) {
+                        <span class="price-min">min {{ formatPrice(min) }}</span>
+                      }
+                    } @else {
+                      <ui-badge tone="warning">unpriced</ui-badge>
+                    }
+                  </td>
+                  <td class="num price-cell">
+                    @if (cachePrice(row) !== null) {
+                      <span class="price">{{ formatPrice(cachePrice(row)) }}</span>
+                      @if (minPrice(row, 'cache_read_per_m'); as min) {
+                        <span class="price-min">min {{ formatPrice(min) }}</span>
+                      }
+                    } @else {
+                      <span class="price-missing">—</span>
+                    }
+                  </td>
+                }
+                <td>
+                  <span class="quality-score">{{ qualityScore(row.quality) }}</span>
+                  <ui-badge [tone]="qualityTone(row.quality)">{{
+                    qualityLabel(row.quality)
+                  }}</ui-badge>
+                </td>
+                <td>
+                  <ui-badge [tone]="statusTone(row)">{{ statusLabel(row) }}</ui-badge>
+                  @if (rowVariableCount(row) > 0 && scope() === 'all') {
+                    <ui-badge tone="warning" [title]="variableTooltip"
+                      >{{ rowVariableCount(row) }} variable</ui-badge
+                    >
+                  }
+                  @if (rowUnpricedCount(row) > 0 && scope() === 'all') {
+                    <ui-badge tone="warning">{{ rowUnpricedCount(row) }} unpriced</ui-badge>
+                  }
+                </td>
+                <td class="actions">
+                  <ui-button size="sm" variant="ghost" (clicked)="openDetail(row)">
+                    Details
+                  </ui-button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </ui-table>
     }
   }
 </div>
+
+<ui-dialog
+  [open]="detailOpen()"
+  [title]="detailRow()?.canonical_name ?? 'Model details'"
+  (closed)="closeDetail()"
+>
+  @if (detailRow(); as row) {
+    <div class="detail">
+      <section class="detail-section">
+        <h3>Model</h3>
+        <dl class="facts">
+          <div>
+            <dt>Family</dt>
+            <dd>{{ row.family ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>Modalities</dt>
+            <dd>{{ modalityText(row) }}</dd>
+          </div>
+          <div>
+            <dt>Context (effective)</dt>
+            <dd>{{ row.context_length ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>Max output (effective)</dt>
+            <dd>{{ row.max_output_tokens ?? '—' }}</dd>
+          </div>
+          @if (scope() === 'provider') {
+            <div>
+              <dt>Provider</dt>
+              <dd>{{ detailProviderName() }}</dd>
+            </div>
+          }
+        </dl>
+      </section>
+
+      @if (scope() === 'provider') {
+        <section class="detail-section">
+          <h3>Offering</h3>
+          <dl class="facts">
+            <div>
+              <dt>Upstream id</dt>
+              <dd>
+                <code>{{ upstreamId(row) }}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>Enabled</dt>
+              <dd>
+                <ui-switch
+                  [checked]="offeringEnabled(row)"
+                  [disabled]="togglingEnabled()"
+                  label="Offering enabled"
+                  (checkedChange)="toggleEnabled()"
+                />
+              </dd>
+            </div>
+          </dl>
+          <ui-button
+            class="offering-remove"
+            size="sm"
+            variant="danger"
+            (clicked)="askRemoveOffering()"
+          >
+            Remove offering
+          </ui-button>
+        </section>
+      }
+
+      <section class="detail-section">
+        <h3>Price</h3>
+        @if (scope() === 'provider') {
+          @if (detailPrice(row)?.variable_price) {
+            <ui-banner tone="warning">
+              The provider publishes a variable price for this offering (OpenRouter sends -1). The
+              variable components are stored as unknown, never as -1: routing imputes the neutral
+              price score and a combo price cap excludes it. Saving a manual price clears this flag.
+            </ui-banner>
+          }
+          <p class="note">
+            Values are USD. A blank field keeps the stored value. Saving marks the row manual; sync
+            never overwrites it (D10). Blank components stay unknown, never 0.
+          </p>
+          <div class="price-grid">
+            @for (field of priceFields; track field.key) {
+              <ui-field [label]="field.label">
+                <ui-input
+                  type="number"
+                  inputmode="decimal"
+                  [value]="priceDraft()[field.key]"
+                  (valueChange)="setPriceValue(field.key, $event)"
+                />
+              </ui-field>
+            }
+            <ui-field label="Currency">
+              <ui-input
+                [value]="priceDraft().currency"
+                (valueChange)="setPriceValue('currency', $event)"
+              />
+            </ui-field>
+          </div>
+          @if (priceError()) {
+            <ui-banner tone="danger">{{ priceError() }}</ui-banner>
+          }
+          <p class="note">
+            Source:
+            <ui-badge [tone]="detailPrice(row)?.source === 'manual' ? 'warning' : 'info'">{{
+              detailPrice(row)?.source ?? 'none'
+            }}</ui-badge>
+            @if (detailPrice(row)?.fetched_at; as fetched) {
+              · fetched {{ formatTime(fetched) }}
+            }
+          </p>
+        } @else {
+          @if (averagePrice(row); as avg) {
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th scope="col">Component</th>
+                  <th scope="col">Average</th>
+                  <th scope="col">Minimum</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Input $/M</th>
+                  <td>{{ formatPrice(avg.input_per_m) }}</td>
+                  <td>{{ formatPrice(minimumPrice(row)?.input_per_m ?? null) }}</td>
+                </tr>
+                <tr>
+                  <th scope="row">Output $/M</th>
+                  <td>{{ formatPrice(avg.output_per_m) }}</td>
+                  <td>{{ formatPrice(minimumPrice(row)?.output_per_m ?? null) }}</td>
+                </tr>
+                <tr>
+                  <th scope="row">Cache $/M</th>
+                  <td>{{ formatPrice(avg.cache_read_per_m) }}</td>
+                  <td>{{ formatPrice(minimumPrice(row)?.cache_read_per_m ?? null) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="note">
+              Averaged over priced offerings only; unpriced offerings never count as $0.00. Filter
+              by a provider to edit one offering's full price row.
+            </p>
+          } @else {
+            <ui-badge tone="warning">unpriced</ui-badge>
+            <p class="note">No offering of this model has a price yet.</p>
+          }
+        }
+      </section>
+
+      <section class="detail-section">
+        <h3>Mix price</h3>
+        @if (detailMix(); as mix) {
+          <dl class="facts">
+            <div>
+              <dt>Mix price</dt>
+              <dd>
+                <span class="price">{{ formatPrice(mix.per_m) }}</span> per 1M tokens
+                <ui-badge [tone]="basisTone(mix)">{{ mix.basis }}</ui-badge>
+              </dd>
+            </div>
+            <div>
+              <dt>Effective profile</dt>
+              <dd>
+                {{ mix.profile_name }}
+                <span class="price-min">{{ mix.profile_id }}</span>
+              </dd>
+            </div>
+          </dl>
+          @if (detailBreakdown(); as breakdown) {
+            <table class="mini-table mix-table">
+              <thead>
+                <tr>
+                  <th scope="col">Component</th>
+                  <th scope="col">Share</th>
+                  <th scope="col">Price $/M</th>
+                  <th scope="col">Contribution</th>
+                  <th scope="col">Inherited from</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (line of breakdown.rows; track line.component) {
+                  <tr>
+                    <th scope="row">{{ componentLabel(line.component) }}</th>
+                    <td>{{ shareLabel(line.share) }}</td>
+                    <td>{{ formatPrice(line.price_per_m) }}</td>
+                    <td>{{ formatPrice(line.contribution_per_m) }}</td>
+                    <td>
+                      @if (line.inherited_from !== null) {
+                        <ui-badge tone="info">{{ inheritedLabel(line.inherited_from) }}</ui-badge>
+                      } @else {
+                        <span class="price-min">own price</span>
+                      }
+                    </td>
+                  </tr>
+                }
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th scope="row">Total</th>
+                  <td>100%</td>
+                  <td></td>
+                  <td>{{ formatPrice(breakdown.per_m) }}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+            <p class="note">
+              Blended at the profile's normalised shares. A cache read or write without its own
+              price inherits the input price; reasoning inherits output (D34). This price drives
+              routing; billing still uses component prices (D22).
+              @if (scope() === 'all') {
+                The component prices above are averages over priced offerings; filter by a provider
+                for one offering's exact blend.
+              }
+            </p>
+          } @else {
+            <p class="note">
+              This row cannot show a per-component breakdown: the all-providers averages carry no
+              cache-write or reasoning price, or a positive-share component has no price at all.
+            </p>
+          }
+        } @else {
+          <ui-badge tone="warning">no mix price</ui-badge>
+          <p class="note">
+            The blend is unknown — the offering has no price for at least one component the profile
+            uses. An unknown price never counts as $0.00.
+          </p>
+        }
+      </section>
+
+      <section class="detail-section">
+        <h3>Quality</h3>
+        <dl class="facts">
+          <div>
+            <dt>Score</dt>
+            <dd>{{ qualityScore(row.quality) }}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <ui-badge [tone]="qualityTone(row.quality)">{{ qualityLabel(row.quality) }}</ui-badge>
+            </dd>
+          </div>
+          <div>
+            <dt>Category</dt>
+            <dd>{{ row.quality?.category ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>Confidence interval</dt>
+            <dd>{{ row.quality?.ci ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>Rank</dt>
+            <dd>{{ row.quality?.rank ?? '—' }}</dd>
+          </div>
+          <div>
+            <dt>Fetched</dt>
+            <dd>{{ formatTime(row.quality?.fetched_at ?? null) }}</dd>
+          </div>
+        </dl>
+        <div class="override-editor">
+          <ui-field
+            label="Override score"
+            hint="Uses the imported benchmark's native Elo-like scale, not 0–1."
+          >
+            <ui-input
+              type="number"
+              inputmode="decimal"
+              [value]="overrideDraft()"
+              (valueChange)="overrideDraft.set($event)"
+            />
+          </ui-field>
+          <ui-button [loading]="savingOverride()" (clicked)="saveOverride()">
+            Set override
+          </ui-button>
+          @if (row.quality?.overridden) {
+            <ui-button variant="danger" [loading]="removingOverride()" (clicked)="removeOverride()">
+              Remove override
+            </ui-button>
+          }
+        </div>
+        @if (overrideError()) {
+          <ui-banner tone="danger">{{ overrideError() }}</ui-banner>
+        }
+      </section>
+    </div>
+  }
+
+  <div ui-dialog-actions>
+    @if (scope() === 'provider' && detailRow() !== null) {
+      <ui-button (clicked)="openAddOffering()">Add offering</ui-button>
+      <ui-button variant="primary" [loading]="savingPrice()" (clicked)="savePrice()">
+        Save price
+      </ui-button>
+    }
+    <ui-button variant="ghost" (clicked)="closeDetail()">Close</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="modelFormOpen()" title="New model" (closed)="closeModelForm()">
+  <div class="model-form">
+    <ui-field label="Canonical name" [error]="modelErrors().canonical_name ?? ''">
+      <ui-input
+        [value]="modelDraft().canonical_name"
+        placeholder="openai/gpt-5"
+        (valueChange)="setModelValue('canonical_name', $event)"
+      />
+    </ui-field>
+    <ui-field label="Family">
+      <ui-input
+        [value]="modelDraft().family"
+        placeholder="gpt-5"
+        (valueChange)="setModelValue('family', $event)"
+      />
+    </ui-field>
+    <ui-field label="Input modalities" hint="Comma-separated tags, for example text, image.">
+      <ui-input
+        [value]="modelDraft().modalities_input"
+        placeholder="text, image"
+        (valueChange)="setModelValue('modalities_input', $event)"
+      />
+    </ui-field>
+    <ui-field label="Output modalities" hint="Comma-separated tags.">
+      <ui-input
+        [value]="modelDraft().modalities_output"
+        placeholder="text"
+        (valueChange)="setModelValue('modalities_output', $event)"
+      />
+    </ui-field>
+    <ui-field label="Context length" [error]="modelErrors().context_length ?? ''">
+      <ui-input
+        type="number"
+        [value]="modelDraft().context_length"
+        placeholder="unknown"
+        (valueChange)="setModelValue('context_length', $event)"
+      />
+    </ui-field>
+    <ui-field label="Max output tokens" [error]="modelErrors().max_output_tokens ?? ''">
+      <ui-input
+        type="number"
+        [value]="modelDraft().max_output_tokens"
+        placeholder="unknown"
+        (valueChange)="setModelValue('max_output_tokens', $event)"
+      />
+    </ui-field>
+    <ui-field label="Capabilities" hint="Comma-separated tags, for example tools, reasoning.">
+      <ui-input
+        [value]="modelDraft().capabilities"
+        placeholder="tools, json_mode, reasoning"
+        (valueChange)="setModelValue('capabilities', $event)"
+      />
+    </ui-field>
+  </div>
+  <div ui-dialog-actions>
+    <ui-button variant="primary" [loading]="savingModel()" (clicked)="saveModel()">
+      Create model
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeModelForm()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="offeringOpen()" title="Add offering" (closed)="closeAddOffering()">
+  @if (offeringError()) {
+    <ui-banner tone="danger">{{ offeringError() }}</ui-banner>
+  }
+  <div class="model-form">
+    <ui-field label="Model" [error]="offeringErrors().model_id ?? ''">
+      <ui-select
+        [id]="'offering-model'"
+        [value]="offeringDraft().model_id"
+        (valueChange)="setOfferingDraft('model_id', $event)"
+      >
+        @for (model of offeringModels(); track model.id) {
+          <option [value]="model.id">{{ model.canonical_name }}</option>
+        }
+      </ui-select>
+    </ui-field>
+    <ui-field
+      label="Upstream model id"
+      [error]="offeringErrors().upstream_model_id ?? ''"
+      hint="The id the provider expects, for example openai/gpt-5."
+    >
+      <ui-input
+        [id]="'offering-upstream'"
+        placeholder="openai/gpt-5"
+        [value]="offeringDraft().upstream_model_id"
+        (valueChange)="setOfferingDraft('upstream_model_id', $event)"
+      />
+    </ui-field>
+    <ui-field
+      label="Context override"
+      [error]="offeringErrors().context_override ?? ''"
+      hint="Optional; falls back to the model's context length."
+    >
+      <ui-input
+        [id]="'offering-context'"
+        type="number"
+        inputmode="numeric"
+        [value]="offeringDraft().context_override"
+        placeholder="use the model's context length"
+        (valueChange)="setOfferingDraft('context_override', $event)"
+      />
+    </ui-field>
+    <ui-field
+      label="Max-output override"
+      [error]="offeringErrors().max_output_override ?? ''"
+      hint="Optional; falls back to the model's limit."
+    >
+      <ui-input
+        [id]="'offering-max-output'"
+        type="number"
+        inputmode="numeric"
+        [value]="offeringDraft().max_output_override"
+        placeholder="use the model's limit"
+        (valueChange)="setOfferingDraft('max_output_override', $event)"
+      />
+    </ui-field>
+    <div class="form-full">
+      <span class="section-label">Custom headers</span>
+      <app-headers-editor
+        [rows]="offeringHeaderRows()"
+        (rowsChange)="onOfferingHeaderRows($event)"
+      />
+      <p class="note">Merged over the credential's headers at request time (offering wins).</p>
+    </div>
+    <div class="form-full">
+      <ui-switch
+        label="Offering enabled"
+        [checked]="offeringDraft().enabled"
+        (checkedChange)="setOfferingEnabled($event)"
+      />
+    </div>
+  </div>
+  <div ui-dialog-actions>
+    <ui-button variant="primary" [loading]="savingOffering()" (clicked)="saveOffering()">
+      Create offering
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeAddOffering()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="removeOfferingOpen()" title="Remove offering" (closed)="closeRemoveOffering()">
+  @if (detailRow(); as row) {
+    <p>
+      Remove <strong>{{ row.canonical_name }}</strong> from {{ detailProviderName() }}? Its price
+      row is deleted with it. This cannot be undone.
+    </p>
+  }
+  <div ui-dialog-actions>
+    <ui-button variant="danger" [loading]="removingOffering()" (clicked)="confirmRemoveOffering()">
+      Remove offering
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeRemoveOffering()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
+<app-mix-profiles
+  [open]="profilesOpen()"
+  (openChange)="profilesOpen.set($event)"
+  (changed)="onProfilesChanged()"
+/>

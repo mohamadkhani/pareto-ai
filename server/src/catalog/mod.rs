@@ -12,9 +12,16 @@
 //! component is `NULL` (never 0), and a `source = 'manual'` row is never
 //! overwritten by a sync.
 
+pub(crate) mod discovery;
 pub(crate) mod headers;
+pub(crate) mod overview;
 pub(crate) mod types;
 
+pub use discovery::{DiscoveryInput, DiscoverySummary};
+pub use overview::{
+    AggregatePrice, AllModelsRow, ModelsOverview, OverviewPrice, OverviewQuality, OverviewQuery,
+    OverviewRow, ProviderModelRow,
+};
 pub use types::*;
 
 use serde_json::json;
@@ -70,6 +77,9 @@ pub struct SyncPrice {
     pub cache_read_per_m: Option<f64>,
     pub cache_write_per_m: Option<f64>,
     pub request_fee: Option<f64>,
+    /// The source published a negative ("variable price") component; the UI
+    /// shows "variable" instead of a number.
+    pub variable_price: bool,
 }
 
 /// What [`apply_sync_price`] did with one offering's price row.
@@ -84,7 +94,8 @@ pub enum SyncPriceOutcome {
     SkippedManual,
 }
 
-const SELECT_PROVIDER_COLUMNS: &str = "id, name, kind, base_url, enabled, created_at, updated_at";
+const SELECT_PROVIDER_COLUMNS: &str = "id, name, kind, base_url, enabled, created_at, updated_at, \
+     last_discovery_at, last_discovery_created, last_discovery_unchanged";
 const SELECT_CREDENTIAL_COLUMNS: &str = "id, provider_id, label, secret_cipher, headers_json, \
      max_concurrency, balance_usd, balance_source, balance_updated_at, balance_updated_by, \
      balance_low_threshold, status, cooldown_until, last_tested_at, created_at, updated_at";
@@ -93,8 +104,8 @@ const SELECT_MODEL_COLUMNS: &str = "id, canonical_name, family, modalities_input
 const SELECT_OFFERING_COLUMNS: &str = "id, provider_id, model_id, upstream_model_id, \
      context_override, max_output_override, enabled, headers_json, created_at, updated_at";
 const SELECT_PRICE_COLUMNS: &str = "offering_id, input_per_m, output_per_m, cache_read_per_m, \
-     cache_write_per_m, reasoning_per_m, request_fee, currency, source, source_url, fetched_at, \
-     updated_by, created_at, updated_at";
+     cache_write_per_m, reasoning_per_m, request_fee, variable_price, currency, source, source_url, \
+     fetched_at, updated_by, created_at, updated_at";
 
 /// UTC timestamp in the same shape SQLite writes.
 pub(crate) fn now_ts() -> String {
@@ -165,6 +176,26 @@ fn require_model_name(raw: &str) -> Result<String, CatalogError> {
         )));
     }
     Ok(name)
+}
+
+/// Whether an upstream model id may become a catalog model/offering.
+///
+/// This is the single filter shared by provider discovery and the OpenRouter
+/// price sync, so the two paths can never disagree about the catalog. The id
+/// must be non-empty after trimming, at most 200 characters, outside the
+/// reserved `combo:` namespace, and not a batch-tier variant (`:batch`).
+/// Batch variants are a billing tier of the same model, not an offering of
+/// their own; `:free` **is** a distinct offering and is kept.
+pub(crate) fn is_discoverable_model_id(raw: &str) -> bool {
+    let id = raw.trim();
+    if id.is_empty() || id.len() > 200 {
+        return false;
+    }
+    if id.starts_with(crate::combos::NAMESPACE) {
+        return false;
+    }
+    !id.rsplit_once(':')
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("batch"))
 }
 
 fn validate_base_url(raw: &str) -> Result<String, CatalogError> {
@@ -810,13 +841,45 @@ pub async fn get_model(
     Ok(row)
 }
 
+/// Fetches one model by canonical name, ignoring case (`COLLATE NOCASE`).
+/// This is the identity rule shared by `create_model`, provider discovery and
+/// the OpenRouter price sync: one model row per name, whatever its case.
+pub async fn model_by_canonical_name(
+    pool: &sqlx::SqlitePool,
+    canonical_name: &str,
+) -> Result<Option<ModelRow>, CatalogError> {
+    let row = sqlx::query_as::<_, ModelRow>(&format!(
+        "SELECT {SELECT_MODEL_COLUMNS} FROM models WHERE canonical_name = ? COLLATE NOCASE"
+    ))
+    .bind(canonical_name)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Creates a model and audits it as `model.create`.
+///
+/// The canonical name is unique case-insensitively. When a model with the same
+/// name in another case already exists (`vendor/Model` vs `vendor/model`), the
+/// existing row is returned and no second row is created; its stored spelling
+/// is never rewritten (the first spelling wins). An identical spelling is
+/// still a duplicate request and answers [`CatalogError::Conflict`], as
+/// before. The lookup runs before the validation below so a reuse cannot fail
+/// on fields the request happened to omit.
 pub async fn create_model(
     pool: &sqlx::SqlitePool,
     actor: &Actor<'_>,
     input: &ModelInput,
 ) -> Result<ModelRow, CatalogError> {
     let canonical_name = require_model_name(&input.canonical_name)?;
+    if let Some(existing) = model_by_canonical_name(pool, &canonical_name).await? {
+        if existing.canonical_name == canonical_name {
+            return Err(CatalogError::Conflict(
+                "a model with this canonical_name already exists".to_string(),
+            ));
+        }
+        return Ok(existing);
+    }
     let family = input
         .family
         .as_deref()
@@ -907,6 +970,22 @@ pub async fn update_model(
 
     let now = now_ts();
     let mut tx = pool.begin().await?;
+    // Renaming onto another model's name in a different case would create the
+    // duplicate pair the case-insensitive lookup exists to prevent.
+    if let Some(name) = &canonical_name {
+        let clash: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE AND id != ?",
+        )
+        .bind(name)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if clash.is_some() {
+            return Err(CatalogError::Conflict(
+                "a model with this canonical_name already exists".to_string(),
+            ));
+        }
+    }
     let updated = sqlx::query(
         "UPDATE models SET \
            canonical_name = COALESCE(?, canonical_name), \
@@ -1348,9 +1427,9 @@ pub async fn set_manual_price(
     let inserted = sqlx::query(
         "INSERT INTO prices \
            (id, offering_id, input_per_m, output_per_m, cache_read_per_m, \
-            cache_write_per_m, reasoning_per_m, request_fee, currency, source, \
+            cache_write_per_m, reasoning_per_m, request_fee, variable_price, currency, source, \
             source_url, fetched_at, updated_by, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', NULL, NULL, ?, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'manual', NULL, NULL, ?, ?, ?) \
          ON CONFLICT (offering_id) DO UPDATE SET \
            input_per_m = excluded.input_per_m, \
            output_per_m = excluded.output_per_m, \
@@ -1358,6 +1437,7 @@ pub async fn set_manual_price(
            cache_write_per_m = excluded.cache_write_per_m, \
            reasoning_per_m = excluded.reasoning_per_m, \
            request_fee = excluded.request_fee, \
+           variable_price = 0, \
            currency = excluded.currency, \
            source = 'manual', \
            source_url = NULL, \
@@ -1444,6 +1524,7 @@ pub async fn apply_sync_price(
                 || row.cache_read_per_m != price.cache_read_per_m
                 || row.cache_write_per_m != price.cache_write_per_m
                 || row.request_fee != price.request_fee
+                || (row.variable_price != 0) != price.variable_price
                 || row.currency != "USD"
                 || row.source != source
                 || row.source_url.as_deref() != Some(source_url)
@@ -1453,9 +1534,9 @@ pub async fn apply_sync_price(
     sqlx::query(
         "INSERT INTO prices \
            (id, offering_id, input_per_m, output_per_m, cache_read_per_m, \
-            cache_write_per_m, reasoning_per_m, request_fee, currency, source, \
+            cache_write_per_m, reasoning_per_m, request_fee, variable_price, currency, source, \
             source_url, fetched_at, updated_by, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'USD', ?, ?, ?, NULL, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'USD', ?, ?, ?, NULL, ?, ?) \
          ON CONFLICT (offering_id) DO UPDATE SET \
            input_per_m = excluded.input_per_m, \
            output_per_m = excluded.output_per_m, \
@@ -1463,6 +1544,7 @@ pub async fn apply_sync_price(
            cache_write_per_m = excluded.cache_write_per_m, \
            reasoning_per_m = NULL, \
            request_fee = excluded.request_fee, \
+           variable_price = excluded.variable_price, \
            currency = 'USD', \
            source = excluded.source, \
            source_url = excluded.source_url, \
@@ -1478,6 +1560,7 @@ pub async fn apply_sync_price(
     .bind(price.cache_read_per_m)
     .bind(price.cache_write_per_m)
     .bind(price.request_fee)
+    .bind(i64::from(price.variable_price))
     .bind(source)
     .bind(source_url)
     .bind(at)
@@ -1590,6 +1673,51 @@ fn build_v1_model(row: &V1Row) -> V1Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Role;
+    use crate::test_support::TestApp;
+
+    fn model_input(canonical_name: &str) -> ModelInput {
+        ModelInput {
+            canonical_name: canonical_name.to_string(),
+            family: None,
+            modalities_input: None,
+            modalities_output: None,
+            context_length: None,
+            max_output_tokens: None,
+            capabilities: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_model_reuses_a_case_insensitive_match_and_keeps_its_spelling() {
+        let app = TestApp::new().await;
+        let uid = app
+            .create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let actor = Actor {
+            user_id: &uid,
+            ip: "127.0.0.1",
+        };
+
+        let first = create_model(&app.state.pool, &actor, &model_input("vendor/model"))
+            .await
+            .expect("first create");
+        let second = create_model(&app.state.pool, &actor, &model_input("vendor/Model"))
+            .await
+            .expect("second create reuses");
+
+        assert_eq!(second.id, first.id, "no second row for a case-only name");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+        let name: String = sqlx::query_scalar("SELECT canonical_name FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("name");
+        assert_eq!(name, "vendor/model", "the first spelling wins");
+    }
 
     #[test]
     fn combo_namespace_model_names_are_reserved() {

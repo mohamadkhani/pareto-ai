@@ -12,9 +12,14 @@ function comboFixture(overrides: Partial<Combo> = {}): Combo {
     strategy: 'weighted',
     weights: { price: 0.25, speed: 0.3, quality: 0.3, reliability: 0.15 },
     preset: 'balanced',
+    mix_profile: null,
+    pool: 'members',
+    min_quality: null,
+    max_mix_price_per_m: null,
     members: [{ offering_id: 'off1', weight: 1 }],
     enabled: true,
     rr_cursor: 0,
+    stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
     ...overrides,
   };
 }
@@ -98,5 +103,51 @@ describe('CombosService', () => {
     expect(call.method).toBe('DELETE');
     expect(call.url).toBe('/api/combos/c1');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+  });
+
+  it('previews a draft combo without a CSRF token', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        profile: { profile_id: 'mix-code-agent', profile_name: 'code-agent' },
+        scored: 0,
+        candidates: [],
+        excluded: [],
+        sticky: null,
+      }),
+    );
+    const service = TestBed.inject(CombosService);
+
+    const preview = await service.preview(inputFixture(), 10);
+
+    const call = fetchMock.requests[0];
+    expect(call.method).toBe('POST');
+    expect(call.url).toBe('/api/combos/preview');
+    expect(call.headers.get('X-CSRF-Token')).toBeNull();
+    expect(call.body).toMatchObject({ name: 'shared-fast', limit: 10 });
+    expect(preview.profile.profile_name).toBe('code-agent');
+  });
+
+  it('previews a saved combo with an optional session key', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        profile: { profile_id: 'mix-chat', profile_name: 'chat' },
+        scored: 0,
+        candidates: [],
+        excluded: [],
+        sticky: {
+          enabled: true,
+          key_source: 'header',
+          session_key: 's-1',
+          pinned: 'off1',
+          age_s: 42,
+        },
+      }),
+    );
+    const service = TestBed.inject(CombosService);
+
+    const preview = await service.previewSaved('c1', 's-1');
+
+    expect(fetchMock.requests[0].url).toBe('/api/combos/c1/preview?limit=50&session_key=s-1');
+    expect(preview.sticky?.pinned).toBe('off1');
   });
 });

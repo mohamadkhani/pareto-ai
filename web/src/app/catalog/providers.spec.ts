@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideRouter } from '@angular/router';
 import {
   FetchMock,
   errorResponse,
@@ -7,7 +8,7 @@ import {
   noContentResponse,
 } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
-import type { Provider } from './catalog.types';
+import type { Credential, DiscoverySummary, Offering, Provider } from './catalog.types';
 import { Providers } from './providers';
 
 function authStub(role: 'admin' | 'user'): object {
@@ -33,6 +34,61 @@ function providerFixture(overrides: Partial<Provider> = {}): Provider {
     enabled: true,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
+    last_discovery_at: null,
+    last_discovery_created: null,
+    last_discovery_unchanged: null,
+    ...overrides,
+  };
+}
+
+function credentialFixture(overrides: Partial<Credential> = {}): Credential {
+  return {
+    id: 'c1',
+    provider_id: 'p1',
+    label: 'prod',
+    has_secret: true,
+    secret_masked: '********',
+    header_names: [],
+    max_concurrency: null,
+    balance_usd: null,
+    balance_source: 'unknown',
+    balance_updated_at: null,
+    balance_updated_by: null,
+    balance_low_threshold: null,
+    status: 'ok',
+    last_tested_at: null,
+    cooldown_until: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function offeringFixture(overrides: Partial<Offering> = {}): Offering {
+  return {
+    id: 'o1',
+    provider_id: 'p1',
+    model_id: 'm1',
+    upstream_model_id: 'openai/gpt-5',
+    context_override: null,
+    max_output_override: null,
+    enabled: true,
+    header_names: [],
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function discoveryFixture(overrides: Partial<DiscoverySummary> = {}): DiscoverySummary {
+  return {
+    dry_run: true,
+    credential_id: 'c1',
+    discovered: 5,
+    created_models: 2,
+    created_offerings: 3,
+    updated_offerings: 0,
+    unchanged: 1,
     ...overrides,
   };
 }
@@ -44,14 +100,6 @@ function typeInto(root: HTMLElement, selector: string, value: string): void {
   }
   input.value = value;
   input.dispatchEvent(new Event('input'));
-}
-
-function submit(root: HTMLElement): void {
-  const form = root.querySelector('form');
-  if (!(form instanceof HTMLFormElement)) {
-    throw new Error('no form on the page');
-  }
-  form.dispatchEvent(new Event('submit'));
 }
 
 function buttonByText(root: HTMLElement, text: string): HTMLButtonElement {
@@ -76,10 +124,29 @@ describe('Providers', () => {
     vi.unstubAllGlobals();
   });
 
+  /** Queues the providers list, one credentials read per provider, then offerings. */
+  function queueLoad(
+    providers: Provider[],
+    credentials: Record<string, Credential[]> = {},
+    offerings: Offering[] = [],
+  ): void {
+    fetchMock.respond(jsonResponse(200, providers));
+    for (const provider of providers) {
+      fetchMock.respond(jsonResponse(200, credentials[provider.id] ?? []));
+    }
+    fetchMock.respond(jsonResponse(200, offerings));
+  }
+
   async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Providers>> {
     TestBed.configureTestingModule({
       imports: [Providers],
-      providers: [{ provide: AuthService, useValue: authStub(role) }],
+      providers: [
+        { provide: AuthService, useValue: authStub(role) },
+        provideRouter([
+          { path: 'providers', children: [] },
+          { path: 'models', children: [] },
+        ]),
+      ],
     });
     await TestBed.compileComponents();
     const fixture = TestBed.createComponent(Providers);
@@ -104,12 +171,11 @@ describe('Providers', () => {
     expect(fetchMock.requests).toHaveLength(0);
   });
 
-  it('lists providers with base URL, kind and enabled state', async () => {
-    fetchMock.respond(
-      jsonResponse(200, [
-        providerFixture(),
-        providerFixture({ id: 'p2', name: 'azure', enabled: false }),
-      ]),
+  it('lists providers with base URL, kind, enabled state, and counts', async () => {
+    queueLoad(
+      [providerFixture(), providerFixture({ id: 'p2', name: 'azure', enabled: false })],
+      { p1: [credentialFixture(), credentialFixture({ id: 'c2', label: 'backup' })] },
+      [offeringFixture(), offeringFixture({ id: 'o2', provider_id: 'p2' })],
     );
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
@@ -121,20 +187,24 @@ describe('Providers', () => {
     expect(text).toContain('openai_compatible');
     expect(text).toContain('enabled');
     expect(text).toContain('disabled');
+    expect(text).toContain('never');
     expect(root.querySelectorAll('tbody tr')).toHaveLength(2);
+
+    const firstRow = root.querySelector('tbody tr');
+    const counts = Array.from(firstRow?.querySelectorAll('td.num') ?? []).map(
+      (cell) => cell.textContent?.trim() ?? '',
+    );
+    expect(counts).toEqual(['2', '1']);
+    expect(fetchMock.requests.map((call) => call.url)).toEqual([
+      '/api/providers',
+      '/api/providers/p1/credentials',
+      '/api/providers/p2/credentials',
+      '/api/offerings',
+    ]);
   });
 
-  it('creates a provider from the form and reloads the list', async () => {
-    fetchMock.respond(jsonResponse(200, [providerFixture()]));
-    fetchMock.respond(
-      jsonResponse(
-        201,
-        providerFixture({ id: 'p2', name: 'azure', base_url: 'https://a.example/v1' }),
-      ),
-    );
-    fetchMock.respond(
-      jsonResponse(200, [providerFixture(), providerFixture({ id: 'p2', name: 'azure' })]),
-    );
+  it('creates a provider from the dialog and reloads the list', async () => {
+    queueLoad([providerFixture()]);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
@@ -142,11 +212,17 @@ describe('Providers', () => {
     fixture.detectChanges();
     typeInto(root, '#provider-name', 'azure');
     typeInto(root, '#provider-base-url', 'https://a.example/v1');
-    submit(root);
-    await fixture.whenStable();
-    fixture.detectChanges();
+    fetchMock.respond(
+      jsonResponse(
+        201,
+        providerFixture({ id: 'p2', name: 'azure', base_url: 'https://a.example/v1' }),
+      ),
+    );
+    queueLoad([providerFixture(), providerFixture({ id: 'p2', name: 'azure' })]);
+    buttonByText(root, 'Save').click();
+    await settle(fixture);
 
-    const call = fetchMock.requests[1];
+    const call = fetchMock.requests[3];
     expect(call.method).toBe('POST');
     expect(call.url).toBe('/api/providers');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
@@ -159,65 +235,87 @@ describe('Providers', () => {
   });
 
   it('validates the form before calling the API', async () => {
-    fetchMock.respond(jsonResponse(200, []));
+    queueLoad([]);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
     buttonByText(root, 'New provider').click();
     fixture.detectChanges();
-    submit(root);
-    await fixture.whenStable();
+    buttonByText(root, 'Save').click();
     fixture.detectChanges();
 
-    expect(fetchMock.requests).toHaveLength(1);
+    expect(fetchMock.requests).toHaveLength(2);
     expect(root.textContent).toContain('Name is required.');
     expect(root.textContent).toContain('Base URL is required.');
 
     typeInto(root, '#provider-name', 'azure');
     typeInto(root, '#provider-base-url', 'ftp://a.example');
-    submit(root);
-    await fixture.whenStable();
+    buttonByText(root, 'Save').click();
     fixture.detectChanges();
 
-    expect(fetchMock.requests).toHaveLength(1);
+    expect(fetchMock.requests).toHaveLength(2);
     expect(root.textContent).toContain('Enter an http(s) URL');
   });
 
   it('toggles enabled with a PATCH carrying the CSRF header', async () => {
-    fetchMock.respond(jsonResponse(200, [providerFixture()]));
-    fetchMock.respond(jsonResponse(200, providerFixture({ enabled: false })));
-    fetchMock.respond(jsonResponse(200, [providerFixture({ enabled: false })]));
+    queueLoad([providerFixture()]);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
+    fetchMock.respond(jsonResponse(200, providerFixture({ enabled: false })));
+    queueLoad([providerFixture({ enabled: false })]);
     buttonByText(root, 'Disable').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await settle(fixture);
 
-    const call = fetchMock.requests[1];
+    const call = fetchMock.requests[3];
     expect(call.method).toBe('PATCH');
     expect(call.url).toBe('/api/providers/p1');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
     expect(call.body).toEqual({ enabled: false });
   });
 
-  it('deletes a provider only after confirmation', async () => {
-    fetchMock.respond(jsonResponse(200, [providerFixture()]));
-    fetchMock.respond(noContentResponse());
-    fetchMock.respond(jsonResponse(200, []));
+  it('edits a provider, including the enabled switch, from the dialog', async () => {
+    queueLoad([providerFixture()]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Edit').click();
+    fixture.detectChanges();
+    typeInto(root, '#provider-name', 'openrouter-eu');
+    const toggle = root.querySelector('ui-dialog button[role="switch"]');
+    if (!(toggle instanceof HTMLButtonElement)) {
+      throw new Error('no enabled switch');
+    }
+    fetchMock.respond(
+      jsonResponse(200, providerFixture({ name: 'openrouter-eu', enabled: false })),
+    );
+    queueLoad([providerFixture({ name: 'openrouter-eu', enabled: false })]);
+    toggle.click();
+    fixture.detectChanges();
+    buttonByText(root, 'Save').click();
+    await settle(fixture);
+
+    const call = fetchMock.requests[3];
+    expect(call.method).toBe('PATCH');
+    expect(call.body).toEqual({ name: 'openrouter-eu', enabled: false });
+  });
+
+  it('deletes a provider only after the dialog confirmation', async () => {
+    queueLoad([providerFixture()]);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
     buttonByText(root, 'Delete').click();
     fixture.detectChanges();
 
-    // Arming the control must not delete anything yet.
-    expect(fetchMock.requests).toHaveLength(1);
-    buttonByText(root, 'Confirm delete').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    // Opening the confirmation must not delete anything yet.
+    expect(fetchMock.requests).toHaveLength(3);
+    fetchMock.respond(noContentResponse());
+    queueLoad([]);
+    buttonByText(root, 'Delete provider').click();
+    await settle(fixture);
 
-    const call = fetchMock.requests[1];
+    const call = fetchMock.requests[3];
     expect(call.method).toBe('DELETE');
     expect(call.url).toBe('/api/providers/p1');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
@@ -225,39 +323,103 @@ describe('Providers', () => {
   });
 
   it('nests the credentials panel under the selected provider', async () => {
-    fetchMock.respond(jsonResponse(200, [providerFixture()]));
-    fetchMock.respond(
-      jsonResponse(200, [
-        {
-          id: 'c1',
-          provider_id: 'p1',
-          label: 'prod',
-          has_secret: true,
-          secret_masked: '********',
-          header_names: [],
-          max_concurrency: null,
-          balance_usd: null,
-          balance_source: 'unknown',
-          balance_updated_at: null,
-          balance_updated_by: null,
-          balance_low_threshold: null,
-          status: 'unknown',
-          last_tested_at: null,
-          cooldown_until: null,
-          created_at: '2026-01-01T00:00:00.000Z',
-          updated_at: '2026-01-01T00:00:00.000Z',
-        },
-      ]),
-    );
+    queueLoad([providerFixture()], { p1: [credentialFixture()] });
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
+    fetchMock.respond(jsonResponse(200, [credentialFixture()]));
     buttonByText(root, 'Credentials').click();
     await settle(fixture);
 
     expect(root.textContent).toContain('Credentials — openrouter');
     expect(root.textContent).toContain('prod');
-    expect(fetchMock.requests[1].url).toBe('/api/providers/p1/credentials');
+    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/credentials');
+  });
+
+  it('previews discovery with a dry run, then applies and links to Models', async () => {
+    queueLoad([providerFixture()], { p1: [credentialFixture()] });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Load models').click();
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Load models — openrouter');
+
+    fetchMock.respond(jsonResponse(200, discoveryFixture()));
+    buttonByText(root, 'Preview').click();
+    await settle(fixture);
+
+    const previewCall = fetchMock.requests[3];
+    expect(previewCall.method).toBe('POST');
+    expect(previewCall.url).toBe('/api/providers/p1/discover-models');
+    expect(previewCall.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(previewCall.body).toEqual({ credential_id: 'c1', dry_run: true });
+    expect(root.textContent).toContain('Preview (no changes written)');
+    expect(root.textContent).toContain('New models');
+    expect(root.textContent).toContain('5');
+
+    fetchMock.respond(jsonResponse(200, discoveryFixture({ dry_run: false })));
+    // The apply reloads the provider list; the server has persisted the
+    // discovery summary on the provider row by then.
+    queueLoad(
+      [
+        providerFixture({
+          last_discovery_at: new Date().toISOString(),
+          last_discovery_created: 2,
+          last_discovery_unchanged: 3,
+        }),
+      ],
+      { p1: [credentialFixture()] },
+    );
+    buttonByText(root, 'Apply').click();
+    await settle(fixture);
+
+    const applyCall = fetchMock.requests[4];
+    expect(applyCall.body).toEqual({ credential_id: 'c1', dry_run: false });
+    expect(root.textContent).toContain('Applied: 5 discovered');
+    const link = root.querySelector('a[href="/models?provider=p1"]');
+    expect(link).not.toBeNull();
+    // Persisted, not client memory: this is the value a reload renders.
+    const lastLoad = root.querySelector('td.last-load');
+    expect(lastLoad?.textContent).toContain('+2 models');
+    expect(lastLoad?.textContent).toContain('3 unchanged');
+    expect(lastLoad?.textContent).not.toContain('never');
+  });
+
+  it('shows the upstream error message verbatim from a failed preview', async () => {
+    queueLoad([providerFixture()], { p1: [credentialFixture()] });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Load models').click();
+    fixture.detectChanges();
+    fetchMock.respond(
+      errorResponse(
+        502,
+        'upstream_error',
+        'The provider answered 503 after 10s; no models were loaded.',
+      ),
+    );
+    buttonByText(root, 'Preview').click();
+    await settle(fixture);
+
+    expect(root.textContent).toContain(
+      'The provider answered 503 after 10s; no models were loaded.',
+    );
+    expect(buttonByText(root, 'Apply').disabled).toBe(true);
+  });
+
+  it('explains a missing credential instead of calling discovery', async () => {
+    queueLoad([providerFixture()]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Load models').click();
+    fixture.detectChanges();
+
+    expect(root.textContent).toContain('This provider has no credentials yet');
+    expect(buttonByText(root, 'Preview').disabled).toBe(true);
+    expect(fetchMock.requests).toHaveLength(3);
   });
 
   it('shows the server message when loading fails', async () => {

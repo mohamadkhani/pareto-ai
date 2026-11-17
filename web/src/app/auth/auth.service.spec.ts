@@ -157,6 +157,51 @@ describe('AuthService', () => {
     });
   });
 
+  it('changePassword clears the local rotation flag so the guard lets the account in', async () => {
+    fetchMock.respond(jsonResponse(200, rotationSession));
+    fetchMock.respond(noContentResponse());
+    const auth = TestBed.inject(AuthService);
+    await auth.loadMe();
+    expect(auth.user()?.must_change_password).toBe(true);
+
+    await auth.changePassword('old-password-1', 'new-password-1');
+
+    // No extra /me round-trip: the local user already reflects the success, so
+    // the guard cannot bounce the account back to /change-password.
+    expect(fetchMock.requests.map((call) => call.url)).toEqual([
+      '/api/auth/me',
+      '/api/auth/change-password',
+    ]);
+    expect(auth.user()?.must_change_password).toBe(false);
+  });
+
+  it('loadMe(true) supersedes an in-flight restore instead of joining it', async () => {
+    const pending: Array<(response: Response) => void> = [];
+    vi.stubGlobal(
+      'fetch',
+      (): Promise<Response> => new Promise<Response>((resolve) => pending.push(resolve)),
+    );
+    const auth = TestBed.inject(AuthService);
+
+    // A restore that began before the password change is still in flight.
+    const before = auth.loadMe();
+    const after = auth.loadMe(true);
+
+    // The forced read must not reuse the pre-change request.
+    expect(pending).toHaveLength(2);
+
+    // The fresh request answers first with the cleared flag...
+    pending[1](jsonResponse(200, session));
+    await expect(after).resolves.toBe(true);
+    expect(auth.user()?.must_change_password).toBe(false);
+
+    // ...and the late pre-change answer must not overwrite it.
+    pending[0](jsonResponse(200, rotationSession));
+    await expect(before).resolves.toBe(true);
+    expect(auth.user()?.must_change_password).toBe(false);
+    expect(auth.status()).toBe('authenticated');
+  });
+
   it('changePassword surfaces the invalid_credentials code', async () => {
     fetchMock.respond(jsonResponse(200, session));
     fetchMock.respond(errorResponse(401, 'invalid_credentials', 'invalid email or password'));

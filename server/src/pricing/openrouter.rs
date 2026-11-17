@@ -13,6 +13,11 @@
 //!   newest [`MAX_RUNS`].
 //! * A `prices` row with `source = 'manual'` is never overwritten (D10);
 //!   unknown components stay NULL and are never written as 0.
+//! * The sync applies discovery's id filter
+//!   ([`catalog::is_discoverable_model_id`]): it never creates a model or
+//!   offering for an id discovery would skip (`:batch`, reserved names). A
+//!   filtered id may still refresh the price of an offering that already
+//!   exists, because that row belongs to the operator.
 //! * Snapshot TTL is 24 hours ([`SNAPSHOT_TTL`]): the previous successful
 //!   sync's result is the snapshot, [`snapshot_is_fresh`] reports its age, and
 //!   a failed refresh keeps serving it (the run is marked `stale-if-error`).
@@ -41,8 +46,6 @@ pub const PROVIDER_NAME: &str = "openrouter";
 pub const PROVIDER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// Snapshot freshness window: 24 hours.
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-
-const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How many `price_sync_runs` rows are kept per source (decision D19).
 const MAX_RUNS: i64 = 30;
@@ -123,10 +126,21 @@ pub struct OrModel {
     pub price: OrPrice,
     /// The raw `pricing` object, kept for the run's `detail_json` only.
     pub raw_pricing: Option<serde_json::Value>,
+    /// `catalog::is_discoverable_model_id` passed for this id. Discoverable
+    /// entries are created/updated; filtered ones (`:batch`, reserved names)
+    /// may only update a price on an offering that already exists — the sync
+    /// never creates catalog rows discovery would skip.
+    pub managed: bool,
 }
 
 /// Mapped price components (USD per 1M tokens, plus the flat request fee).
 /// `None` means unknown and is stored as NULL — never as 0.
+///
+/// `variable` records that the source published a negative component (the
+/// `"-1"` sentinel OpenRouter uses when it cannot state a fixed price, e.g.
+/// `openrouter/auto`). Every negative component is dropped to `None` at
+/// parse, so a sentinel can never reach a price column, an aggregate, or the
+/// routing price score; the flag is what the UI shows instead of a number.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OrPrice {
     pub input_per_m: Option<f64>,
@@ -134,6 +148,7 @@ pub struct OrPrice {
     pub cache_read_per_m: Option<f64>,
     pub cache_write_per_m: Option<f64>,
     pub request_fee: Option<f64>,
+    pub variable: bool,
 }
 
 /// A parsed catalog plus the entries that could not be mapped.
@@ -144,28 +159,206 @@ pub struct Catalog {
     pub skipped: usize,
 }
 
-/// Fetches the OpenRouter catalog body with a 15s timeout.
+/// Fetches the OpenRouter catalog body.
 ///
-/// Fails on transport errors and non-2xx responses ([`SyncError::Fetch`]);
-/// the caller turns that into a stale-if-error outcome.
+/// Hardened against the live failure this build saw (a 15 s timeout mid-body
+/// on the IPv6 path, while `curl -4` answered in 1–2 s):
+///
+/// * the client has a 30 s response timeout and a 5 s connect timeout, and
+///   prefers IPv4 addresses when the host resolves to both families;
+/// * the request sends `Accept-Encoding: identity` and the body is read as
+///   raw bytes (capped at [`MAX_BODY_BYTES`]) and decoded lossily, so a
+///   charset/encoding disagreement cannot look like a JSON error;
+/// * a connect or body failure is retried once over HTTP/1.1, the layer that
+///   failed is named in the error and every attempt is logged at debug level
+///   with status, content length and elapsed time.
+///
+/// A non-2xx answer is not retried: it is a definite upstream answer.
+///
+/// Failure mode: [`SyncError::Fetch`] with the failing layer (`connect`,
+/// `status`, `body`) named; the caller turns that into a stale-if-error
+/// outcome.
 pub async fn fetch_models() -> Result<String, SyncError> {
-    let client = reqwest::Client::builder()
+    fetch_catalog_from(MODELS_URL).await
+}
+
+/// [`fetch_models`] against an arbitrary URL, so tests can drive a local
+/// server. Failure mode: [`SyncError::Fetch`].
+pub async fn fetch_catalog_from(url: &str) -> Result<String, SyncError> {
+    let client = fetch_client()?;
+    let mut last: Option<SyncError> = None;
+    for attempt in 0..2 {
+        match fetch_once(&client, url, attempt).await {
+            Ok(body) => return Ok(body),
+            Err(failure) => {
+                tracing::debug!(
+                    url = %url,
+                    attempt = attempt + 1,
+                    layer = failure.layer,
+                    retryable = failure.retryable,
+                    error = %failure.detail,
+                    "openrouter catalog fetch attempt failed"
+                );
+                let error = SyncError::Fetch(format!(
+                    "{}: {} (attempt {})",
+                    failure.layer,
+                    failure.detail,
+                    attempt + 1
+                ));
+                if !failure.retryable {
+                    return Err(error);
+                }
+                last = Some(error);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| SyncError::Fetch("the catalog body could not be read".to_string())))
+}
+
+/// The response timeout: the live endpoint needs 1–2 s, so 30 s leaves room
+/// for a slow TLS/DNS path without hanging a sync trigger.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection that has not been established in 5 s is not going to be.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on the catalog body; the live document is ≈2 MB.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// One failed attempt, with the layer that failed.
+struct FetchFailure {
+    layer: &'static str,
+    detail: String,
+    retryable: bool,
+}
+
+impl FetchFailure {
+    fn new(layer: &'static str, detail: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            layer,
+            detail: detail.into(),
+            retryable,
+        }
+    }
+}
+
+/// Builds the catalog client. The custom resolver sorts IPv4 addresses ahead
+/// of IPv6 ones: the live failure was IPv6-only (`curl -6` timed out while
+/// `curl -4` answered), and reqwest has no per-client IP-family option.
+fn fetch_client() -> Result<reqwest::Client, SyncError> {
+    reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent("pareto-ai-gateway/0.1 openrouter-sync")
+        .dns_resolver(Ipv4FirstResolver)
         .build()
-        .map_err(|e| SyncError::Fetch(e.to_string()))?;
-    let response = client
-        .get(MODELS_URL)
+        .map_err(|e| SyncError::Fetch(format!("client: {e}")))
+}
+
+/// A DNS resolver that keeps every address but lists IPv4 first.
+#[derive(Debug, Clone, Copy)]
+struct Ipv4FirstResolver;
+
+impl reqwest::dns::Resolve for Ipv4FirstResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let (v4, v6): (Vec<_>, Vec<_>) = addrs.into_iter().partition(|addr| addr.is_ipv4());
+            let ordered: Vec<std::net::SocketAddr> = v4.into_iter().chain(v6).collect();
+            if ordered.is_empty() {
+                return Err(format!("{host} resolved to no addresses").into());
+            }
+            Ok(Box::new(ordered.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// One attempt: send, check the status, then read the body. Attempt 1 forces
+/// HTTP/1.1 for a fresh connection/protocol.
+async fn fetch_once(
+    client: &reqwest::Client,
+    url: &str,
+    attempt: usize,
+) -> Result<String, FetchFailure> {
+    let started = std::time::Instant::now();
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity");
+    if attempt == 1 {
+        request = request.version(reqwest::Version::HTTP_11);
+    }
+    let mut response = request
         .send()
         .await
-        .map_err(|e| SyncError::Fetch(e.to_string()))?;
+        .map_err(|e| FetchFailure::new("connect", e.to_string(), true))?;
     let status = response.status();
+    let content_length = response.content_length();
     if !status.is_success() {
-        return Err(SyncError::Fetch(format!("HTTP {status} from {MODELS_URL}")));
+        return Err(FetchFailure::new(
+            "status",
+            format!("HTTP {status} from {url}"),
+            false,
+        ));
     }
-    response
-        .text()
-        .await
-        .map_err(|e| SyncError::Fetch(e.to_string()))
+
+    let mut body: Vec<u8> = Vec::with_capacity(
+        content_length
+            .map(|len| len.min(MAX_BODY_BYTES as u64) as usize)
+            .unwrap_or(0),
+    );
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_BODY_BYTES {
+                    return Err(FetchFailure::new(
+                        "body",
+                        format!("the catalog body exceeds {MAX_BODY_BYTES} bytes"),
+                        false,
+                    ));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::debug!(
+                    url = %url,
+                    attempt = attempt + 1,
+                    status = %status,
+                    content_length = content_length.unwrap_or(0),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    read_bytes = body.len(),
+                    layer = "body",
+                    error = %error,
+                    "openrouter catalog body failed mid-read"
+                );
+                return Err(FetchFailure::new("body", error.to_string(), true));
+            }
+        }
+    }
+    if let Some(expected) = content_length
+        && (body.len() as u64) < expected
+    {
+        // A short body that hyper did not surface as an error: treat it as a
+        // truncated transfer and retry instead of failing JSON parsing.
+        return Err(FetchFailure::new(
+            "body",
+            format!(
+                "truncated response: read {} of {expected} bytes",
+                body.len()
+            ),
+            true,
+        ));
+    }
+    tracing::debug!(
+        url = %url,
+        attempt = attempt + 1,
+        status = %status,
+        content_length = content_length.unwrap_or(0),
+        bytes = body.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "openrouter catalog fetched"
+    );
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Parses the OpenRouter `/models` body into [`Catalog`].
@@ -225,14 +418,46 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
             cache_read_per_m: per_million_field(pricing, "input_cache_read"),
             cache_write_per_m: per_million_field(pricing, "input_cache_write"),
             request_fee: usd_amount_field(pricing, "request"),
+            variable: has_negative_component(pricing),
         },
         raw_pricing: pricing.cloned(),
+        managed: crate::catalog::is_discoverable_model_id(id),
+    })
+}
+
+/// The price keys that carry a per-token or per-request amount. A negative
+/// value in any of them is the "variable price" sentinel, never a price.
+const PRICE_KEYS: [&str; 5] = [
+    "prompt",
+    "completion",
+    "input_cache_read",
+    "input_cache_write",
+    "request",
+];
+
+/// True when the `pricing` object carries a negative amount. OpenRouter emits
+/// `"-1"` when it cannot state a price for a router model; the value is a
+/// sentinel, so the component is stored as NULL and the offering is flagged.
+fn has_negative_component(pricing: Option<&serde_json::Value>) -> bool {
+    let Some(pricing) = pricing else {
+        return false;
+    };
+    PRICE_KEYS.iter().any(|key| {
+        let Some(field) = pricing.get(*key) else {
+            return false;
+        };
+        let value = match field {
+            serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok(),
+            serde_json::Value::Number(number) => number.as_f64(),
+            _ => None,
+        };
+        value.is_some_and(|value| value < 0.0)
     })
 }
 
 /// Reads a USD-per-token price field (`pricing.prompt` etc.) and converts it
-/// to USD per 1M tokens. Missing, unparseable, or non-finite values are
-/// `None` (unknown), and a plain `"0"` is a known zero price.
+/// to USD per 1M tokens. Missing, unparseable, non-finite, or negative values
+/// are `None` (unknown), and a plain `"0"` is a known zero price.
 fn per_million_field(pricing: Option<&serde_json::Value>, key: &str) -> Option<f64> {
     let field = pricing?.get(key)?;
     match field {
@@ -240,27 +465,34 @@ fn per_million_field(pricing: Option<&serde_json::Value>, key: &str) -> Option<f
         serde_json::Value::Number(n) => n
             .as_f64()
             .map(|v| v * 1_000_000.0)
-            .filter(|v| v.is_finite()),
+            .filter(|v| v.is_finite() && *v >= 0.0),
         _ => None,
     }
 }
 
 /// Reads a plain USD amount (`pricing.request`, a flat per-request fee).
+/// Negative values are the variable-price sentinel and stay `None`.
 fn usd_amount_field(pricing: Option<&serde_json::Value>, key: &str) -> Option<f64> {
     let field = pricing?.get(key)?;
     match field {
-        serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
-        serde_json::Value::Number(n) => n.as_f64().filter(|v| v.is_finite()),
+        serde_json::Value::String(raw) => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite() && *v >= 0.0),
+        serde_json::Value::Number(n) => n.as_f64().filter(|v| v.is_finite() && *v >= 0.0),
         _ => None,
     }
 }
 
 /// Converts a USD-per-token decimal string to USD per 1M tokens by shifting
 /// the decimal point six places as text, so `"0.0000025"` becomes exactly
-/// `2.5` instead of `2.499999...`. Returns `None` for unparseable input.
+/// `2.5` instead of `2.499999...`. Returns `None` for unparseable input and
+/// for negative input (`"-1"` is OpenRouter's variable-price sentinel, not a
+/// price).
 pub fn usd_per_token_to_per_million(raw: &str) -> Option<f64> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.starts_with('-') {
         return None;
     }
     // Exponent notation is not what OpenRouter emits; fall back to plain
@@ -270,16 +502,12 @@ pub fn usd_per_token_to_per_million(raw: &str) -> Option<f64> {
             .parse::<f64>()
             .ok()
             .map(|v| v * 1_000_000.0)
-            .filter(|v| v.is_finite());
+            .filter(|v| v.is_finite() && *v >= 0.0);
     }
 
-    let (negative, digits_input) = match trimmed.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed),
-    };
-    let (int_part, frac_part) = match digits_input.split_once('.') {
+    let (int_part, frac_part) = match trimmed.split_once('.') {
         Some((int, frac)) => (int, frac),
-        None => (digits_input, ""),
+        None => (trimmed, ""),
     };
     if int_part.is_empty()
         || !int_part.bytes().all(|b| b.is_ascii_digit())
@@ -302,10 +530,6 @@ pub fn usd_per_token_to_per_million(raw: &str) -> Option<f64> {
         false => format!("{whole}.{tail}"),
     };
     let value: f64 = shifted.parse().ok()?;
-    let value = match negative {
-        true => -value,
-        false => value,
-    };
     value.is_finite().then_some(value)
 }
 
@@ -394,10 +618,29 @@ async fn apply_success(
 
     let provider_id = ensure_provider(&mut tx).await?;
     let mut skipped_manual = 0usize;
+    let mut filtered_not_created = 0usize;
     let mut raw_prices = serde_json::Map::new();
+    let mut variable_prices: Vec<&str> = Vec::new();
     for model in &parsed.models {
-        let model_id = upsert_model(&mut tx, model).await?;
-        let offering_id = upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?;
+        // Discovery's id filter is the single source of truth: a filtered id
+        // never creates a model or offering. It may still refresh the price of
+        // an offering that already exists (for example one the operator
+        // created by hand), because that row is not ours to hide.
+        let offering_id = if model.managed {
+            let model_id = upsert_model(&mut tx, model).await?;
+            Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+        } else {
+            match existing_offering(&mut tx, &provider_id, &model.id).await? {
+                Some(offering_id) => Some(offering_id),
+                None => {
+                    filtered_not_created += 1;
+                    None
+                }
+            }
+        };
+        let Some(offering_id) = offering_id else {
+            continue;
+        };
         let outcome = catalog::apply_sync_price(
             &mut tx,
             &offering_id,
@@ -407,6 +650,7 @@ async fn apply_success(
                 cache_read_per_m: model.price.cache_read_per_m,
                 cache_write_per_m: model.price.cache_write_per_m,
                 request_fee: model.price.request_fee,
+                variable_price: model.price.variable,
             },
             SOURCE,
             MODELS_URL,
@@ -430,15 +674,22 @@ async fn apply_success(
         if outcome == catalog::SyncPriceOutcome::SkippedManual {
             skipped_manual += 1;
         }
+        if model.price.variable {
+            variable_prices.push(model.id.as_str());
+        }
     }
 
     let detail = serde_json::json!({
         "raw_prices": serde_json::Value::Object(raw_prices),
         "skipped_entries": parsed.skipped,
+        "filtered_not_created": filtered_not_created,
         "prices_skipped_manual": skipped_manual,
+        // Ids whose source price was a negative sentinel: the components are
+        // stored NULL and `prices.variable_price = 1`.
+        "variable_prices": variable_prices,
     });
 
-    let model_count = parsed.models.len();
+    let model_count = parsed.models.iter().filter(|model| model.managed).count();
     sqlx::query(
         "INSERT INTO price_sync_runs \
            (id, source, started_at, finished_at, status, model_count, detail_json) \
@@ -641,15 +892,19 @@ async fn ensure_provider(conn: &mut sqlx::SqliteConnection) -> Result<String, Sy
     Ok(id)
 }
 
-/// Upserts the model row of a catalog entry by canonical name. Synced fields
-/// are refreshed (that is what the sync is for); `family` is admin-maintained
-/// and never touched here.
+/// Upserts the model row of a catalog entry by canonical name. The lookup is
+/// case-insensitive (`COLLATE NOCASE`), so a provider that spells an existing
+/// model with different case (`moonshotai/Kimi-K3.1-Pro` vs
+/// `moonshotai/kimi-k3.1-pro`) reuses that row and links its offering to it;
+/// the stored spelling is never rewritten. Synced fields are refreshed (that
+/// is what the sync is for); `family` is admin-maintained and never touched
+/// here.
 async fn upsert_model(
     conn: &mut sqlx::SqliteConnection,
     model: &OrModel,
 ) -> Result<String, SyncError> {
     let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ?")
+        sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE")
             .bind(&model.id)
             .fetch_optional(&mut *conn)
             .await?;
@@ -751,6 +1006,22 @@ async fn upsert_offering(
     }
 }
 
+/// An existing offering of this provider for `upstream_model_id`, if any.
+/// Used by filtered ids, which may refresh a price but never create a row.
+async fn existing_offering(
+    conn: &mut sqlx::SqliteConnection,
+    provider_id: &str,
+    upstream_model_id: &str,
+) -> Result<Option<String>, SyncError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
+    )
+    .bind(provider_id)
+    .bind(upstream_model_id)
+    .fetch_optional(&mut *conn)
+    .await?)
+}
+
 /// `capabilities_json` for a synced model: the display name (the spec schema
 /// has no display-name column) and `supported_parameters`, when present.
 fn capabilities_json(model: &OrModel) -> Option<String> {
@@ -777,12 +1048,31 @@ mod tests {
     use crate::test_support::TestApp;
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/openrouter_models.json");
+    /// A recording of the `-1` variable-price sentinel (live, 2026-11-17).
+    const VARIABLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/openrouter_models_variable.json");
 
     /// Creates the admin whose id the audit rows attribute the sync to
     /// (`audit_log.actor_user_id` is a foreign key onto `users`).
     async fn admin_id(app: &TestApp) -> String {
         app.create_user("admin@example.com", Role::Admin, true)
             .await
+    }
+
+    /// The stored price row of the offering for `canonical_name`.
+    async fn price_by_model(app: &TestApp, canonical_name: &str) -> catalog::PriceRow {
+        let offering_id: String = sqlx::query_scalar(
+            "SELECT o.id FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = ?",
+        )
+        .bind(canonical_name)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("offering id");
+        catalog::get_price(&app.state.pool, &offering_id)
+            .await
+            .expect("price read")
+            .expect("price row")
     }
 
     fn erroring_fetch() -> impl Future<Output = Result<String, SyncError>> {
@@ -873,6 +1163,43 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_price_sentinel_is_variable_not_a_price() {
+        let catalog = parse_catalog(VARIABLE_FIXTURE).expect("fixture parses");
+        let by_id = |id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap_or_else(|| panic!("fixture must contain {id}"))
+        };
+
+        // Every component of `openrouter/auto` is the "-1" sentinel: stored
+        // as unknown, flagged variable, never a minus one million price.
+        let auto = by_id("openrouter/auto");
+        assert!(auto.price.variable, "the sentinel is recorded");
+        assert_eq!(auto.price.input_per_m, None);
+        assert_eq!(auto.price.output_per_m, None);
+        assert_eq!(auto.price.request_fee, None);
+
+        // A partial sentinel keeps the components that are real numbers.
+        let half = by_id("vendor/half-variable");
+        assert!(half.price.variable);
+        assert_eq!(half.price.input_per_m, None);
+        assert_eq!(half.price.output_per_m, Some(10.0));
+
+        // An ordinary model is unaffected.
+        let priced = by_id("openai/priced-model");
+        assert!(!priced.price.variable);
+        assert_eq!(priced.price.input_per_m, Some(1.0));
+        assert_eq!(priced.price.output_per_m, Some(2.0));
+
+        // The converter itself refuses the sentinel, so no caller can turn it
+        // into -$1,000,000/M by accident.
+        assert_eq!(usd_per_token_to_per_million("-1"), None);
+        assert_eq!(usd_per_token_to_per_million("-0.5"), None);
+    }
+
+    #[test]
     fn entries_without_an_id_are_skipped_not_fatal() {
         let raw = r#"{"data": [{"name": "no id"}, {"id": "x/y", "pricing": {}}]}"#;
         let catalog = parse_catalog(raw).expect("parses");
@@ -897,6 +1224,127 @@ mod tests {
         let catalog = parse_catalog(raw).expect("parses");
         assert_eq!(catalog.models[0].input_modalities, vec!["text", "image"]);
         assert_eq!(catalog.models[0].output_modalities, vec!["text", "audio"]);
+    }
+
+    #[test]
+    fn filtered_variants_are_parsed_but_not_managed() {
+        let raw = r#"{"data": [
+            {"id": "a/base", "pricing": {"prompt": "0.000001"}},
+            {"id": "a/base:batch", "pricing": {"prompt": "0.000002"}},
+            {"id": "a/base:free", "pricing": {"prompt": "0"}}
+        ]}"#;
+        let catalog = parse_catalog(raw).expect("parses");
+        assert_eq!(catalog.models.len(), 3);
+        let managed = |id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .expect("entry")
+                .managed
+        };
+        assert!(managed("a/base"));
+        assert!(managed("a/base:free"), ":free is a distinct offering");
+        assert!(!managed("a/base:batch"), ":batch is a billing tier");
+    }
+
+    #[tokio::test]
+    async fn filtered_variants_are_not_created_but_existing_offerings_get_prices() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let raw = r#"{"data": [
+            {"id": "a/base", "pricing": {"prompt": "0.000001"}},
+            {"id": "a/base:batch", "pricing": {"prompt": "0.000002"}},
+            {"id": "a/base:free", "pricing": {"prompt": "0"}}
+        ]}"#
+        .to_string();
+
+        let body = raw.clone();
+        let outcome = run_sync(
+            &app.state.pool,
+            move || std::future::ready(Ok::<_, SyncError>(body.clone())),
+            &actor,
+        )
+        .await
+        .expect("sync");
+        assert_eq!(outcome.status, SyncStatus::Success);
+        assert_eq!(outcome.model_count, 2, "only managed ids count");
+
+        let (models, offerings): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM models), (SELECT COUNT(*) FROM offerings)",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("counts");
+        assert_eq!((models, offerings), (2, 2));
+        let batch_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM models WHERE canonical_name = 'a/base:batch'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("batch count");
+        assert_eq!(batch_rows, 0, "the price sync must not create :batch");
+
+        // An existing offering for a filtered id still gets its price.
+        let provider_id: String = sqlx::query_scalar("SELECT id FROM providers WHERE name = ?")
+            .bind(PROVIDER_NAME)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("provider");
+        let now = catalog::now_ts();
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("model-batch")
+        .bind("a/base:batch")
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("manual model");
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind("offering-batch")
+        .bind(&provider_id)
+        .bind("model-batch")
+        .bind("a/base:batch")
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("manual offering");
+
+        let body = raw.clone();
+        let outcome = run_sync(
+            &app.state.pool,
+            move || std::future::ready(Ok::<_, SyncError>(body.clone())),
+            &actor,
+        )
+        .await
+        .expect("second sync");
+        assert_eq!(outcome.status, SyncStatus::Success);
+        let batch_price: Option<f64> = sqlx::query_scalar(
+            "SELECT input_per_m FROM prices WHERE offering_id = 'offering-batch'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("batch price");
+        assert_eq!(
+            batch_price,
+            Some(2.0),
+            "prices may still be recorded for existing offerings"
+        );
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("models");
+        assert_eq!(models, 3, "no model row was created by the sync");
     }
 
     // -----------------------------------------------------------------------
@@ -972,6 +1420,105 @@ mod tests {
                 .await
                 .expect("audit count");
         assert_eq!(audits, 1);
+    }
+
+    #[tokio::test]
+    async fn variable_prices_are_stored_null_and_never_rank_as_cheapest() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+
+        let outcome = run_sync(
+            &app.state.pool,
+            || std::future::ready(Ok::<_, SyncError>(VARIABLE_FIXTURE.to_string())),
+            &actor,
+        )
+        .await
+        .expect("sync");
+        assert_eq!(outcome.status, SyncStatus::Success);
+        assert_eq!(outcome.model_count, 3);
+
+        // Storage: never -1e6, the components are NULL and the row is flagged.
+        let auto: (Option<f64>, Option<f64>, i64) = sqlx::query_as(
+            "SELECT p.input_per_m, p.output_per_m, p.variable_price \
+             FROM prices p JOIN offerings o ON o.id = p.offering_id \
+             JOIN models m ON m.id = o.model_id WHERE m.canonical_name = 'openrouter/auto'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("auto price");
+        assert_eq!(auto, (None, None, 1), "the sentinel is not a price");
+        let priced: (Option<f64>, i64) = sqlx::query_as(
+            "SELECT p.input_per_m, p.variable_price \
+             FROM prices p JOIN offerings o ON o.id = p.offering_id \
+             JOIN models m ON m.id = o.model_id WHERE m.canonical_name = 'openai/priced-model'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("priced row");
+        assert_eq!(priced, (Some(1.0), 0));
+
+        // The run detail names the variable ids for operators.
+        let detail: String = sqlx::query_scalar("SELECT detail_json FROM price_sync_runs")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("detail");
+        assert!(detail.contains("openrouter/auto"), "{detail}");
+        assert!(detail.contains("variable_prices"), "{detail}");
+
+        // Regression: routing a normal model against the sentinel model. The
+        // stored rows feed the same blended price the router uses, and the
+        // variable one has none, so it can never win on price.
+        let auto_price = price_by_model(&app, "openrouter/auto").await;
+        let normal_price = price_by_model(&app, "openai/priced-model").await;
+        let blended = |price: &catalog::PriceRow| match (price.input_per_m, price.output_per_m) {
+            (Some(input), Some(output)) => Some(input + output),
+            _ => None,
+        };
+        assert_eq!(blended(&auto_price), None);
+        assert_eq!(blended(&normal_price), Some(3.0));
+        assert!(
+            crate::mix::mix_price(&auto_price, &crate::mix::code_agent_profile()).is_none(),
+            "an all-variable offering has no mix price"
+        );
+
+        let signal = |id: &str, price: Option<f64>| {
+            let mut signal = crate::routing::CandidateSignal::neutral(id);
+            signal.price_per_m_usd = price;
+            signal
+        };
+        let pool = || {
+            vec![
+                signal("openrouter/auto", blended(&auto_price)),
+                signal("openai/priced-model", blended(&normal_price)),
+            ]
+        };
+        for preset in ["cheapest", "balanced"] {
+            let (_, weights) = crate::routing::Weights::preset(preset).expect("preset");
+            let order = crate::routing::weighted_order(pool(), &weights);
+            let ids: Vec<&str> = order
+                .ordered
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect();
+            assert_eq!(
+                ids,
+                ["openai/priced-model", "openrouter/auto"],
+                "{preset} must not rank the variable price first"
+            );
+            let auto = order
+                .ordered
+                .iter()
+                .find(|entry| entry.id == "openrouter/auto")
+                .expect("auto scored");
+            assert!(
+                auto.score.imputed.contains(&"price"),
+                "the variable price is imputed, not measured"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1265,6 +1812,91 @@ mod tests {
                 .await
                 .expect("audit count");
         assert_eq!(audits, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Live-fetch hardening (2026-11-17)
+    // -----------------------------------------------------------------------
+
+    /// Serves `full_body` on every connection, but advertises the full length
+    /// and writes only half of it on the first one, then closes: a truncated
+    /// transfer, the live failure's shape.
+    async fn spawn_truncating_server(full_body: &'static str) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind truncating listener");
+        let addr = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let mut first = true;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let body = match first {
+                    true => {
+                        first = false;
+                        &full_body[..full_body.len() / 2]
+                    }
+                    false => full_body,
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    full_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_truncated_body_is_retried_and_succeeds() {
+        let addr = spawn_truncating_server(VARIABLE_FIXTURE).await;
+        let body = fetch_catalog_from(&format!("http://{addr}/models"))
+            .await
+            .expect("the second attempt serves the whole body");
+        assert_eq!(body, VARIABLE_FIXTURE);
+        assert_eq!(parse_catalog(&body).expect("parses").models.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_failing_host_names_the_layer_and_the_attempt() {
+        // Bind then drop: the port is free, so every connection is refused.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe listener");
+        let addr = listener.local_addr().expect("probe address");
+        drop(listener);
+
+        let error = fetch_catalog_from(&format!("http://{addr}/models"))
+            .await
+            .expect_err("no server listens");
+        let message = error.to_string();
+        assert!(message.contains("connect"), "the layer is named: {message}");
+        assert!(
+            message.contains("attempt 2"),
+            "the last attempt is named: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_answer_is_not_retried() {
+        let (addr, seen) =
+            crate::test_support::spawn_static_server("500 Internal Server Error", "{}").await;
+        let error = fetch_catalog_from(&format!("http://{addr}/models"))
+            .await
+            .expect_err("500 is an error");
+        let message = error.to_string();
+        assert!(message.contains("status"), "the layer is named: {message}");
+        assert!(message.contains("HTTP 500"), "{message}");
+        assert_eq!(
+            seen.lock().expect("seen lock").len(),
+            1,
+            "a definite upstream answer is never retried"
+        );
     }
 
     #[test]

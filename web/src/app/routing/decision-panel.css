@@ -1,25 +1,46 @@
-.decision {
+.panel-head {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-1);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--text-h3);
 }
 
 .reason {
   margin: 0;
-  font-weight: 600;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: var(--text-small);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-relaxed);
+}
+
+.decision {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
 
 .routing {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 1.25rem;
+  gap: var(--space-2) var(--space-6);
   margin: 0;
-  font-size: 0.85rem;
+}
+
+.routing-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-small);
 }
 
 .routing dt {
-  color: var(--muted);
-  font-weight: 600;
+  color: var(--text-muted);
+  font-weight: var(--weight-semibold);
 }
 
 .routing dd {
@@ -27,8 +48,14 @@
 }
 
 .routing .weights {
-  font-family: var(--mono);
-  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+}
+
+.routing .profile-id {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-badge);
 }
 
 .score-table td {
@@ -40,13 +67,13 @@
 }
 
 .candidate .sub {
-  color: var(--muted);
-  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-size: var(--text-small);
 }
 
 /* The chosen candidate stands out from the considered pool. */
 .score-table tbody tr.chosen td {
-  background: #eef4ff;
+  background: var(--accent-soft);
 }
 
 .score-table tbody tr.chosen td:first-child {
@@ -54,13 +81,17 @@
 }
 
 .num {
-  font-family: var(--mono);
-  font-size: 0.82rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
   white-space: nowrap;
 }
 
+.num.mix {
+  color: var(--text);
+}
+
 .num.total {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .num.total.negative {
@@ -68,36 +99,43 @@
 }
 
 .unscored {
-  color: var(--muted);
+  color: var(--text-muted);
   font-style: italic;
   text-align: center;
 }
 
 .why {
   max-width: 22rem;
-  color: var(--muted);
-  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-size: var(--text-small);
 }
 
+/* A compact pill with a native tooltip: `title` is the explanation. */
 .marker {
-  margin-left: 0.25rem;
-  padding: 0 0.25rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #fff8ec;
-  color: #8a6d1f;
-  font-size: 0.62rem;
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-xs);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-family: var(--font-body);
+  font-size: var(--text-badge);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.04em;
+  line-height: var(--leading-tight);
   text-transform: uppercase;
   cursor: help;
 }
 
 .legend {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-size: var(--text-small);
+  line-height: var(--leading-relaxed);
 }
 
 .empty {
   margin: 0;
-  color: var(--muted);
+  color: var(--text-muted);
 }

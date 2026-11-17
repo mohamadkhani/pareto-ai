@@ -48,10 +48,20 @@ categories (only generic quality for now).
    single-component presets apply no penalties (health is handled by the
    filters). Per **D27**, telemetry metrics with fewer than 10 samples shrink
    toward 0.5 by `n/(n+10)`.
-   - Deliberate deviation (documented in the module docs): **inside a combo**,
-     an `upstream_auth` (401/403) failure advances to the next member (the
-     member list is the operator's explicit fallback chain); plain models keep
-     M3's "401/403 never fail over" rule.
+   - Credential failover (2026-11-17 live fix): an `upstream_auth` (401/403),
+     `upstream_quota` (402), or `upstream_rate_limited` (429) failure first
+     retries the **same offering with the next eligible credential** (not
+     cooled and not breaker-open first, then cooled; each credential at most
+     once per request), then advances to the next offering. A 401 on the only
+     credential still cools it and ends in `502`.
+   - Preview summary (2026-11-17 live fix): `POST /api/combos/preview` and
+     `GET /api/combos/{id}/preview` return `scored` — how many offerings
+     passed every filter and were scored — next to `candidates` (possibly
+     shorter, because `limit` truncates the list, default 25, max 100) and
+     `excluded`. Each candidate explanation says "#N of scored", so the panel
+     prints one consistent line: "90 scored · showing 50 · 303 excluded (393
+     total)". The total is `scored + excluded` (every offering either scored
+     or was excluded); "showing" appears only when the list is truncated.
 4. **Explanation**: `request_logs.decision_json` records candidates, each
    component score, the winner, and one-line reasons (why this one, why not the
    others); surfaced in the admin UI ("why this model").

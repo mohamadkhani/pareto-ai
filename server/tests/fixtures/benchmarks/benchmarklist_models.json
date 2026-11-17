@@ -1,0 +1,85 @@
+{
+  "rows": [
+    {
+      "originalIndex": 0,
+      "id": "openai-gpt-5.4",
+      "name": "GPT-5.4",
+      "href": "/models/openai-gpt-5.4/",
+      "family": "GPT",
+      "developer": "OpenAI",
+      "sourceKey": "closed_api",
+      "sourceLabel": "Closed/API",
+      "sourceSort": 1,
+      "sourceFilter": "closed_api",
+      "sourceSearchText": "openai gpt 5.4 closed api",
+      "releaseDate": "2026-01-15",
+      "releaseDateSort": 20260115,
+      "count": 496,
+      "inputCost": 2,
+      "outputCost": 12,
+      "icon": {
+        "label": "OpenAI",
+        "initials": "OA",
+        "imageSrc": "/vendor-icons/openai.svg",
+        "background": "#eff6ff",
+        "foreground": "#4285f4"
+      },
+      "capability_score": 87.5,
+      "capability_rank": 2,
+      "capability_coverage": 41
+    },
+    {
+      "originalIndex": 1,
+      "id": "anthropic-claude-sonnet-4.6",
+      "name": "Claude Sonnet 4.6",
+      "href": "/models/anthropic-claude-sonnet-4.6/",
+      "family": "Claude",
+      "developer": "Anthropic",
+      "sourceKey": "closed_api",
+      "sourceLabel": "Closed/API",
+      "sourceSort": 1,
+      "sourceFilter": "closed_api",
+      "sourceSearchText": "anthropic claude sonnet 4.6 closed api",
+      "releaseDate": "2026-02-19",
+      "releaseDateSort": 20260219,
+      "count": 480,
+      "inputCost": 3,
+      "outputCost": 15,
+      "icon": {
+        "label": "Anthropic",
+        "initials": "AN",
+        "imageSrc": "/vendor-icons/anthropic.svg",
+        "background": "#fff7ed",
+        "foreground": "#c2410c"
+      },
+      "capability_score": "84.1",
+      "capability_rank": 4,
+      "capability_coverage": 37
+    },
+    {
+      "originalIndex": 2,
+      "id": "thinking-machines-inkling-2-small",
+      "name": "Inkling 2 Small",
+      "href": "/models/thinking-machines-inkling-2-small/",
+      "family": "Inkling",
+      "developer": "Thinking Machines Lab",
+      "sourceKey": "open_weights",
+      "sourceLabel": "Open weights",
+      "sourceSort": 2,
+      "sourceFilter": "open_weights",
+      "sourceSearchText": "thinking machines inkling 2 small open weights",
+      "releaseDate": "2026-03-02",
+      "releaseDateSort": 20260302,
+      "count": 0,
+      "icon": {
+        "label": "Thinking Machines",
+        "initials": "TM",
+        "imageSrc": "/vendor-icons/thinking-machines.svg",
+        "background": "#f0fdf4",
+        "foreground": "#15803d"
+      },
+      "capability_rank": null,
+      "capability_coverage": 0
+    }
+  ]
+}

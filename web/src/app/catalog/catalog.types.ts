@@ -23,6 +23,16 @@ export interface Provider {
   enabled: boolean;
   created_at: string;
   updated_at: string;
+  /**
+   * The last **applied** model discovery (a dry run never writes these), or
+   * null before the first one. Persisted server-side so "Last load" survives
+   * a reload.
+   */
+  last_discovery_at: string | null;
+  /** `models` rows the last applied discovery inserted. */
+  last_discovery_created: number | null;
+  /** Offerings the last applied discovery found already matching. */
+  last_discovery_unchanged: number | null;
 }
 
 /** `POST /api/providers`. */
@@ -161,21 +171,6 @@ export interface ModelInput {
 }
 
 /**
- * `PATCH /api/models/{id}`: only the fields the admin changed. Like
- * credentials, nullable columns cannot be cleared over the wire, so numeric
- * fields go out as concrete values only.
- */
-export interface ModelPatch {
-  canonical_name?: string;
-  family?: string | null;
-  modalities_input?: string[];
-  modalities_output?: string[];
-  context_length?: number;
-  max_output_tokens?: number;
-  capabilities?: string[];
-}
-
-/**
  * Price row: all amounts are USD per 1M tokens, `request_fee` is USD per
  * request. Keyed by `offering_id` — the wire price carries no own id.
  */
@@ -187,6 +182,8 @@ export interface Price {
   cache_write_per_m: number | null;
   reasoning_per_m: number | null;
   request_fee: number | null;
+  /** The source publishes a variable price (the `-1` sentinel). */
+  variable_price: boolean;
   currency: string;
   source: PriceSource;
   source_url: string | null;
@@ -254,6 +251,33 @@ export interface PriceInput {
   cache_write_per_m: number | null;
   reasoning_per_m: number | null;
   request_fee: number | null;
+  /** Omitted means the server keeps the USD default. */
+  currency?: string;
+}
+
+/**
+ * `POST /api/providers/{id}/discover-models`. Discovery reads the provider's
+ * OpenAI-compatible `/models` endpoint and upserts canonical models and
+ * offerings idempotently; manual edits and prices always win.
+ */
+export interface DiscoveryInput {
+  /** Defaults to the provider's first active credential. */
+  credential_id?: string;
+  /** Preview only: compute the summary and write no catalog rows. */
+  dry_run?: boolean;
+}
+
+/** What one discovery run found and changed. */
+export interface DiscoverySummary {
+  dry_run: boolean;
+  credential_id: string;
+  /** Usable upstream model ids in the payload. */
+  discovered: number;
+  created_models: number;
+  created_offerings: number;
+  /** Existing offerings re-linked to the canonical model row. */
+  updated_offerings: number;
+  unchanged: number;
 }
 
 /** Run statuses recorded in `price_sync_runs`. */

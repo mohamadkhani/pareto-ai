@@ -1,0 +1,21 @@
+<dialog
+  #dialog
+  class="dialog"
+  [attr.aria-labelledby]="title() ? titleId : null"
+  [attr.aria-label]="!title() && ariaLabel() ? ariaLabel() : null"
+  (cancel)="onCancel($event)"
+  (close)="onClose()"
+  (click)="onDialogClick($event)"
+>
+  <div class="dialog-content">
+    @if (title()) {
+      <h2 class="dialog-title" [attr.id]="titleId">{{ title() }}</h2>
+    }
+    <div class="dialog-body">
+      <ng-content />
+    </div>
+    <div class="dialog-actions">
+      <ng-content select="[ui-dialog-actions]" />
+    </div>
+  </div>
+</dialog>

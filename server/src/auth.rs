@@ -204,13 +204,54 @@ pub fn cleared_session_cookie(secure: bool) -> String {
         .to_string()
 }
 
+/// How often `sessions.last_seen_at` is refreshed. The admin UI shows session
+/// activity with this granularity; login and expiry checks stay per request.
+pub const SESSION_ACTIVITY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Largest session-activity map; the least recently seen session is evicted.
+pub const SESSION_ACTIVITY_MAX_ENTRIES: usize = 10_000;
+
+/// The `sessions.last_seen_at` write throttle, by session id. Session
+/// resolution still runs its SELECT and every expiry/deactivation check on
+/// every request; only the informational timestamp write is batched.
+#[derive(Debug)]
+pub struct SessionActivity(crate::throttle::WriteThrottle);
+
+impl Default for SessionActivity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionActivity {
+    pub fn new() -> Self {
+        Self(crate::throttle::WriteThrottle::new(
+            SESSION_ACTIVITY_INTERVAL,
+            SESSION_ACTIVITY_MAX_ENTRIES,
+        ))
+    }
+
+    /// Whether this request should refresh the session's `last_seen_at`,
+    /// recording the decision.
+    pub fn should_stamp(&self, session_id: &str, now: std::time::Instant) -> bool {
+        self.0.should_write(session_id, now)
+    }
+
+    /// Forgets a stamp after its write failed, so the next request retries.
+    fn forget(&self, session_id: &str) {
+        self.0.forget(session_id);
+    }
+}
+
 /// Resolves a session token into its session and user.
 ///
 /// Expired sessions and sessions of deactivated users are deleted and resolve
-/// to `None`. `last_seen_at` is refreshed on every successful lookup.
+/// to `None`. `last_seen_at` is refreshed at most once per
+/// [`SESSION_ACTIVITY_INTERVAL`]; the lookup and the expiry checks run on
+/// every call.
 pub async fn load_session(
     pool: &sqlx::SqlitePool,
     token: &str,
+    activity: &SessionActivity,
 ) -> Result<Option<SessionUser>, AuthError> {
     let row = sqlx::query(
         "SELECT s.id AS session_id, s.user_id, s.csrf_token, s.expires_at, \
@@ -251,11 +292,19 @@ pub async fn load_session(
         return Ok(None);
     }
 
-    sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
-        .bind(now_ts())
-        .bind(&session_id)
-        .execute(pool)
-        .await?;
+    if activity.should_stamp(&session_id, std::time::Instant::now()) {
+        let now = now_ts();
+        if let Err(e) = sqlx::query("UPDATE sessions SET last_seen_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&session_id)
+            .execute(pool)
+            .await
+        {
+            // The stamp is not written; let the next request try again.
+            activity.forget(&session_id);
+            return Err(e.into());
+        }
+    }
 
     Ok(Some(SessionUser {
         session_id,
@@ -537,7 +586,7 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = session_cookie_value(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
 
-        let session = load_session(&state.pool, &token)
+        let session = load_session(&state.pool, &token, &state.session_activity)
             .await
             .map_err(|e| ApiError::internal("resolving session", e).with_request_id(rid.clone()))?
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
@@ -609,9 +658,10 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
         let rid = request_id(&parts.headers);
 
         if let Some(presented) = bearer_token(&parts.headers) {
-            let key = crate::api_keys::authenticate(&state.pool, &presented)
-                .await
-                .map_err(|e| e.into_api_error(rid.clone()))?;
+            let key =
+                crate::api_keys::authenticate(&state.pool, &presented, &state.key_usage_stamps)
+                    .await
+                    .map_err(|e| e.into_api_error(rid.clone()))?;
             // RPM is charged per request at authentication; TPM waits for
             // the token estimate inside the chat pipeline.
             if let Err(wait) = state.key_limiter.charge_rpm(
@@ -636,7 +686,7 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
 
         let token = session_cookie_value(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
-        let session = load_session(&state.pool, &token)
+        let session = load_session(&state.pool, &token, &state.session_activity)
             .await
             .map_err(|e| ApiError::internal("resolving session", e).with_request_id(rid.clone()))?
             .ok_or_else(|| ApiError::unauthorized().with_request_id(rid.clone()))?;
@@ -1101,5 +1151,79 @@ mod tests {
             None,
         );
         assert_eq!(resolve_client_ip(&garbage_tail, &proxies), "203.0.113.9");
+    }
+
+    /// Session resolution still runs every check per request, but the
+    /// informational `last_seen_at` write happens at most once per
+    /// [`SESSION_ACTIVITY_INTERVAL`].
+    #[tokio::test]
+    async fn last_seen_at_is_batched_without_changing_expiry_semantics() {
+        use crate::test_support::{self, TestApp};
+        let app = TestApp::new().await;
+        app.create_user("admin@example.test", Role::Admin, true)
+            .await;
+        let (cookie, _csrf) = test_support::login(&app.router(), "admin@example.test").await;
+        let token = cookie
+            .strip_prefix("session=")
+            .or_else(|| cookie.strip_prefix("gateway_session="))
+            .expect("session cookie")
+            .to_string();
+
+        let activity = SessionActivity::new();
+        let session = load_session(&app.state.pool, &token, &activity)
+            .await
+            .expect("session")
+            .expect("exists");
+        let first_seen: Option<String> =
+            sqlx::query_scalar("SELECT last_seen_at FROM sessions WHERE id = ?")
+                .bind(&session.session_id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("last_seen_at");
+        assert!(first_seen.is_some(), "the first lookup stamps the session");
+
+        // Inside the window the lookup still succeeds and still enforces the
+        // expiry check, but writes nothing.
+        sqlx::query("UPDATE sessions SET last_seen_at = NULL WHERE id = ?")
+            .bind(&session.session_id)
+            .execute(&app.state.pool)
+            .await
+            .expect("clear stamp");
+        let again = load_session(&app.state.pool, &token, &activity)
+            .await
+            .expect("session")
+            .expect("exists");
+        assert_eq!(again.session_id, session.session_id);
+        let skipped: Option<String> =
+            sqlx::query_scalar("SELECT last_seen_at FROM sessions WHERE id = ?")
+                .bind(&session.session_id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("last_seen_at");
+        assert!(skipped.is_none(), "no write inside the 5 minute window");
+
+        // A fresh throttle writes on the next lookup.
+        load_session(&app.state.pool, &token, &SessionActivity::new())
+            .await
+            .expect("session")
+            .expect("exists");
+        let restamped: Option<String> =
+            sqlx::query_scalar("SELECT last_seen_at FROM sessions WHERE id = ?")
+                .bind(&session.session_id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("last_seen_at");
+        assert!(restamped.is_some(), "the next window stamps again");
+
+        // Expiry is still evaluated per request, independent of the stamp.
+        sqlx::query("UPDATE sessions SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?")
+            .bind(&session.session_id)
+            .execute(&app.state.pool)
+            .await
+            .expect("expire");
+        let expired = load_session(&app.state.pool, &token, &SessionActivity::new())
+            .await
+            .expect("session");
+        assert!(expired.is_none(), "an expired session never resolves");
     }
 }

@@ -1,11 +1,8 @@
-.form-card {
-  margin-bottom: 1rem;
-}
-
 .actions {
   white-space: nowrap;
 }
 
-.actions .btn {
-  margin-right: 0.35rem;
+ui-dialog ui-banner {
+  display: block;
+  margin-bottom: var(--space-3);
 }

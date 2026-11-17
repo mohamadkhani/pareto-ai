@@ -1,10 +1,19 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
-import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  afterNextRender,
+  computed,
+  inject,
+  signal,
+} from '@angular/core';
+import { DOCUMENT } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { ApiError } from '../api';
 import { AuthService } from '../auth/auth.service';
-
-type Field = 'email' | 'password';
+import { UiBanner } from '../ui/banner';
+import { UiButton } from '../ui/button';
+import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
 
 /** Only same-origin paths may be used as a return URL (no open redirects). */
 function safeReturnUrl(value: string | null): string {
@@ -15,17 +24,19 @@ function safeReturnUrl(value: string | null): string {
 function describeError(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.code === 'login_locked' && err.retryAfterSeconds !== null) {
-      // The countdown goes on its own line; the banner uses `pre-line`.
-      return `${err.message}\nTry again in ${err.retryAfterSeconds} seconds.`;
+      return `${err.message} Try again in ${err.retryAfterSeconds} seconds.`;
     }
     return err.message;
   }
   return 'Sign-in failed unexpectedly. Please try again.';
 }
 
+/** A pragmatic email check; the server is the authority. */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 @Component({
   selector: 'app-login',
-  imports: [ReactiveFormsModule],
+  imports: [UiBanner, UiButton, UiField, UiInput],
   templateUrl: './login.html',
   styleUrl: './login.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -39,50 +50,58 @@ export class Login {
   protected readonly attempted = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
 
-  protected readonly form = new FormGroup({
-    email: new FormControl('', {
-      nonNullable: true,
-      validators: [Validators.required, Validators.email],
-    }),
-    password: new FormControl('', {
-      nonNullable: true,
-      validators: [Validators.required],
-    }),
+  protected readonly email = signal('');
+  protected readonly password = signal('');
+
+  private readonly document = inject(DOCUMENT);
+
+  protected readonly emailError = computed(() => {
+    if (!this.attempted()) {
+      return '';
+    }
+    const email = this.email().trim();
+    if (email.length === 0) {
+      return 'Email is required.';
+    }
+    return EMAIL_PATTERN.test(email) ? '' : 'Enter a valid email address.';
+  });
+
+  protected readonly passwordError = computed(() => {
+    if (!this.attempted()) {
+      return '';
+    }
+    return this.password().length === 0 ? 'Password is required.' : '';
   });
 
   private readonly returnUrl = safeReturnUrl(this.route.snapshot.queryParamMap.get('returnUrl'));
 
-  protected async submit(): Promise<void> {
-    this.attempted.set(true);
-    this.errorMessage.set(null);
-    if (this.form.invalid) {
+  constructor() {
+    // Put the cursor where the user starts typing; the field is the first control.
+    afterNextRender(() => {
+      this.document.querySelector<HTMLInputElement>('#login-email')?.focus();
+    });
+  }
+
+  protected async submit(event?: Event): Promise<void> {
+    event?.preventDefault();
+    if (this.pending()) {
       return;
     }
+    this.attempted.set(true);
+    this.errorMessage.set(null);
+    if (this.emailError() !== '' || this.passwordError() !== '') {
+      return;
+    }
+
     this.pending.set(true);
-    const { email, password } = this.form.getRawValue();
     try {
-      await this.auth.login(email, password);
-      await this.router.navigateByUrl(this.returnUrl);
+      await this.auth.login(this.email().trim(), this.password());
     } catch (err) {
       this.errorMessage.set(describeError(err));
-    } finally {
       this.pending.set(false);
+      return;
     }
-  }
-
-  protected showError(field: Field): boolean {
-    const control = this.form.controls[field];
-    return control.invalid && (control.touched || this.attempted());
-  }
-
-  protected fieldError(field: Field): string {
-    const control = this.form.controls[field];
-    if (control.hasError('required')) {
-      return field === 'email' ? 'Email is required.' : 'Password is required.';
-    }
-    if (control.hasError('email')) {
-      return 'Enter a valid email address.';
-    }
-    return '';
+    this.pending.set(false);
+    await this.router.navigateByUrl(this.returnUrl);
   }
 }

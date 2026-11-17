@@ -1,32 +1,128 @@
+<a class="skip-link" href="#main">Skip to main content</a>
+
 <header class="topbar">
-  <div class="brand">Pareto Gateway</div>
-  <nav class="nav">
-    @if (auth.isAdmin()) {
-      <a routerLink="/providers" routerLinkActive="active">Providers</a>
-      <a routerLink="/models" routerLinkActive="active">Models</a>
-      <a routerLink="/offerings" routerLinkActive="active">Offerings</a>
-      <a routerLink="/sync" routerLinkActive="active">Price sync</a>
-      <a routerLink="/combos" routerLinkActive="active">Combos</a>
-      <a routerLink="/benchmarks" routerLinkActive="active">Benchmarks</a>
-      <a routerLink="/users" routerLinkActive="active">Users</a>
-      <a routerLink="/grants" routerLinkActive="active">Grants</a>
-      <a routerLink="/audit" routerLinkActive="active">Audit log</a>
-      <a routerLink="/logs" routerLinkActive="active">Request logs</a>
-    }
-    <a routerLink="/keys" routerLinkActive="active">API keys</a>
-    <a routerLink="/limits" routerLinkActive="active">Limits</a>
-    <a routerLink="/usage" routerLinkActive="active">Usage</a>
-  </nav>
-  @if (auth.user(); as user) {
-    <div class="user">
-      <span class="email">{{ user.email }}</span>
-      <span class="role-badge" [class.role-admin]="auth.isAdmin()">{{ user.role }}</span>
-      <button type="button" class="btn" (click)="signOut()" [disabled]="signingOut()">
-        {{ signingOut() ? 'Signing out…' : 'Sign out' }}
+  <div class="topbar__main">
+    <a class="brand" routerLink="/" title="Pareto Gateway home">Pareto Gateway</a>
+
+    <div class="topbar__actions">
+      <ui-icon-button [label]="theme.label()" (clicked)="theme.cycle()">
+        @switch (themeIcon()) {
+          @case ('light') {
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="4" />
+              <path
+                d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.4 1.4M17.6 17.6 19 19M19 5l-1.4 1.4M6.4 17.6 5 19"
+              />
+            </svg>
+          }
+          @case ('dark') {
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.5 6.5 0 0 0 21 12.8Z" />
+            </svg>
+          }
+          @default {
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <rect x="3" y="4" width="18" height="13" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+          }
+        }
+      </ui-icon-button>
+      <span class="visually-hidden" aria-live="polite">{{ theme.label() }}</span>
+
+      <!--
+        A disclosure toggle, not a plain icon button: aria-expanded/aria-controls
+        belong on the inner <button>, which `ui-icon-button` does not expose.
+      -->
+      <button
+        #menuButton
+        type="button"
+        class="menu-toggle"
+        aria-controls="primary-navigation-mobile"
+        [attr.aria-expanded]="menuOpen()"
+        [attr.aria-label]="menuOpen() ? 'Close navigation' : 'Open navigation'"
+        (click)="toggleMenu()"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          @if (menuOpen()) {
+            <path d="M6 6l12 12M18 6 6 18" />
+          } @else {
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          }
+        </svg>
       </button>
+
+      @if (auth.user(); as user) {
+        <div class="user">
+          <span class="user__email" [title]="user.email">{{ user.email }}</span>
+          <ui-badge [tone]="auth.isAdmin() ? 'accent' : 'neutral'">{{ user.role }}</ui-badge>
+          <ui-button variant="ghost" size="sm" [loading]="signingOut()" (clicked)="signOut()">
+            Sign out
+          </ui-button>
+        </div>
+      }
     </div>
-  }
+  </div>
+
+  <nav class="nav-desktop" aria-label="Primary">
+    <ng-container [ngTemplateOutlet]="navSections" />
+  </nav>
+
+  <nav
+    id="primary-navigation-mobile"
+    class="nav-mobile"
+    [class.nav-mobile--open]="menuOpen()"
+    aria-label="Primary"
+  >
+    <ng-container [ngTemplateOutlet]="navSections" />
+  </nav>
 </header>
-<main class="content">
+
+<main id="main" class="content" tabindex="-1">
   <router-outlet />
 </main>
+
+<ng-template #navSections>
+  @for (section of sections(); track section.label) {
+    <div class="nav-section">
+      <span class="nav-section__label">{{ section.label }}</span>
+      <ul class="nav-section__links">
+        @for (link of section.links; track link.path) {
+          <li>
+            <a
+              [routerLink]="link.path"
+              routerLinkActive="active"
+              ariaCurrentWhenActive="page"
+              (click)="closeMenu()"
+              >{{ link.label }}</a
+            >
+          </li>
+        }
+      </ul>
+    </div>
+  }
+</ng-template>

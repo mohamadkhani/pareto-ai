@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { requestJson, requestNoContent } from '../api';
 import { AuthService } from '../auth/auth.service';
-import type { Combo, ComboInput } from './combos.types';
+import type { Combo, ComboInput, ComboPreview } from './combos.types';
 
 /**
  * All HTTP calls for the M5 combo admin API (`/api/combos`). Admin only;
@@ -43,5 +43,29 @@ export class CombosService {
       method: 'DELETE',
       csrfToken: this.auth.csrfToken(),
     });
+  }
+
+  /**
+   * Previews a draft combo without saving it: the ranked candidates and the
+   * exclusions, computed by the same engine the runtime uses (D35). The route
+   * sits outside the CSRF guard because it writes nothing, so no token is sent.
+   */
+  preview(input: ComboInput, limit = 50): Promise<ComboPreview> {
+    return requestJson<ComboPreview>('/api/combos/preview', {
+      method: 'POST',
+      body: { ...input, limit },
+    });
+  }
+
+  /**
+   * Previews a saved combo; `sessionKey` (an `X-Session-Id` value) shows the
+   * current sticky pin for that key.
+   */
+  previewSaved(id: string, sessionKey: string | null, limit = 50): Promise<ComboPreview> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (sessionKey !== null && sessionKey !== '') {
+      params.set('session_key', sessionKey);
+    }
+    return requestJson<ComboPreview>(`/api/combos/${id}/preview?${params.toString()}`);
   }
 }

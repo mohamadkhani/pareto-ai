@@ -15,8 +15,8 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::auth::{ClientIp, RequireAdmin};
 use crate::catalog::{
-    self, Actor, ModelInput, ModelPatch, ModelView, OfferingInput, OfferingPatch, OfferingView,
-    PriceInput, PriceView, V1Model, V1ModelList,
+    self, Actor, ModelInput, ModelPatch, ModelView, ModelsOverview, OfferingInput, OfferingPatch,
+    OfferingView, OverviewQuery, PriceInput, PriceView, V1Model, V1ModelList,
 };
 use crate::error::{self, ApiError, ErrorBody};
 use crate::routes::bad_body;
@@ -79,6 +79,52 @@ pub async fn create_model(
         .await
         .map_err(|e| e.into_api_error(rid))?;
     Ok((StatusCode::CREATED, Json(ModelView::from(&row))))
+}
+
+/// The Models page payload: one merged view of models, prices, quality, and
+/// mix prices. Admin only.
+///
+/// `provider=<id>` scopes to that provider's offerings (one row per
+/// offering); `provider=all` or an absent parameter aggregates across
+/// providers (one row per model). Price averages/minima exclude unpriced
+/// offerings (see [`crate::catalog::overview`]). `mix=<id|name>` selects a
+/// token-mix profile; absent means the resolved default (D34).
+#[utoipa::path(
+    get,
+    path = "/api/models/overview",
+    tag = "catalog",
+    params(
+        ("provider" = Option<String>, Query, description = "provider id, or all"),
+        ("mix" = Option<String>, Query, description = "token-mix profile id or name")
+    ),
+    responses(
+        (status = 200, description = "models, prices, quality, and mix prices for the page", body = ModelsOverview),
+        (status = 400, description = "invalid query parameters", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody),
+        (status = 404, description = "no such provider or mix profile", body = ErrorBody)
+    )
+)]
+pub async fn models_overview(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    headers: HeaderMap,
+    query: Result<Query<OverviewQuery>, QueryRejection>,
+) -> Result<Json<ModelsOverview>, ApiError> {
+    let rid = error::request_id(&headers);
+    let Query(query) = query.map_err(|e| {
+        tracing::debug!(error = %e, "query string rejected");
+        ApiError::bad_request("invalid query parameters").with_request_id(rid.clone())
+    })?;
+    let overview = catalog::overview::load_with_mix(
+        &state.pool,
+        query.provider.as_deref(),
+        query.mix.as_deref(),
+        state.config.token_mix_profile.as_deref(),
+    )
+    .await
+    .map_err(|e| e.into_api_error(rid))?;
+    Ok(Json(overview))
 }
 
 /// Fetches one model. Admin only.

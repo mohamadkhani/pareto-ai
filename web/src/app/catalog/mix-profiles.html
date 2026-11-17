@@ -1,0 +1,193 @@
+<ui-dialog [open]="open()" title="Token-mix profiles" (closed)="close()">
+  <div class="profiles">
+    <p class="note">
+      A mix price blends an offering's component prices at a profile's token shares. It drives
+      routing and the Models price basis; <strong>billing still uses component prices</strong>
+      (D22/D34). Shares are percentages and are normalised to 100% before the blend.
+    </p>
+
+    @if (loadError()) {
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="load()">
+        {{ loadError() }}
+      </ui-banner>
+    }
+
+    @if (envOverride(); as override) {
+      <ui-banner tone="warning">
+        <code>GATEWAY_TOKEN_MIX_PROFILE={{ override }}</code> is set and wins over the stored
+        default: changing the default profile has no effect until the environment variable is unset.
+      </ui-banner>
+    }
+
+    <section class="section">
+      <h3>Default profile</h3>
+      <div class="default-row">
+        <ui-field
+          label="Routing default"
+          controlId="mix-default-profile"
+          [hint]="
+            envOverride() !== null
+              ? 'Locked by GATEWAY_TOKEN_MIX_PROFILE.'
+              : 'Used by routing, the Models page, and combo previews that set no profile of their own.'
+          "
+        >
+          <ui-select
+            [value]="defaultSelector()"
+            [disabled]="envOverride() !== null || savingDefault()"
+            (valueChange)="onDefaultChange($event)"
+          >
+            <option value="">No stored default (built-in code-agent applies)</option>
+            @for (profile of profiles(); track profile.id) {
+              <option [value]="profile.id">{{ profile.name }}</option>
+            }
+          </ui-select>
+        </ui-field>
+        @if (effectiveProfile(); as effective) {
+          <p class="effective">
+            Effective now:
+            <strong>{{ effective.profile_name }}</strong>
+            <span class="mono">({{ effective.profile_id }})</span>
+          </p>
+        }
+      </div>
+      @if (defaultError()) {
+        <ui-banner tone="danger">{{ defaultError() }}</ui-banner>
+      }
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h3>Profiles</h3>
+        <ui-button size="sm" variant="primary" (clicked)="openCreate()">New profile</ui-button>
+      </div>
+
+      @if (loading() && profiles().length === 0) {
+        <p class="note">Loading…</p>
+      } @else {
+        <ui-table [dense]="true">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Kind</th>
+                <th scope="col">Input / output / cache read</th>
+                <th scope="col"><span class="visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (profile of profiles(); track profile.id) {
+                <tr>
+                  <td>
+                    <span class="profile-name">{{ profile.name }}</span>
+                    @if (isDefault(profile)) {
+                      <ui-badge tone="accent">default</ui-badge>
+                    }
+                    @if (isEffective(profile) && !isDefault(profile)) {
+                      <ui-badge tone="info">effective</ui-badge>
+                    }
+                    <span class="mono profile-id">{{ profile.id }}</span>
+                  </td>
+                  <td>
+                    <ui-badge [tone]="kindTone(profile)">{{ kindLabel(profile) }}</ui-badge>
+                  </td>
+                  <td class="mono shares">{{ formatSummary(profile) }} (%)</td>
+                  <td class="actions">
+                    @if (profile.is_builtin) {
+                      <ui-button size="sm" variant="ghost" (clicked)="openClone(profile)"
+                        >Clone</ui-button
+                      >
+                    } @else {
+                      <ui-button size="sm" variant="ghost" (clicked)="openEdit(profile)"
+                        >Edit</ui-button
+                      >
+                      <ui-button size="sm" variant="ghost" (clicked)="askDelete(profile)"
+                        >Delete</ui-button
+                      >
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </ui-table>
+      }
+    </section>
+
+    @if (editor() !== null) {
+      <section class="section editor">
+        <h3>{{ editorTitle() }}</h3>
+        <div class="editor-grid">
+          <ui-field label="Name" controlId="mix-profile-name" [error]="nameError()">
+            <ui-input
+              [value]="draft().name"
+              placeholder="team-code-agent"
+              (valueChange)="setDraftName($event)"
+            />
+          </ui-field>
+          <ui-field
+            label="Kind"
+            controlId="mix-profile-kind"
+            hint="measured profiles are calibrated from our own telemetry and show a measured badge."
+          >
+            <ui-select [value]="draft().kind" (valueChange)="setDraftKind($event)">
+              <option value="custom">custom</option>
+              <option value="measured">measured</option>
+            </ui-select>
+          </ui-field>
+          @for (field of shareFields; track field.key) {
+            <ui-field
+              [label]="componentLabels[field.component] + ' share (%)'"
+              [controlId]="'mix-share-' + field.component"
+            >
+              <ui-input
+                type="number"
+                inputmode="decimal"
+                [value]="draft()[field.key]"
+                (valueChange)="setDraftShare(field.key, $event)"
+              />
+            </ui-field>
+          }
+        </div>
+        @if (sharesError()) {
+          <p class="field-error" role="alert">{{ sharesError() }}</p>
+        }
+        <p class="note">
+          Shares are relative: the blend normalises them to 100%. A component with a zero share is
+          skipped; cache read/write inherit the input price and reasoning inherits output when they
+          have no price of their own.
+        </p>
+        @if (formError()) {
+          <ui-banner tone="danger">{{ formError() }}</ui-banner>
+        }
+        <div class="editor-actions">
+          <ui-button variant="primary" [loading]="saving()" (clicked)="saveProfile()">
+            Save profile
+          </ui-button>
+          <ui-button variant="ghost" (clicked)="closeEditor()">Cancel</ui-button>
+        </div>
+      </section>
+    }
+  </div>
+
+  <div ui-dialog-actions>
+    <ui-button variant="ghost" (clicked)="close()">Close</ui-button>
+  </div>
+</ui-dialog>
+
+<ui-dialog [open]="deleteTarget() !== null" [title]="deleteTitle()" (closed)="cancelDelete()">
+  @if (deleteTarget(); as profile) {
+    <p class="confirm-text">
+      Delete <strong>{{ profile.name }}</strong>? Combos and the default setting that name it fall
+      back to the resolved default. This cannot be undone.
+    </p>
+    @if (deleteError()) {
+      <ui-banner tone="danger">{{ deleteError() }}</ui-banner>
+    }
+  }
+  <div ui-dialog-actions>
+    <ui-button variant="danger" [loading]="deleting()" (clicked)="confirmDelete()"
+      >Delete profile</ui-button
+    >
+    <ui-button variant="ghost" (clicked)="cancelDelete()">Cancel</ui-button>
+  </div>
+</ui-dialog>

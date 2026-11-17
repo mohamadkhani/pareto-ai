@@ -17,6 +17,18 @@ Living notes about the build environment, dated. Instructions for agents are in
   `chacha20poly1305`, `aead`, `orion`, `sodiumoxide` are not.
 - Consequence: credential encryption uses `ring::aead` AES-256-GCM (D16).
 
+## 2026-11-16 — shell tooling restricted mid-session
+
+- The shell gate became allowlist-based: `mount` is hard-denied, some commands
+  return `ask`/`deny` instead of running (e.g. a bare `cp` produced no output
+  and no file), and one write to `/tmp/opencode` failed with "read-only file
+  system" before working again.
+- Consequence: file creation/edits go through the editor tools (they persist);
+  shell is used for builds, tests and reads. Agents that need temp dirs should
+  prefer the repo (gitignored) over `/tmp`.
+- Latest observed toolchain: `cargo 1.99.1`, `rustc 1.99.1`, `node 26.13.1`,
+  `pnpm 10.27.0`, `just 1.59.0`.
+
 ## 2026-11-15 — network
 
 - `index.crates.io` and `static.crates.io` do not respond. `cargo` cannot fetch

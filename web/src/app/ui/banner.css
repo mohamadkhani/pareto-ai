@@ -1,0 +1,65 @@
+:host {
+  display: block;
+}
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-body);
+}
+
+.banner-text {
+  flex: 1;
+}
+
+:host(.tone-neutral) .banner {
+  border-left-color: var(--border-strong);
+}
+
+:host(.tone-success) .banner {
+  border-color: var(--success);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+:host(.tone-warning) .banner {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+:host(.tone-danger) .banner {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+:host(.tone-info) .banner {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.banner-action {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.banner-action:focus-visible {
+  outline: var(--focus-ring-width) solid currentColor;
+  outline-offset: 2px;
+}

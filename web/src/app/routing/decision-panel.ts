@@ -1,4 +1,7 @@
 import { ChangeDetectionStrategy, Component, input } from '@angular/core';
+import { UiBadge, type BadgeTone } from '../ui/badge';
+import { UiCard } from '../ui/card';
+import { UiTable } from '../ui/table';
 import type { CandidateScore, DecisionCandidate, DecisionRecord } from './routing.types';
 
 /** What kind of marker a score component carries. */
@@ -19,6 +22,7 @@ const MARKER_HELP: Record<ScoreMarker, string> = {
  */
 @Component({
   selector: 'app-decision-panel',
+  imports: [UiBadge, UiCard, UiTable],
   templateUrl: './decision-panel.html',
   styleUrl: './decision-panel.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -41,14 +45,14 @@ export class DecisionPanel {
     return candidate.outcome.startsWith('skipped_') ? 'skipped' : candidate.outcome;
   }
 
-  protected outcomeClass(candidate: DecisionCandidate): string {
+  protected outcomeTone(candidate: DecisionCandidate): BadgeTone {
     if (candidate.outcome === 'chosen') {
-      return 'ok';
+      return 'success';
     }
     if (candidate.outcome === 'failed') {
-      return 'error';
+      return 'danger';
     }
-    return candidate.outcome.startsWith('skipped_') ? 'warn' : '';
+    return candidate.outcome.startsWith('skipped_') ? 'warning' : 'neutral';
   }
 
   /**
@@ -76,6 +80,49 @@ export class DecisionPanel {
    */
   protected formatScore(value: number): string {
     return value.toFixed(3);
+  }
+
+  /** The price basis recorded with the decision (D34). */
+  protected basisLabel(candidate: DecisionCandidate): string {
+    switch (candidate.price_basis) {
+      case 'mix':
+        return 'mix';
+      case 'component_sum':
+        return 'component sum';
+      case 'unpriced':
+        return 'unpriced';
+      default:
+        return candidate.price_basis;
+    }
+  }
+
+  protected basisTone(candidate: DecisionCandidate): BadgeTone {
+    switch (candidate.price_basis) {
+      case 'mix':
+        return 'accent';
+      case 'component_sum':
+        return 'warning';
+      default:
+        return 'neutral';
+    }
+  }
+
+  /** The candidate's mix price, or an explicit dash (never $0.00). */
+  protected formatMixPrice(candidate: DecisionCandidate): string {
+    const mix = candidate.mix_price;
+    if (mix === null) {
+      return '—';
+    }
+    return Math.abs(mix.per_m) >= 1 ? `$${mix.per_m.toFixed(2)}` : `$${mix.per_m.toFixed(4)}`;
+  }
+
+  /** The candidate the session was pinned to, when this request listed it. */
+  protected pinnedCandidate(): DecisionCandidate | null {
+    const pinned = this.decision().sticky.pinned;
+    if (pinned === null) {
+      return null;
+    }
+    return this.decision().candidates.find((candidate) => candidate.id === pinned) ?? null;
   }
 
   private hasChosenId(): boolean {

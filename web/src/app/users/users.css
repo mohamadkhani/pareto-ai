@@ -1,27 +1,16 @@
-.form-card {
-  margin-bottom: 1rem;
-}
-
 .actions {
   white-space: nowrap;
 }
 
-.actions .btn {
-  margin-right: 0.35rem;
+.actions ui-button + ui-button {
+  margin-left: var(--space-2);
 }
 
-/* Admin accounts stand out from plain users. */
-.badge.role-admin {
-  background: #e3ecfb;
-  color: #24479f;
+.status-cell ui-badge + ui-badge {
+  margin-left: var(--space-1);
 }
 
-.warn-note {
-  margin: 0 0 0.75rem;
-  color: #7a4900;
-  background: #fff4e5;
-  border: 1px solid #b26a00;
-  border-radius: 8px;
-  padding: 0.65rem 0.9rem;
-  font-size: 0.9rem;
+/* The reset dialog carries the warning and the form with some breathing room. */
+.reset-panel form {
+  margin-top: var(--space-4);
 }

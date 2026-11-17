@@ -125,7 +125,7 @@ describe('Users', () => {
     expect(text).toContain('user@example.com');
     expect(text).toContain('password change required');
     expect(text).toContain('inactive');
-    expect(root.querySelectorAll('.badge.role-admin').length).toBe(1);
+    expect(root.querySelectorAll('ui-badge.tone-accent').length).toBe(1);
   });
 
   it('requires an email and a long enough password before creating', async () => {
@@ -184,12 +184,10 @@ describe('Users', () => {
     buttonByText(root, 'Edit').click();
     fixture.detectChanges();
     selectInto(root, '#edit-role', 'admin');
-    const active = root.querySelector<HTMLInputElement>('#edit-active');
+    const active = root.querySelector<HTMLButtonElement>('ui-switch button');
     expect(active).not.toBeNull();
-    if (active !== null) {
-      active.checked = false;
-      active.dispatchEvent(new Event('change'));
-    }
+    active?.click();
+    fixture.detectChanges();
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();

@@ -25,6 +25,7 @@ pub(crate) mod catalog;
 pub(crate) mod chat;
 pub(crate) mod grants;
 pub(crate) mod health;
+pub(crate) mod mix;
 pub(crate) mod money;
 pub(crate) mod openapi;
 pub(crate) mod providers;
@@ -125,6 +126,10 @@ fn api_surface(state: AppState) -> Router<AppState> {
             get(providers::list_credentials).post(providers::create_credential),
         )
         .route(
+            "/providers/{id}/discover-models",
+            axum::routing::post(providers::discover_models),
+        )
+        .route(
             "/credentials/{id}",
             get(providers::get_credential)
                 .patch(providers::update_credential)
@@ -143,10 +148,19 @@ fn api_surface(state: AppState) -> Router<AppState> {
             "/combos/{id}",
             axum::routing::put(routing::update_combo).delete(routing::delete_combo),
         )
+        .route("/combos/{id}/preview", get(routing::preview_saved_combo))
         .route("/benchmarks", get(routing::list_benchmarks))
         .route(
             "/benchmarks/import",
             axum::routing::post(routing::import_benchmarks),
+        )
+        .route(
+            "/benchmarks/sync",
+            axum::routing::post(routing::sync_benchmarks),
+        )
+        .route(
+            "/benchmarks/sync/status",
+            get(routing::benchmark_sync_status),
         )
         .route("/quality-overrides", get(routing::list_quality_overrides))
         .route(
@@ -154,11 +168,27 @@ fn api_surface(state: AppState) -> Router<AppState> {
             axum::routing::put(routing::set_quality_override)
                 .delete(routing::clear_quality_override),
         )
+        // Token-mix profiles and the pricing default (M6, decision D34).
+        .route(
+            "/mix-profiles",
+            get(mix::list_profiles).post(mix::create_profile),
+        )
+        .route(
+            "/mix-profiles/{id}",
+            axum::routing::put(mix::update_profile).delete(mix::delete_profile),
+        )
+        .route(
+            "/settings/pricing",
+            get(mix::get_pricing_settings).put(mix::put_pricing_settings),
+        )
         // Models, offerings, and prices.
         .route(
             "/models",
             get(catalog::list_models).post(catalog::create_model),
         )
+        // Static route before `/models/{id}` so "overview" is never read as a
+        // model id.
+        .route("/models/overview", get(catalog::models_overview))
         .route(
             "/models/{id}",
             get(catalog::get_model)
@@ -193,6 +223,13 @@ fn api_surface(state: AppState) -> Router<AppState> {
 
     Router::new()
         .route("/auth/login", axum::routing::post(auth::login))
+        // A preview is a read-like computation (no writes), so it is mounted
+        // outside the CSRF guard like login; the handler still requires an
+        // admin session.
+        .route(
+            "/combos/preview",
+            axum::routing::post(routing::preview_combo),
+        )
         .merge(csrf_protected)
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -302,7 +339,7 @@ async fn csrf_guard(
 
     let rid = error::request_id(req.headers());
     if let Some(token) = crate::auth::session_cookie_value(req.headers()) {
-        let session = crate::auth::load_session(&state.pool, &token)
+        let session = crate::auth::load_session(&state.pool, &token, &state.session_activity)
             .await
             .map_err(|e| ApiError::internal("resolving session", e).with_request_id(rid.clone()))?;
 
