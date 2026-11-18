@@ -20,8 +20,9 @@ Rules for every agent working in this repository. They are enforced by
 - **The task runner is `just`** (see `Justfile`): `just check` is the gate
   (Rust fmt/clippy/tests + api-only build + UI build/tests/formatting),
   `just build` produces the single production binary, `just build-api` the
-  api-only one, `just dev`/`just dev-ui` run the two halves. A change that
-  does not pass `just check` is not done.
+  api-only one, `just dev` runs both halves together (gateway plus the Angular
+  dev server on :4200), and `just dev-ui` runs only the frontend half. A change
+  that does not pass `just check` is not done.
 - **Never `git commit` or `git push`.** The supervising agent commits at
   milestone boundaries with Conventional Commits.
 

@@ -33,6 +33,7 @@ import type {
   ProviderBalancesView,
   SampleView,
 } from './connectors.types';
+import type { BreakerEntry, BreakerListResponse, BreakerResetInput } from './breaker.types';
 import type { ModelsOverview } from './overview.types';
 
 /**
@@ -149,6 +150,27 @@ export class CatalogService {
   deleteProvider(id: string): Promise<void> {
     return requestNoContent(`/api/providers/${id}`, {
       method: 'DELETE',
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
+  // --- breaker -------------------------------------------------------------
+
+  /** Every pair with live breaker state (D50). Admin only. */
+  async breakerSnapshot(): Promise<BreakerEntry[]> {
+    const response = await requestJson<BreakerListResponse>('/api/breaker');
+    return response.entries;
+  }
+
+  /** Closes one pair manually; audited as `breaker.reset`. Admin only. */
+  resetBreaker(credentialId: string, offeringId: string): Promise<void> {
+    const body: BreakerResetInput = {
+      credential_id: credentialId,
+      offering_id: offeringId,
+    };
+    return requestNoContent('/api/breaker/reset', {
+      method: 'POST',
+      body,
       csrfToken: this.auth.csrfToken(),
     });
   }

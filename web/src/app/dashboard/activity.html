@@ -1,0 +1,81 @@
+<ui-card class="recent-card">
+  <div ui-card-header class="card-head-row">
+    <span>Recent activity</span>
+    <a routerLink="/logs">View all</a>
+  </div>
+  @if (error(); as message) {
+    <ui-banner tone="danger" actionLabel="Retry" (actioned)="retry.emit()">{{ message }}</ui-banner>
+  } @else if (loading() && rows().length === 0) {
+    <div class="skeleton" aria-busy="true" aria-label="Loading recent requests">
+      <span class="skeleton-line"></span>
+      <span class="skeleton-line"></span>
+      <span class="skeleton-line is-short"></span>
+      <span class="visually-hidden">Loading recent requests…</span>
+    </div>
+  } @else {
+    <div class="recent-table">
+      <ui-table [dense]="true">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Time</th>
+              <th scope="col">User</th>
+              <th scope="col">Model</th>
+              <th scope="col">Provider</th>
+              <th scope="col">Status</th>
+              <th scope="col">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            @if (rows().length === 0) {
+              <tr>
+                <td colspan="6" class="recent-empty">No requests logged yet.</td>
+              </tr>
+            } @else {
+              @for (row of rows(); track row.entry.request_id) {
+                <tr>
+                  <td>
+                    <a [routerLink]="['/logs']">{{ formatTime(row.entry.occurred_at) }}</a>
+                  </td>
+                  <td>{{ row.user }}</td>
+                  <td>
+                    <code>{{ row.entry.requested_model ?? '—' }}</code>
+                  </td>
+                  <td>{{ row.provider }}</td>
+                  <td>
+                    <ui-badge [tone]="statusTone(row.entry.status)">{{
+                      statusLabel(row.entry.status)
+                    }}</ui-badge>
+                  </td>
+                  <td>{{ formatUsd(row.entry.cost_usd) }}</td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </ui-table>
+    </div>
+
+    <ul class="activity-list" aria-label="Recent requests">
+      @if (rows().length === 0) {
+        <li class="recent-empty">No requests logged yet.</li>
+      } @else {
+        @for (row of rows(); track row.entry.request_id) {
+          <li class="activity-item">
+            <div class="activity-top">
+              <a [routerLink]="['/logs']">{{ formatTime(row.entry.occurred_at) }}</a>
+              <ui-badge [tone]="statusTone(row.entry.status)">{{
+                statusLabel(row.entry.status)
+              }}</ui-badge>
+              <span class="activity-cost">{{ formatUsd(row.entry.cost_usd) }}</span>
+            </div>
+            <div class="activity-bottom">
+              <code>{{ row.entry.requested_model ?? '—' }}</code>
+              <span>{{ row.provider }}</span>
+            </div>
+          </li>
+        }
+      }
+    </ul>
+  }
+</ui-card>

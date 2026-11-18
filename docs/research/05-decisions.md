@@ -172,7 +172,7 @@ credentials can never be written unencrypted.
 ### D17. Credential header values are encrypted like the secret
 
 **Decision:** custom header values (credential and offering `headers_json`) are
-sealed with the same AES-256-GCM `SecretBox`, AAD = row id. Header *names* stay
+sealed with the same AES-256-GCM `SecretBox`, AAD = row id. Header _names_ stay
 plain so lists and audit rows can show them.
 
 **Why:** review finding M1 (2026-11-16,
@@ -188,7 +188,7 @@ values as write-only (names only in responses), so no API change.
 
 **Decision:** OpenRouter sync refreshes `context_length`, `max_output_tokens`,
 modalities and capabilities on every run; only prices have a `manual` override
-that sync never touches. Correcting a synced *parameter* by hand is not
+that sync never touches. Correcting a synced _parameter_ by hand is not
 supported in M2 and is an explicit follow-up (needs a "manually edited" marker).
 
 **Consequence:** recorded per review minor 5 (2026-11-16); operators must not
@@ -262,14 +262,14 @@ access through old keys.
 
 **Decision:** `cheapest` = price order, `fastest` = speed order, `best` =
 quality order — with **no penalties applied**; penalties exist only in
-`weighted`/`balanced`. Health is enforced by the *filters* (breaker, cooldown,
+`weighted`/`balanced`. Health is enforced by the _filters_ (breaker, cooldown,
 capability, budget) that run before any ordering.
 
 **Why:** review M3 (2026-11-16,
 [../reviews/2026-11-16-m5-routing.md](../reviews/2026-11-16-m5-routing.md)):
 penalties were applied under every preset, so `cheapest` could pick a more
 expensive offering — the documented contract was not guaranteed. A user who
-explicitly asks for "cheapest" should get price order among *eligible*
+explicitly asks for "cheapest" should get price order among _eligible_
 candidates; health concerns are what the filters and the breaker are for.
 
 **Consequence:** tests pin the pure orders and the filter boundary.
@@ -361,12 +361,12 @@ exist, and it forces the token discipline D28 needs.
 
 **Benchmark sources** (network-tested 2026-11-16 from this host):
 
-| Source | Endpoint | Reachable | License |
-| --- | --- | --- | --- |
-| Arena (WebDev) | `datasets-server.huggingface.co/rows?...lmarena-ai/leaderboard-dataset...` | yes (slow, ~20s) | CC BY 4.0 — attribution required |
-| BenchmarkList capability | `benchmarklist.com/directory-data/models.json` | yes (~11 MB) | check before shipping; attribute |
-| BenchLM | `benchlm.ai/_next/data/{build_id}/models.json` | yes | check; brittle (build id) |
-| OpenRouter prices/benchmarks | `openrouter.ai/api/...` | **blocked** | stays fixture-tested |
+| Source                       | Endpoint                                                                   | Reachable        | License                          |
+| ---------------------------- | -------------------------------------------------------------------------- | ---------------- | -------------------------------- |
+| Arena (WebDev)               | `datasets-server.huggingface.co/rows?...lmarena-ai/leaderboard-dataset...` | yes (slow, ~20s) | CC BY 4.0 — attribution required |
+| BenchmarkList capability     | `benchmarklist.com/directory-data/models.json`                             | yes (~11 MB)     | check before shipping; attribute |
+| BenchLM                      | `benchlm.ai/_next/data/{build_id}/models.json`                             | yes              | check; brittle (build id)        |
+| OpenRouter prices/benchmarks | `openrouter.ai/api/...`                                                    | **blocked**      | stays fixture-tested             |
 
 `llm-leaders` (`/home/mohamad/Projects/llm-leaders`) is **GPL-3.0**: use its
 README for the API contracts and matching ideas only — reimplement
@@ -413,12 +413,12 @@ component in routing and shown in the Models page; **never** used for billing
 
 Built-in presets (research: [12-token-mix.md](12-token-mix.md)):
 
-| Preset | input | output | cache read | Use |
-| --- | ---: | ---: | ---: | --- |
-| `code-agent` (default) | 8.1 | 0.4 | 91.5 | long agent sessions with warm cache |
-| `code-agent-nocache` | 99.6 | 0.4 | 0 | same work when prefixes do not survive |
-| `chat` | 74.0 | 26.0 | 0 | short assistants, one-shot tasks |
-| `long-context` | 97.0 | 3.0 | 0 | document analysis / batch summarisation |
+| Preset                 | input | output | cache read | Use                                     |
+| ---------------------- | ----: | -----: | ---------: | --------------------------------------- |
+| `code-agent` (default) |   8.1 |    0.4 |       91.5 | long agent sessions with warm cache     |
+| `code-agent-nocache`   |  99.6 |    0.4 |          0 | same work when prefixes do not survive  |
+| `chat`                 |  74.0 |   26.0 |          0 | short assistants, one-shot tasks        |
+| `long-context`         |  97.0 |    3.0 |          0 | document analysis / batch summarisation |
 
 Rules:
 
@@ -456,7 +456,7 @@ Rules:
 - The pool is resolved per request (after grants/budget/breaker filters), so
   access control and budgets still apply.
 - A **preview** endpoint returns the ranked candidates and the exclusions with
-  one-line reasons, computed by the *same* engine the runtime uses — the UI's
+  one-line reasons, computed by the _same_ engine the runtime uses — the UI's
   "which models this combo prioritizes" view must never drift from reality.
 
 **Why:** the user wants a combo like "best value coding models, quality >= X,
@@ -470,17 +470,17 @@ across turns (research: per-turn re-picking turns `code-agent` into
 `code-agent-nocache`, up to ~5x cost).
 
 - Config: `stickiness {enabled, ttl_seconds (default 1800), key_source:
-  "header"|"auto"}`; when enabled the combo keeps the choice keyed by
+"header"|"auto"}`; when enabled the combo keeps the choice keyed by
   `X-Session-Id` when present, otherwise by a stable hash of
   `(user or api key, system prompt + first user message)`.
 - State: `combo_sticky_choices(combo_id, session_key, offering_id, chosen_at,
-  expires_at)` with `(combo_id, session_key)` as the key and TTL pruning.
+expires_at)` with `(combo_id, session_key)` as the key and TTL pruning.
 - On each request: a valid pin is used only if the offering is still eligible
   (enabled, access, budget, breaker); otherwise the pool is re-scored and the
   pin is replaced. A failed pinned attempt may fail over, and the pin then moves
   to the offering that served the request.
 - Visible in `decision_json` (`sticky: {enabled, key_source, pinned, age_s,
-  replaced_why}`) and in the combo preview (the current pin per example key).
+replaced_why}`) and in the combo preview (the current pin per example key).
 - Applies to both combo pools; it is a no-op for `ordered` when the pinned
   member is still first.
 
@@ -597,11 +597,11 @@ not added: the Argon2 path is already below the 150 ms target.
 start (`<data>/master.key`, mode `0600`, reused; `GATEWAY_MASTER_KEY` still
 wins), and starts in **setup** mode instead of failing. The mode machine:
 
-| Mode | Condition | Behaviour |
-| --- | --- | --- |
-| `setup` | no user, no recorded skip | only `/health`, `/openapi.json`, `/api/setup/*`, and `/api/auth/*` |
+| Mode          | Condition                            | Behaviour                                                               |
+| ------------- | ------------------------------------ | ----------------------------------------------------------------------- |
+| `setup`       | no user, no recorded skip            | only `/health`, `/openapi.json`, `/api/setup/*`, and `/api/auth/*`      |
 | `unprotected` | no user, skip recorded in `settings` | `/api/*` and `/v1/*` act as a trusted local operator; sessions stay off |
-| `protected` | at least one user | the normal session + CSRF rules |
+| `protected`   | at least one user                    | the normal session + CSRF rules                                         |
 
 `GATEWAY_ADMIN_EMAIL` + `GATEWAY_ADMIN_PASSWORD` remain a non-interactive
 shortcut; half a configuration fails startup. The wizard's first admin is
@@ -758,6 +758,95 @@ was dropped within the day; the old AUR packages are deleted rather than
 migrated. Binary names (`pareto-gateway`, `pareto-desktop`) and the daemon
 unit (`pareto-gateway.service`) are unchanged.
 
+### D48. Drawers for sub-resource work, bottom sheets on phones
+
+**Decision (user, 2026-11-18):** content that belongs to one selected record —
+provider credentials, model discovery, connector editing — opens in a
+right-edge drawer on desktop instead of expanding inline in a list. A drawer is
+a modal task surface: the list stays visible as context, the task gets the full
+height, and the panel slides in from the right. Below 40rem the same
+`variant="drawer"` becomes a bottom sheet
+(full width, about 92dvh, rounded top edge, safe-area padding). One variant
+keeps pages from branching on the viewport.
+
+Drawers are not the default for every dialog. Short standalone forms (new
+provider, new key) and confirmations stay centred modals; confirmations sit
+above a drawer when they belong to it. Content that is too wide for a drawer
+(e.g. mix profiles and combo previews) keeps its wide centred modal. A
+`size="lg"` drawer (56rem) exists for editors that show a sample or preview.
+
+Creation and editing stay inside the drawer that owns the list (the
+credentials drawer swaps between list and form) instead of stacking a second
+dialog. Compact inline controls use `size="sm"` so selects and inputs match
+`ui-button size="sm"` at 32px.
+
+**Consequences:** `UiDialog` gains the sheet behavior and the `size` input, and
+both appear on `/styleguide` (D28). The user drawer inherits the 34rem width
+and the phone sheet. Inline expandable panels are no longer used for provider
+credentials.
+
+### D49. Upstream errors are captured for the operator, never for the caller
+
+**Decision (user, 2026-11-19):** every failed attempt records an **error
+detail** — the provider's `error.message`, its own `type`/`code`, its request
+id, and the HTTP status — for all three failure paths: a non-2xx response, an
+error event inside a stream, and a transport/timeout failure (which has no
+provider text and records the transport message instead). The detail is stored
+for **every attempt**, including attempts that failover later recovered.
+
+Detail is bounded and redacted: message ≤512 characters (2 KiB is not used),
+`type`/`code` ≤64, provider request id ≤128, and a non-JSON body falls back to
+its first 512 characters. The credential secret, every custom header value, and
+common key shapes (`sk-…`, `Bearer …`) are removed before storage; a value that
+still looks like a secret is dropped entirely. No request or response body and
+no headers are stored. Capture is always on, with no setting.
+
+Storage: `telemetry_attempts` gains `upstream_status`, `provider_error_code`
+and `error_detail`; `request_logs` gains `error_detail` for the final failure of
+a request. `telemetry_attempts` keeps its existing 200-row-per-offering
+retention, so per-attempt detail is a recent window; `request_logs` is the
+durable record. `GET /api/logs` returns the final error class and detail and
+gains `status`, `error_class`, `provider` and `offering` filters; a new
+`GET /api/logs/{request_id}/attempts` returns every attempt with its detail.
+The console shows this in `/logs` (row expansion) and in a 24-hour
+provider-grouped error card on the dashboard.
+
+The caller-facing message is unchanged: `/v1` keeps the fixed, secret-free
+strings from `failure_from_class`. This entry is an explicit exception to D11:
+a bounded error excerpt is metadata, not body capture.
+
+**Why:** today the provider's response body is dropped at the source
+(`server/src/upstream/mod.rs:356-363`) and only an error class survives, so an
+operator cannot tell a bad model id from an exhausted account or a provider
+outage. Exposing the same text to `/v1` callers would leak account and model
+detail, which `error.rs` and the M3 contract deliberately avoid.
+
+**Consequence:** a provider that echoes the API key in its error message cannot
+leak it into the database; a very long provider error is truncated. Error text
+in `telemetry_attempts` disappears after the 200-row window, which is accepted.
+
+### D50. Breaker state, trips and manual reset are operator-visible
+
+**Decision (user, 2026-11-19):** the in-memory breaker snapshot is exposed in
+the console under `/providers`, grouped by credential with its offerings
+nested, listing **every** pair that has state (closed and open) with its
+consecutive-failure count, state, and the error class plus bounded, redacted
+error detail of its last failure. Open pairs show `open_until`. A
+`breaker_trips` table records each trip with provider, credential, offering,
+time, consecutive-failure count, last error class and the same bounded detail;
+rows older than 30 days are pruned on insert. The snapshot comes from memory and
+resets on restart; the trip history survives it. An admin endpoint resets one
+pair to closed, writes an audit entry, and is session-guarded with CSRF like
+other admin mutations.
+
+**Why:** after a trip, `decision_json` is the only trace
+(`skipped_breaker_open`); an operator cannot see which pair is open, why, or
+since when, and a restart erases the evidence. Trip rows are rare (one per five
+consecutive failures), so persistence is cheap.
+
+**Consequence:** a trip is recorded even when the process later restarts;
+resetting a pair is an audited admin action, not a hidden operator trick.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or
@@ -783,15 +872,15 @@ unit (`pareto-gateway.service`) are unchanged.
 
 ## Risks
 
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
-| Provider prices and model IDs change constantly | Wrong routing, wrong bills | Provenance, staleness limits, manual overrides, sync jobs |
-| Benchmarks are noisy and model-level | Misleading "best" | Confidence weighting, show source and date, allow weights |
-| Speed telemetry is sparse at first | Bad decisions | Neutral default, minimum sample count, explore/exploit |
-| Budget races | Overspend | Reservations + reconciler |
-| Streaming failover complexity | Hangs, duplicate output | Strict "no failover after first byte" rule |
-| Secret leakage | Compromised upstream accounts | Encryption at rest, hashing, redaction, audit |
-| Scope creep toward OmniRoute | Never ships | Fixed P0/P1 list, explicit non-goals |
+| Risk                                            | Impact                        | Mitigation                                                |
+| ----------------------------------------------- | ----------------------------- | --------------------------------------------------------- |
+| Provider prices and model IDs change constantly | Wrong routing, wrong bills    | Provenance, staleness limits, manual overrides, sync jobs |
+| Benchmarks are noisy and model-level            | Misleading "best"             | Confidence weighting, show source and date, allow weights |
+| Speed telemetry is sparse at first              | Bad decisions                 | Neutral default, minimum sample count, explore/exploit    |
+| Budget races                                    | Overspend                     | Reservations + reconciler                                 |
+| Streaming failover complexity                   | Hangs, duplicate output       | Strict "no failover after first byte" rule                |
+| Secret leakage                                  | Compromised upstream accounts | Encryption at rest, hashing, redaction, audit             |
+| Scope creep toward OmniRoute                    | Never ships                   | Fixed P0/P1 list, explicit non-goals                      |
 
 ## Next actions
 

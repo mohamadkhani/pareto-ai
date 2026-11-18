@@ -23,6 +23,8 @@
 
 use serde_json::Value;
 
+use crate::upstream::detail::ProviderError;
+
 /// Token counts as reported by an OpenAI-compatible `usage` object. Fields the
 /// upstream omits stay `None` and are stored as NULL — never as 0. A negative
 /// count is garbage from a broken upstream and is clamped to `0` at parse
@@ -116,6 +118,10 @@ pub struct SseInspector {
     pub saw_done: bool,
     /// A `data:` payload was not JSON, or carried a non-null `error`.
     pub protocol_error: bool,
+    /// The provider's own error object from the last error payload (D49):
+    /// its code and message, redacted by the caller with the stream's
+    /// [`crate::upstream::detail::Redactor`] before storage.
+    pub provider_error: Option<ProviderError>,
     /// The line buffer overflowed [`MAX_LINE_BYTES`]; the stream is doomed and
     /// nothing else is inspected.
     pub overflowed: bool,
@@ -195,8 +201,9 @@ impl SseInspector {
         match serde_json::from_str::<serde_json::Value>(&text) {
             Err(_) => self.protocol_error = true,
             Ok(payload) => {
-                if payload.get("error").is_some_and(|e| !e.is_null()) {
+                if let Some(error) = crate::upstream::detail::provider_error(&payload) {
                     self.protocol_error = true;
+                    self.provider_error = Some(error);
                 }
                 self.output_chars += content_chars(&payload);
                 if let Some(usage) = usage_from_json(&payload) {
@@ -208,21 +215,26 @@ impl SseInspector {
 }
 
 /// Extracts `usage` and content characters from a non-streaming response body
-/// and flags an unparseable or errored body, mirroring what [`SseInspector`]
-/// does for streams. Content characters: `choices[].message.content` (plus
-/// `reasoning`), never the JSON scaffolding (review M1).
-pub fn inspect_json_body(body: &[u8]) -> (Option<Usage>, usize, bool) {
+/// and reports the provider's error object (or a synthetic one for an
+/// unparseable body), mirroring what [`SseInspector`] does for streams.
+/// Content characters: `choices[].message.content` (plus `reasoning`), never
+/// the JSON scaffolding (review M1).
+pub fn inspect_json_body(body: &[u8]) -> (Option<Usage>, usize, Option<ProviderError>) {
     let text = String::from_utf8_lossy(body);
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Err(_) => (None, 0, true),
-        Ok(payload) => {
-            let protocol_error = payload.get("error").is_some_and(|e| !e.is_null());
-            (
-                usage_from_json(&payload),
-                content_chars(&payload),
-                protocol_error,
-            )
-        }
+        Err(_) => (
+            None,
+            0,
+            Some(ProviderError {
+                code: None,
+                message: "the response body was not valid JSON".to_string(),
+            }),
+        ),
+        Ok(payload) => (
+            usage_from_json(&payload),
+            content_chars(&payload),
+            crate::upstream::detail::provider_error(&payload),
+        ),
     }
 }
 
@@ -342,6 +354,13 @@ mod tests {
             error_event.protocol_error,
             "upstream error events are failures"
         );
+        assert_eq!(
+            error_event
+                .provider_error
+                .as_ref()
+                .map(|error| error.message.as_str()),
+            Some("boom")
+        );
 
         let mut ok = SseInspector::new();
         ok.push(b": keep-alive\n\nevent: message\ndata: {\"usage\":{}}\n\n");
@@ -371,16 +390,16 @@ mod tests {
 
         // A non-streaming body mirrors the stream: "hello", not 43 characters.
         let body = br#"{"choices":[{"message":{"content":"hello"}}]}"#;
-        let (usage, chars, protocol_error) = inspect_json_body(body);
+        let (usage, chars, error) = inspect_json_body(body);
         assert!(usage.is_none(), "no usage field means no usage");
         assert_eq!(chars, 5);
-        assert!(!protocol_error);
-        let (_, chars, protocol_error) = inspect_json_body(b"not json");
+        assert!(error.is_none());
+        let (_, chars, error) = inspect_json_body(b"not json");
         assert_eq!(chars, 0, "unparseable bodies claim no content");
-        assert!(protocol_error, "an unparseable body is a body failure");
-        let (usage, _, protocol_error) = inspect_json_body(br#"{"error":{"message":"x"}}"#);
+        assert!(error.is_some(), "an unparseable body is a body failure");
+        let (usage, _, error) = inspect_json_body(br#"{"error":{"message":"x"}}"#);
         assert!(usage.is_none());
-        assert!(protocol_error);
+        assert_eq!(error.expect("error").message, "x");
     }
 
     #[test]

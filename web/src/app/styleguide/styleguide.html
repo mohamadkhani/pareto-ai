@@ -89,6 +89,9 @@
           <span class="theme-tag">Light</span>
           <ui-button variant="primary" (clicked)="lightDialog.set(true)">Open dialog</ui-button>
           <ui-button variant="secondary" (clicked)="lightDrawer.set(true)">Open drawer</ui-button>
+          <ui-button variant="secondary" (clicked)="lightWideDrawer.set(true)">
+            Open wide drawer
+          </ui-button>
           <ui-dialog [(open)]="lightDialog" title="Delete offering">
             <p>
               This removes the offering and its price. Requests already routed keep their log entry.
@@ -101,10 +104,20 @@
           <ui-dialog variant="drawer" [(open)]="lightDrawer" title="Account drawer">
             <p>
               The drawer pins this same native dialog to the right edge. Focus is trapped, Escape
-              closes, and closing returns focus to the trigger.
+              closes, and closing returns focus to the trigger. Below 40rem it becomes a bottom
+              sheet.
             </p>
             <div ui-dialog-actions>
               <ui-button (clicked)="lightDrawer.set(false)">Close</ui-button>
+            </div>
+          </ui-dialog>
+          <ui-dialog variant="drawer" size="lg" [(open)]="lightWideDrawer" title="Wide drawer">
+            <p>
+              <code>size="lg"</code> widens the drawer to 56rem for editors that show a sample or a
+              preview. The sheet behavior on small screens is the same.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="lightWideDrawer.set(false)">Close</ui-button>
             </div>
           </ui-dialog>
         </div>
@@ -112,6 +125,9 @@
           <span class="theme-tag">Dark</span>
           <ui-button variant="primary" (clicked)="darkDialog.set(true)">Open dialog</ui-button>
           <ui-button variant="secondary" (clicked)="darkDrawer.set(true)">Open drawer</ui-button>
+          <ui-button variant="secondary" (clicked)="darkWideDrawer.set(true)">
+            Open wide drawer
+          </ui-button>
           <ui-dialog [(open)]="darkDialog" title="Delete offering">
             <p>
               This removes the offering and its price. Requests already routed keep their log entry.
@@ -124,10 +140,20 @@
           <ui-dialog variant="drawer" [(open)]="darkDrawer" title="Account drawer">
             <p>
               The drawer pins this same native dialog to the right edge. Focus is trapped, Escape
-              closes, and closing returns focus to the trigger.
+              closes, and closing returns focus to the trigger. Below 40rem it becomes a bottom
+              sheet.
             </p>
             <div ui-dialog-actions>
               <ui-button (clicked)="darkDrawer.set(false)">Close</ui-button>
+            </div>
+          </ui-dialog>
+          <ui-dialog variant="drawer" size="lg" [(open)]="darkWideDrawer" title="Wide drawer">
+            <p>
+              <code>size="lg"</code> widens the drawer to 56rem for editors that show a sample or a
+              preview. The sheet behavior on small screens is the same.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="darkWideDrawer.set(false)">Close</ui-button>
             </div>
           </ui-dialog>
         </div>
@@ -227,6 +253,15 @@
         <ui-field label="Disabled input" hint="Read-only values use the disabled state.">
           <ui-input value="locked" [disabled]="true" />
         </ui-field>
+        <ui-field label="Compact select" hint="Matches a small button in a toolbar.">
+          <ui-select size="sm" [(value)]="compactSelect">
+            <option value="warn">warn</option>
+            <option value="block">block</option>
+          </ui-select>
+        </ui-field>
+        <ui-field label="Compact input">
+          <ui-input size="sm" value="1,000" />
+        </ui-field>
       </div>
       <p class="note">
         Focus state: tab to any control; every type uses the same accent border and focus ring.
@@ -271,6 +306,15 @@
           <code>openai/gpt-5</code> via <code>openrouter</code> — $1.25 in / $5.00 out per 1M.
         </p>
         <div ui-card-footer><ui-button size="sm">Edit offering</ui-button></div>
+      </ui-card>
+      <ui-card [interactive]="true">
+        <a ui-card-header class="card-example-link" href="#interactive-card">
+          Interactive summary
+        </a>
+        <p class="card-copy">
+          Hover or focus this card to see the border emphasis; the header link is the whole
+          affordance, not the surface.
+        </p>
       </ui-card>
     </section>
 
@@ -333,6 +377,25 @@
         </span>
         <span ui-empty-action><ui-button size="sm">New offering</ui-button></span>
       </ui-empty>
+      <ui-empty
+        [compact]="true"
+        title="No requests yet"
+        description="Traffic appears here after the first proxied request."
+      >
+        <span ui-empty-action><a href="#compact-empty">Connect a provider</a></span>
+      </ui-empty>
+    </section>
+
+    <section class="block">
+      <h3>Sparkline</h3>
+      <ui-sparkline
+        [values]="[0, 1, 0.5, 2, 1.5, 3, 2.5]"
+        label="Priced spend over the last 7 days: $10.50"
+      />
+      <p class="note">
+        A non-interactive trend line. Flat or all-zero series draw through the middle; the label is
+        the accessible description.
+      </p>
     </section>
 
     <section class="block">

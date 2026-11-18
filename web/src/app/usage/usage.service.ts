@@ -1,6 +1,8 @@
 import { Injectable } from '@angular/core';
 import { requestJson } from '../api';
 import type {
+  ErrorSummaryRow,
+  LogAttempt,
   LogCursor,
   LogPage,
   MyUsageReport,
@@ -38,6 +40,14 @@ export interface LogQuery {
   cursor?: LogCursor;
   /** Narrow to one user id. */
   user?: string;
+  /** Exact settled status, e.g. `502`. */
+  status?: number;
+  /** Taxonomy code, e.g. `upstream_auth`. */
+  errorClass?: string;
+  /** Narrow to one provider id. */
+  provider?: string;
+  /** Narrow to one offering id. */
+  offering?: string;
 }
 
 /** Read access to the usage reports and the request logs. */
@@ -70,8 +80,9 @@ export class UsageService {
   /**
    * Loads one page of request logs, newest first. `cursor` is the previous
    * page's `next_cursor`, a composite `before`/`before_request_id` position
-   * that does not skip entries sharing one millisecond. The log endpoint has
-   * no date-range filter — only `limit`, the cursor, and `user`. Admin only.
+   * that does not skip entries sharing one millisecond. The filters are the
+   * server's `user`, `status`, `error_class`, `provider`, and `offering`
+   * (D49). Admin only.
    */
   async listLogs(query: LogQuery): Promise<LogPage> {
     const params = new URLSearchParams({ limit: String(query.limit) });
@@ -82,8 +93,30 @@ export class UsageService {
     if (query.user !== undefined) {
       params.set('user', query.user);
     }
+    if (query.status !== undefined) {
+      params.set('status', String(query.status));
+    }
+    if (query.errorClass !== undefined) {
+      params.set('error_class', query.errorClass);
+    }
+    if (query.provider !== undefined) {
+      params.set('provider', query.provider);
+    }
+    if (query.offering !== undefined) {
+      params.set('offering', query.offering);
+    }
     const response = await requestJson<LogListResponse>(`/api/logs?${params.toString()}`);
     return { entries: response.entries, next_cursor: response.next_cursor ?? null };
+  }
+
+  /** Every attempt of one request, oldest first (D49). Admin only. */
+  async listAttempts(requestId: string): Promise<LogAttempt[]> {
+    return requestJson<LogAttempt[]>(`/api/logs/${encodeURIComponent(requestId)}/attempts`);
+  }
+
+  /** Failed attempts per provider in the last `hours` (D49). Admin only. */
+  async errorSummary(hours = 24): Promise<ErrorSummaryRow[]> {
+    return requestJson<ErrorSummaryRow[]>(`/api/errors/summary?hours=${hours}`);
   }
 }
 

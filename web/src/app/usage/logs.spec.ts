@@ -1,5 +1,6 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
+import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { FetchMock, jsonResponse } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { UserView } from '../users/users.types';
@@ -47,6 +48,7 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     decision_json: null,
     status: 200,
     error_class: null,
+    error_detail: null,
     bytes_in: 10,
     bytes_out: 20,
     user_id: 'u1',
@@ -84,6 +86,8 @@ describe('Logs', () => {
 
   beforeEach(() => {
     fetchMock = new FetchMock();
+    fetchMock.respondTo('/api/providers', () => jsonResponse(200, []));
+    fetchMock.respondTo('/api/logs/', () => jsonResponse(200, []));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 
@@ -94,7 +98,13 @@ describe('Logs', () => {
   async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Logs>> {
     TestBed.configureTestingModule({
       imports: [Logs],
-      providers: [{ provide: AuthService, useValue: authStub(role) }],
+      providers: [
+        { provide: AuthService, useValue: authStub(role) },
+        {
+          provide: ActivatedRoute,
+          useValue: { snapshot: { queryParamMap: convertToParamMap({}) } },
+        },
+      ],
     });
     await TestBed.compileComponents();
     const fixture = TestBed.createComponent(Logs);
@@ -151,7 +161,9 @@ describe('Logs', () => {
     expect(text).toContain('403 access');
     // Both refusals carry the row highlight and the labelled refusal badge.
     expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
-    expect(root.querySelectorAll('tbody tr.money-event ui-badge.tone-danger').length).toBe(2);
+    expect(
+      root.querySelectorAll('tbody tr.money-event td:nth-child(5) ui-badge.tone-danger').length,
+    ).toBe(2);
     expect(
       root.querySelector('ui-badge[title="Refused: access denied"]')?.textContent?.trim(),
     ).toBe('403 access');
@@ -248,7 +260,7 @@ describe('Logs', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Why this model').click();
+    buttonByText(root, 'Details').click();
     fixture.detectChanges();
 
     expect(root.querySelector('app-decision-panel')).not.toBeNull();
@@ -257,9 +269,9 @@ describe('Logs', () => {
     expect(root.querySelector('tr.chosen')).not.toBeNull();
     // The state lives on the real <button>, not on the <ui-button> host.
     const expanded = root.querySelector<HTMLButtonElement>('button[aria-expanded="true"]');
-    expect(expanded?.getAttribute('aria-controls')).toBe('decision-r0');
+    expect(expanded?.getAttribute('aria-controls')).toBe('details-r0');
     expect(root.querySelector('ui-button[aria-expanded]')).toBeNull();
-    expect(root.querySelector('#decision-r0')).not.toBeNull();
+    expect(root.querySelector('#details-r0')).not.toBeNull();
 
     buttonByText(root, 'Hide').click();
     fixture.detectChanges();
@@ -277,7 +289,7 @@ describe('Logs', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Why this model').click();
+    buttonByText(root, 'Details').click();
     fixture.detectChanges();
 
     expect(root.querySelector('app-decision-panel')).toBeNull();

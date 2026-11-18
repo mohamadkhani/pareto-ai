@@ -7,6 +7,7 @@ import {
   input,
   output,
   signal,
+  viewChild,
 } from '@angular/core';
 import { CatalogService } from './catalog.service';
 import { BalanceCache } from './balance-cache';
@@ -23,12 +24,10 @@ import { type HeaderRow, HeadersEditor, headerMapOf } from './headers-editor';
 import { UiBadge, type BadgeTone } from '../ui/badge';
 import { UiBanner, type BannerTone } from '../ui/banner';
 import { UiButton } from '../ui/button';
-import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
 import { UiInput } from '../ui/input';
 import { UiSelect } from '../ui/select';
-import { UiTable } from '../ui/table';
 
 /** The credential form's text fields; numbers stay strings until saved. */
 interface CredentialDraft {
@@ -60,18 +59,7 @@ export interface CredentialChange {
  */
 @Component({
   selector: 'app-credentials',
-  imports: [
-    HeadersEditor,
-    UiBadge,
-    UiBanner,
-    UiButton,
-    UiDialog,
-    UiEmpty,
-    UiField,
-    UiInput,
-    UiSelect,
-    UiTable,
-  ],
+  imports: [HeadersEditor, UiBadge, UiBanner, UiButton, UiEmpty, UiField, UiInput, UiSelect],
   templateUrl: './credentials.html',
   styleUrl: './credentials.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -87,6 +75,8 @@ export class Credentials {
    * its cached counts and the Load models credential picker.
    */
   readonly changed = output<CredentialChange>();
+  /** The drawer's Close action; the parent owns the dialog wrapper. */
+  readonly closed = output<void>();
 
   protected readonly credentials = signal<Credential[]>([]);
   protected readonly loading = signal(false);
@@ -122,6 +112,7 @@ export class Credentials {
   );
 
   private readonly providerId = computed(() => this.provider().id);
+  private readonly confirmDeleteButton = viewChild<UiButton>('deleteButton');
 
   constructor() {
     effect(() => {
@@ -129,6 +120,11 @@ export class Credentials {
       this.formOpen.set(false);
       this.editing.set(null);
       void this.load(providerId);
+    });
+    effect(() => {
+      if (this.deleting() !== null) {
+        queueMicrotask(() => this.confirmDeleteButton()?.focus());
+      }
     });
   }
 
@@ -345,6 +341,16 @@ export class Credentials {
     } finally {
       this.deletePending.set(false);
     }
+  }
+
+  /** When the balance was last refreshed or recorded, or null if it never was. */
+  protected balanceAge(credential: Credential): string | null {
+    const at = credential.balance_fetched_at ?? credential.balance_updated_at;
+    return at === null ? null : `updated ${formatAge(at)}`;
+  }
+
+  protected lastTestedLabel(credential: Credential): string {
+    return credential.last_tested_at === null ? 'never' : formatAge(credential.last_tested_at);
   }
 
   protected statusTone(status: Credential['status']): BadgeTone {

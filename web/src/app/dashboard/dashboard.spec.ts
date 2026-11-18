@@ -202,6 +202,7 @@ describe('Dashboard', () => {
 
   beforeEach(() => {
     fetchMock = new FetchMock();
+    fetchMock.respondTo('/api/errors/summary', () => jsonResponse(200, []));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 

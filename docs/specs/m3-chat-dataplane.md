@@ -118,6 +118,12 @@ request_logs(request_id TEXT PK, client_request_id TEXT, occurred_at TEXT NOT
 
 All with the standard `{error: {code, message, request_id}}` shape.
 
+The class, message, and request id above are what the caller sees. The
+provider's own error text is **not** part of this response: it is captured
+separately for the operator, bounded and redacted, per attempt (D49). See
+`GET /api/logs/{request_id}/attempts` and the `error_detail` column of
+`request_logs`.
+
 ## Testing (fake upstream, no network)
 
 `server/src/upstream/tests.rs` or `server/tests/` with a scripted local

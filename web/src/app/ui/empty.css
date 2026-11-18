@@ -35,3 +35,27 @@
 .action:not(:empty) {
   margin-top: var(--space-2);
 }
+
+:host(.is-compact) .empty {
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+:host(.is-compact) .icon:not(:empty) {
+  margin: 0;
+}
+
+:host(.is-compact) .title {
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+}
+
+:host(.is-compact) .description {
+  max-width: none;
+  font-size: var(--text-small);
+}

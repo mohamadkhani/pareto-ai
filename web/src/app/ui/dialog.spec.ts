@@ -37,6 +37,17 @@ describe('UiDialog', () => {
     expect(dialog?.classList.contains('dialog--drawer')).toBe(true);
   });
 
+  it('widens the drawer only when size is lg', async () => {
+    const fixture = await create();
+    const dialog = (fixture.nativeElement as HTMLElement).querySelector('dialog');
+    expect(dialog?.classList.contains('dialog--wide')).toBe(false);
+
+    fixture.componentRef.setInput('variant', 'drawer');
+    fixture.componentRef.setInput('size', 'lg');
+    fixture.detectChanges();
+    expect(dialog?.classList.contains('dialog--wide')).toBe(true);
+  });
+
   it('names the dialog from its title', async () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;

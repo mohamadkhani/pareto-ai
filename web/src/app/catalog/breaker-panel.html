@@ -1,0 +1,107 @@
+<section class="breaker">
+  <header class="breaker-head">
+    <div>
+      <h2>Breaker</h2>
+      <p class="hint">
+        One guard per credential and offering. A pair opens after consecutive failed attempts and is
+        excluded from routing until the cooldown ends. Live state resets on restart; trip history
+        stays in the database.
+      </p>
+    </div>
+    <div class="breaker-actions">
+      <ui-switch [(checked)]="openOnly" label="Open only" />
+      <ui-button size="sm" [disabled]="loading()" [loading]="loading()" (clicked)="reload()">
+        Refresh
+      </ui-button>
+    </div>
+  </header>
+
+  @if (actionError(); as error) {
+    <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+      {{ error }}
+    </ui-banner>
+  }
+  @if (notice(); as message) {
+    <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+      {{ message }}
+    </ui-banner>
+  }
+
+  @if (loadError(); as error) {
+    <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">{{ error }}</ui-banner>
+  } @else if (loading() && entries().length === 0) {
+    <div class="loading"><ui-spinner size="sm" label="Loading breaker state" /> Loading…</div>
+  } @else if (groups().length === 0) {
+    <ui-empty
+      title="No breaker state"
+      description="No pair has recorded a failure since the gateway started."
+    />
+  } @else {
+    @for (group of groups(); track group.credentialId) {
+      <details class="credential-group" [open]="group.open">
+        <summary>
+          <span class="summary-main">
+            <strong>{{ group.provider }}</strong>
+            <span>·</span>
+            <span>{{ group.credential }}</span>
+          </span>
+          <ui-badge [tone]="group.open ? 'danger' : 'neutral'">
+            {{ group.open ? 'open' : 'closed' }}
+          </ui-badge>
+        </summary>
+
+        <table class="breaker-table">
+          <thead>
+            <tr>
+              <th scope="col">Offering</th>
+              <th scope="col">State</th>
+              <th scope="col">Streak</th>
+              <th scope="col">Opens</th>
+              <th scope="col">Closes in</th>
+              <th scope="col">Last error</th>
+              <th scope="col">Provider detail</th>
+              <th scope="col"></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of group.rows; track rowKey(row)) {
+              <tr>
+                <td>
+                  <code>{{ row.offering }}</code>
+                </td>
+                <td>
+                  <ui-badge [tone]="statusTone(row.entry.status)">{{
+                    statusLabel(row.entry.status)
+                  }}</ui-badge>
+                </td>
+                <td>{{ row.entry.consecutive }}</td>
+                <td>{{ row.entry.trips }}</td>
+                <td>{{ openFor(row.entry) }}</td>
+                <td>
+                  @if (row.entry.last_error_class) {
+                    <code>{{ row.entry.last_error_class }}</code>
+                  } @else {
+                    —
+                  }
+                </td>
+                <td class="detail-text">{{ row.entry.last_error_detail ?? '—' }}</td>
+                <td class="row-action">
+                  @if (row.entry.status !== 'closed') {
+                    <ui-button
+                      size="sm"
+                      variant="ghost"
+                      [disabled]="resetting() === rowKey(row)"
+                      (clicked)="reset(row)"
+                    >
+                      Reset
+                    </ui-button>
+                  }
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </details>
+    }
+  }
+</section>

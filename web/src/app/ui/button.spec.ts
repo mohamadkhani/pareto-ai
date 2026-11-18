@@ -18,6 +18,14 @@ describe('UiButton', () => {
     expect(button?.disabled).toBe(false);
   });
 
+  it('moves focus to the native button on request', async () => {
+    const fixture = await create();
+    const button = (fixture.nativeElement as HTMLElement).querySelector('button');
+    fixture.componentInstance.focus();
+
+    expect(document.activeElement).toBe(button);
+  });
+
   it('emits clicked only when enabled', async () => {
     const fixture = await create();
     const clicked = vi.fn();

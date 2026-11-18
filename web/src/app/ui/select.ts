@@ -19,12 +19,15 @@ import { UI_FIELD } from './field';
   templateUrl: './select.html',
   styleUrls: ['./control.css', './select.css'],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '[class.size-sm]': "size() === 'sm'" },
   providers: [{ provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => UiSelect), multi: true }],
 })
 export class UiSelect implements ControlValueAccessor {
   protected readonly field = inject(UI_FIELD, { optional: true });
 
   readonly id = input<string>('');
+  /** Compact height for toolbars and inline rows; matches `ui-button size="sm"`. */
+  readonly size = input<'sm' | 'md'>('md');
   readonly value = model<string>('');
   readonly disabled = input(false);
   readonly name = input<string>('');

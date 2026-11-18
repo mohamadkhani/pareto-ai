@@ -28,8 +28,48 @@
   white-space: nowrap;
 }
 
-/* The expanded "why this model" panel spans the whole row. */
-.ui-table tbody tr.decision-row td {
+/* The expanded details span the whole row. */
+.ui-table tbody tr.details-row td {
   background: var(--bg);
   padding: var(--space-3) var(--space-4);
+}
+
+.attempts,
+.error-detail,
+.routing {
+  margin-bottom: var(--space-4);
+}
+
+.attempts h3,
+.error-detail h3,
+.routing h3 {
+  font-size: var(--text-h3);
+  margin: 0 0 var(--space-2);
+}
+
+.detail-text {
+  color: var(--text-muted);
+  font-size: var(--text-small);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.attempts-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.attempts-table th,
+.attempts-table td {
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-small);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  vertical-align: top;
+}
+
+.attempts-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
 }

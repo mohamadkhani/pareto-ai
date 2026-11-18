@@ -115,19 +115,12 @@ function isBusy(root: ParentNode): boolean {
   return root.querySelector('[aria-busy="true"]') !== null;
 }
 
-function disclosure(root: HTMLElement): HTMLButtonElement {
-  const button = root.querySelector('.row-disclosure');
-  if (!(button instanceof HTMLButtonElement)) {
-    throw new Error('no row disclosure button');
-  }
-  return button;
-}
-
 describe('Providers', () => {
   let fetchMock: FetchMock;
 
   beforeEach(() => {
     fetchMock = new FetchMock();
+    fetchMock.respondTo('/api/breaker', () => jsonResponse(200, { entries: [] }));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 
@@ -216,12 +209,13 @@ describe('Providers', () => {
     expect(text).toContain('enabled');
     expect(text).toContain('disabled');
     expect(text).toContain('never');
-    expect(root.querySelectorAll('tbody tr')).toHaveLength(2);
+    expect(root.querySelectorAll('.provider-card')).toHaveLength(2);
 
-    const firstRow = root.querySelector('tbody tr');
-    const counts = Array.from(firstRow?.querySelectorAll('td.num') ?? []).map(
-      (cell) => cell.textContent?.trim() ?? '',
-    );
+    const firstRow = root.querySelector('.provider-card');
+    const counts = [
+      firstRow?.querySelector('.credential-count')?.textContent?.trim() ?? '',
+      firstRow?.querySelector('.offering-count')?.textContent?.trim() ?? '',
+    ];
     expect(counts).toEqual(['2', '1']);
     expect(fetchMock.requests.map((call) => call.url)).toEqual([
       '/api/providers',
@@ -350,32 +344,35 @@ describe('Providers', () => {
     expect(root.textContent).toContain('No providers yet');
   });
 
-  it('nests the credentials panel under the selected provider', async () => {
+  it('opens credentials in a drawer from the provider card', async () => {
     queueLoad([providerFixture()], { p1: [credentialFixture()] });
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
-    const toggle = disclosure(root);
 
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(toggle.getAttribute('aria-controls')).toBe('credentials-p1');
-    expect(root.querySelector('#credentials-p1')).toBeNull();
+    expect(root.querySelector('.provider-detail')).toBeNull();
+    const drawer = root.querySelector<HTMLDialogElement>('.credentials-drawer dialog');
+    expect(drawer?.hasAttribute('open')).toBe(false);
 
+    // Opening the drawer mounts the credentials panel and re-reads the list.
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    toggle.click();
+    (await waitForButton(fixture, root, 'Credentials')).click();
     await waitForText(fixture, root, 'prod');
 
-    expect(root.textContent).toContain('Credentials — openrouter');
-    expect(root.textContent).toContain('prod');
+    expect(root.querySelector('.credentials-drawer')?.textContent).toContain(
+      'Credentials — openrouter',
+    );
+    expect(drawer?.hasAttribute('open')).toBe(true);
     expect(fetchMock.requests[3].url).toBe('/api/providers/p1/credentials');
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(toggle.classList.contains('is-expanded')).toBe(true);
-    expect(root.querySelector('#credentials-p1')).not.toBeNull();
 
-    // The whole row is a second, pointer-only toggle target.
-    root.querySelector<HTMLElement>('tr.provider-row')?.click();
-    fixture.detectChanges();
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(root.querySelector('#credentials-p1')).toBeNull();
+    const close = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('.credentials-drawer button'),
+    ).find((button) => button.textContent?.trim() === 'Close');
+    if (close === undefined) {
+      throw new Error('no credential drawer close button');
+    }
+    close.click();
+    await waitFor(fixture, () => drawer?.hasAttribute('open') === false, 'the drawer to close');
+    expect(document.activeElement?.textContent).toContain('Credentials');
   });
 
   it('previews discovery with a dry run, then applies and links to Models', async () => {
@@ -417,7 +414,7 @@ describe('Providers', () => {
     (await waitForButton(fixture, root, 'Apply')).click();
     await waitFor(
       fixture,
-      () => (root.querySelector('td.last-load')?.textContent ?? '').includes('+2 models'),
+      () => (root.querySelector('.last-load')?.textContent ?? '').includes('+2 models'),
       'the applied discovery row to reload',
     );
 
@@ -429,7 +426,7 @@ describe('Providers', () => {
     const link = root.querySelector('a[href="/models?provider=p1"]');
     expect(link).not.toBeNull();
     // Persisted, not client memory: this is the value a reload renders.
-    const lastLoad = root.querySelector('td.last-load');
+    const lastLoad = root.querySelector('.last-load');
     expect(lastLoad?.textContent).toContain('+2 models');
     expect(lastLoad?.textContent).toContain('3 unchanged');
     expect(lastLoad?.textContent).not.toContain('never');
@@ -441,9 +438,9 @@ describe('Providers', () => {
     const root = fixture.nativeElement as HTMLElement;
     const created = credentialFixture({ id: 'c2', label: 'fresh' });
 
-    // Expand the panel so the create form is reachable.
+    // Open the drawer so the create form is reachable.
     fetchMock.respond(jsonResponse(200, []));
-    disclosure(root).click();
+    (await waitForButton(fixture, root, 'Credentials')).click();
     await waitForText(fixture, root, 'No credentials yet');
 
     (await waitForButton(fixture, root, 'New credential')).click();
@@ -453,6 +450,13 @@ describe('Providers', () => {
     fetchMock.respond(jsonResponse(201, created));
     fetchMock.respond(jsonResponse(200, [created]));
     (await waitForButton(fixture, root, 'Save')).click();
+    const save = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('.credentials-drawer button'),
+    ).find((button) => button.textContent?.trim() === 'Save');
+    if (save === undefined) {
+      throw new Error('no credential save button');
+    }
+    save.click();
     await waitForRequests(fixture, root, 6);
 
     // Opening Load models re-reads the list; the new credential is selectable.
@@ -582,7 +586,7 @@ describe('Providers', () => {
     );
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.querySelector('.balance-days')?.textContent?.trim()).toBe('runs out in 2 days');
+    expect(root.querySelector('.metric-note')?.textContent?.trim()).toBe('runs out in 2 days');
   });
 
   it('renders an unavailable provider balance as unavailable, never zero', async () => {

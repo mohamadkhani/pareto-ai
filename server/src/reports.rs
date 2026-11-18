@@ -571,6 +571,8 @@ pub struct RequestLogEntry {
     pub decision_json: Option<String>,
     pub status: Option<i64>,
     pub error_class: Option<String>,
+    /// The final failure's bounded, redacted provider text (D49).
+    pub error_detail: Option<String>,
     pub bytes_in: Option<i64>,
     pub bytes_out: Option<i64>,
     pub user_id: Option<String>,
@@ -599,12 +601,48 @@ pub struct LogListResponse {
     pub next_cursor: Option<LogCursor>,
 }
 
+/// One attempt of a request, as the operator sees it (D49): the taxonomy
+/// outcome plus the provider's own status, code, and bounded redacted text.
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+pub struct AttemptEntry {
+    pub id: i64,
+    pub request_id: String,
+    pub occurred_at: String,
+    pub offering_id: String,
+    pub credential_id: Option<String>,
+    /// Taxonomy code; `None` when the attempt completed.
+    pub outcome: Option<String>,
+    pub upstream_status: Option<i64>,
+    pub provider_error_code: Option<String>,
+    pub error_detail: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub ttft_ms: Option<i64>,
+    pub output_tokens: Option<i64>,
+}
+
+/// One provider's failed attempts in the window, for the dashboard card (D49).
+#[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
+pub struct ErrorSummaryRow {
+    pub provider_id: String,
+    pub provider_name: String,
+    /// Failed attempts (including ones failover recovered).
+    pub errors: i64,
+    /// `occurred_at` of the most recent failure.
+    pub last_at: String,
+}
+
 /// One page of request logs, newest first, with the same exclusive
-/// `(occurred_at, request_id)` cursor pattern as `/api/audit`. `user_id`
-/// narrows to one account. Failure mode: [`sqlx::Error`].
+/// `(occurred_at, request_id)` cursor pattern as `/api/audit`. The optional
+/// filters narrow to one user, one settled status, one taxonomy class, one
+/// provider, or one offering (D49). Failure mode: [`sqlx::Error`].
+#[allow(clippy::too_many_arguments)]
 pub async fn list_request_logs(
     pool: &SqlitePool,
     user_id: Option<&str>,
+    status: Option<i64>,
+    error_class: Option<&str>,
+    provider_id: Option<&str>,
+    offering_id: Option<&str>,
     limit: i64,
     before: Option<&str>,
     before_request_id: Option<&str>,
@@ -612,11 +650,16 @@ pub async fn list_request_logs(
     let entries = sqlx::query_as::<_, RequestLogEntry>(
         "SELECT l.request_id, l.client_request_id, l.occurred_at, l.method, l.path, \
                 l.requested_model, l.resolved_offering_id, l.decision_json, l.status, \
-                l.error_class, l.bytes_in, l.bytes_out, l.user_id, l.api_key_id, \
+                l.error_class, l.error_detail, l.bytes_in, l.bytes_out, l.user_id, l.api_key_id, \
                 u.input_tokens, u.output_tokens, u.cost_usd, u.tokens_estimated, u.latency_ms \
          FROM request_logs l \
          LEFT JOIN usage_events u ON u.request_id = l.request_id \
+         LEFT JOIN offerings o ON o.id = l.resolved_offering_id \
          WHERE (?1 IS NULL OR l.user_id = ?1) \
+           AND (?5 IS NULL OR l.status = ?5) \
+           AND (?6 IS NULL OR l.error_class = ?6) \
+           AND (?7 IS NULL OR o.provider_id = ?7) \
+           AND (?8 IS NULL OR l.resolved_offering_id = ?8) \
            AND (?2 IS NULL OR l.occurred_at < ?2 \
                 OR (?3 IS NOT NULL AND l.occurred_at = ?2 AND l.request_id < ?3)) \
          ORDER BY l.occurred_at DESC, l.request_id DESC \
@@ -626,6 +669,10 @@ pub async fn list_request_logs(
     .bind(before)
     .bind(before_request_id)
     .bind(limit)
+    .bind(status)
+    .bind(error_class)
+    .bind(provider_id)
+    .bind(offering_id)
     .fetch_all(pool)
     .await?;
 
@@ -640,6 +687,51 @@ pub async fn list_request_logs(
         entries,
         next_cursor,
     })
+}
+
+/// Every attempt of one request in attempt order (D49). An unknown request id
+/// yields an empty list; the request itself is checked by the caller when it
+/// needs a 404.
+pub async fn list_attempts(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<Vec<AttemptEntry>, sqlx::Error> {
+    sqlx::query_as::<_, AttemptEntry>(
+        "SELECT id, request_id, occurred_at, offering_id, credential_id, outcome, \
+                upstream_status, provider_error_code, error_detail, latency_ms, ttft_ms, \
+                output_tokens \
+         FROM telemetry_attempts \
+         WHERE request_id = ? \
+         ORDER BY id ASC",
+    )
+    .bind(request_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Failed attempts in the last `hours`, grouped by provider, worst first.
+/// Reads `telemetry_attempts`, so the window is the retained telemetry sample
+/// (the newest 200 rows per offering) — not an unbounded history (D49).
+pub async fn error_summary(
+    pool: &SqlitePool,
+    hours: i64,
+) -> Result<Vec<ErrorSummaryRow>, sqlx::Error> {
+    let since = (chrono::Utc::now() - chrono::Duration::hours(hours))
+        .format("%Y-%m-%dT%H:%M:%fZ")
+        .to_string();
+    sqlx::query_as::<_, ErrorSummaryRow>(
+        "SELECT pr.id AS provider_id, pr.name AS provider_name, COUNT(*) AS errors, \
+                MAX(t.occurred_at) AS last_at \
+         FROM telemetry_attempts t \
+         JOIN offerings o ON o.id = t.offering_id \
+         JOIN providers pr ON pr.id = o.provider_id \
+         WHERE t.outcome IS NOT NULL AND t.occurred_at >= ? \
+         GROUP BY pr.id, pr.name \
+         ORDER BY errors DESC, last_at DESC",
+    )
+    .bind(&since)
+    .fetch_all(pool)
+    .await
 }
 
 #[cfg(test)]
@@ -1067,6 +1159,10 @@ mod tests {
         loop {
             let page = list_request_logs(
                 &pool,
+                None,
+                None,
+                None,
+                None,
                 None,
                 2,
                 before.as_deref(),

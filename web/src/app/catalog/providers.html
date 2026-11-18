@@ -45,97 +45,33 @@
         </span>
       </ui-empty>
     } @else {
-      <ui-table>
-        <table>
-          <thead>
-            <tr>
-              <th scope="col">Provider</th>
-              <th scope="col">Base URL</th>
-              <th scope="col">Kind</th>
-              <th scope="col">Status</th>
-              <th scope="col">Connectors</th>
-              <th scope="col">Balance</th>
-              <th scope="col" class="num">Credentials</th>
-              <th scope="col" class="num">Offerings</th>
-              <th scope="col">Last load</th>
-              <th scope="col"><span class="visually-hidden">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (provider of providers(); track provider.id) {
-              <tr
-                class="provider-row"
-                [class.is-selected]="selectedId() === provider.id"
-                (click)="toggleSelected(provider)"
-              >
-                <td class="provider-cell">
-                  <button
-                    type="button"
-                    class="row-disclosure"
-                    [class.is-expanded]="selectedId() === provider.id"
-                    [attr.aria-expanded]="selectedId() === provider.id"
-                    [attr.aria-controls]="'credentials-' + provider.id"
-                    [attr.aria-label]="
-                      (selectedId() === provider.id ? 'Hide' : 'Show') +
-                      ' credentials for ' +
-                      provider.name
-                    "
-                    (click)="toggleSelected(provider); $event.stopPropagation()"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      aria-hidden="true"
-                    >
-                      <path d="m9 6 6 6-6 6" />
-                    </svg>
-                  </button>
-                  <span class="provider-name">{{ provider.name }}</span>
-                </td>
-                <td>
-                  <code>{{ provider.base_url }}</code>
-                </td>
-                <td>
-                  <code>{{ provider.kind }}</code>
-                </td>
-                <td>
+      <div class="provider-list">
+        @for (provider of providers(); track provider.id) {
+          <article class="provider-card provider-row">
+            <div class="provider-summary">
+              <div class="provider-identity">
+                <div class="provider-title">
+                  <h2 class="provider-name">{{ provider.name }}</h2>
                   <ui-badge [tone]="provider.enabled ? 'success' : 'neutral'">
                     {{ provider.enabled ? 'enabled' : 'disabled' }}
                   </ui-badge>
-                </td>
-                <td>
-                  <span class="connector-badges">
-                    @for (badge of connectorBadges(provider); track badge.kind) {
-                      <ui-badge [tone]="badge.tone" [title]="badge.title">
-                        {{ badge.label }}
-                      </ui-badge>
-                    }
-                  </span>
-                </td>
-                <td class="balance-cell">
-                  @if (providerBalance(provider); as balance) {
-                    <span
-                      class="provider-balance"
-                      [class.is-low]="balance.low"
-                      [class.is-unavailable]="balance.available === false"
-                    >
-                      {{ balance.text }}
-                    </span>
-                    @if (balance.low) {
-                      <ui-badge tone="warning">low</ui-badge>
-                    }
-                    @if (balance.days !== null) {
-                      <span class="balance-days">{{ balance.days }}</span>
-                    }
-                  }
-                </td>
-                <td class="num">{{ credentialCount(provider.id) }}</td>
-                <td class="num">{{ offeringCount(provider.id) }}</td>
-                <td class="last-load">{{ discoveryLabel(provider) }}</td>
-                <td class="actions" (click)="$event.stopPropagation()">
+                  <span class="provider-kind">{{ provider.kind }}</span>
+                </div>
+                <code class="provider-url">{{ provider.base_url }}</code>
+              </div>
+
+              <div class="provider-actions">
+                <div class="action-group action-group--primary">
                   <ui-button size="sm" (clicked)="openDiscovery(provider)">Load models</ui-button>
+                </div>
+                <div class="action-group">
+                  <ui-button
+                    size="sm"
+                    variant="ghost"
+                    (clicked)="openCredentials(provider, $event)"
+                  >
+                    Credentials
+                  </ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="openConnectors(provider)">
                     Connectors
                   </ui-button>
@@ -150,34 +86,85 @@
                   >
                     {{ provider.enabled ? 'Disable' : 'Enable' }}
                   </ui-button>
-                  <ui-button size="sm" variant="danger" (clicked)="askDelete(provider)">
+                  <ui-button
+                    size="sm"
+                    variant="danger"
+                    class="action-delete"
+                    (clicked)="askDelete(provider)"
+                  >
                     Delete
                   </ui-button>
-                </td>
-              </tr>
-              @if (selectedId() === provider.id) {
-                <tr class="credentials-row">
-                  <td colspan="10">
-                    <section
-                      class="credentials-panel"
-                      [attr.id]="'credentials-' + provider.id"
-                      [attr.aria-label]="'Credentials — ' + provider.name"
+                </div>
+              </div>
+            </div>
+
+            <dl class="provider-metrics">
+              <div class="metric balance-cell">
+                <dt>Balance</dt>
+                <dd>
+                  @if (providerBalance(provider); as balance) {
+                    <span
+                      class="provider-balance"
+                      [class.is-low]="balance.low"
+                      [class.is-unavailable]="balance.available === false"
                     >
-                      <div class="credentials-head">
-                        <h2>Credentials — {{ provider.name }}</h2>
-                      </div>
-                      <app-credentials
-                        [provider]="provider"
-                        (changed)="onCredentialsChanged($event)"
-                      />
-                    </section>
-                  </td>
-                </tr>
-              }
-            }
-          </tbody>
-        </table>
-      </ui-table>
+                      {{ balance.text }}
+                    </span>
+                    @if (balance.low) {
+                      <ui-badge tone="warning">low</ui-badge>
+                    }
+                    @if (balance.days !== null) {
+                      <span class="metric-note">{{ balance.days }}</span>
+                    }
+                  }
+                </dd>
+              </div>
+              <div class="metric">
+                <dt>Credentials</dt>
+                <dd class="metric-value credential-count">{{ credentialCount(provider.id) }}</dd>
+              </div>
+              <div class="metric">
+                <dt>Offerings</dt>
+                <dd class="metric-value offering-count">{{ offeringCount(provider.id) }}</dd>
+              </div>
+              <div class="metric">
+                <dt>Last load</dt>
+                @if (provider.last_discovery_at === null) {
+                  <dd class="metric-value last-load">never</dd>
+                } @else {
+                  <dd class="last-load">
+                    <span class="metric-value">
+                      +{{ provider.last_discovery_created ?? 0 }} models
+                    </span>
+                    <span class="metric-note">
+                      {{ provider.last_discovery_unchanged ?? 0 }} unchanged ·
+                      {{ formatAge(provider.last_discovery_at) }}
+                    </span>
+                  </dd>
+                }
+              </div>
+              <div class="metric">
+                <dt>Connectors</dt>
+                <dd>
+                  <span class="connector-badges">
+                    @for (badge of connectorBadges(provider); track badge.kind) {
+                      <ui-badge [tone]="badge.tone" [title]="badge.title">
+                        {{ badge.label }}
+                      </ui-badge>
+                    }
+                  </span>
+                </dd>
+              </div>
+            </dl>
+          </article>
+        }
+      </div>
+
+      <app-breaker-panel
+        [providers]="providers()"
+        [offerings]="offerings()"
+        [credentials]="credentials()"
+      />
     }
   }
 </div>
@@ -245,6 +232,7 @@
 </ui-dialog>
 
 <ui-dialog
+  variant="drawer"
   [open]="discovery() !== null"
   [title]="'Load models — ' + (discovery()?.provider?.name ?? '')"
   (closed)="closeDiscovery()"
@@ -342,6 +330,22 @@
     </ui-button>
     <ui-button variant="ghost" (clicked)="closeDiscovery()">Close</ui-button>
   </div>
+</ui-dialog>
+
+<ui-dialog
+  class="credentials-drawer"
+  variant="drawer"
+  [open]="credentialsProvider() !== null"
+  [title]="'Credentials — ' + (credentialsProvider()?.name ?? '')"
+  (closed)="closeCredentials()"
+>
+  @if (credentialsProvider(); as provider) {
+    <app-credentials
+      [provider]="provider"
+      (changed)="onCredentialsChanged($event)"
+      (closed)="closeCredentials()"
+    />
+  }
 </ui-dialog>
 
 @if (connectorProvider(); as provider) {

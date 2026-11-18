@@ -68,6 +68,12 @@ pub struct AttemptSample {
     pub latency_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// The provider's own HTTP status, when it answered (D49).
+    pub upstream_status: Option<i64>,
+    /// The provider's own error code/type, bounded and redacted (D49).
+    pub provider_error_code: Option<String>,
+    /// The provider's error message, bounded and redacted (D49).
+    pub error_detail: Option<String>,
 }
 
 /// Writes per-attempt samples inside the caller's transaction (the settle
@@ -86,8 +92,8 @@ pub async fn record_attempts(
         sqlx::query(
             "INSERT INTO telemetry_attempts \
              (request_id, offering_id, credential_id, outcome, latency_ms, ttft_ms, \
-              output_tokens, occurred_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              output_tokens, upstream_status, provider_error_code, error_detail, occurred_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request_id)
         .bind(&sample.offering_id)
@@ -96,6 +102,9 @@ pub async fn record_attempts(
         .bind(sample.latency_ms)
         .bind(sample.ttft_ms)
         .bind(sample.output_tokens)
+        .bind(sample.upstream_status)
+        .bind(&sample.provider_error_code)
+        .bind(&sample.error_detail)
         .bind(&occurred_at)
         .execute(&mut *tx)
         .await?;
@@ -698,6 +707,9 @@ mod tests {
                 latency_ms: Some(12),
                 ttft_ms: None,
                 output_tokens: None,
+                upstream_status: Some(401),
+                provider_error_code: Some("invalid_api_key".to_string()),
+                error_detail: Some("invalid key".to_string()),
             },
             AttemptSample {
                 offering_id: offering.clone(),
@@ -706,6 +718,9 @@ mod tests {
                 latency_ms: Some(120),
                 ttft_ms: Some(30),
                 output_tokens: Some(8),
+                upstream_status: None,
+                provider_error_code: None,
+                error_detail: None,
             },
         ];
         let mut tx = app.state.pool.begin().await.expect("tx");

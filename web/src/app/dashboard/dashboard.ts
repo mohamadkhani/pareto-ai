@@ -4,7 +4,7 @@ import { AuthService } from '../auth/auth.service';
 import { CatalogService } from '../catalog/catalog.service';
 import type { Credential, Offering, Provider, SyncStatus } from '../catalog/catalog.types';
 import { describeError, isForbidden } from '../catalog/errors';
-import { formatAge, formatTime, formatUsd } from '../catalog/format';
+import { formatAge, formatUsd } from '../catalog/format';
 import type { ModelsOverview } from '../catalog/overview.types';
 import type { BenchmarkSyncRun, BenchmarkSyncStatus } from '../routing/routing.types';
 import { RoutingService } from '../routing/routing.service';
@@ -13,10 +13,16 @@ import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
 import { UiEmpty } from '../ui/empty';
-import { UiSpinner } from '../ui/spinner';
-import { UiTable } from '../ui/table';
+import { UiIconButton } from '../ui/icon-button';
+import { UiSparkline } from '../ui/sparkline';
+import { DashboardActivity, type ActivityRow } from './activity';
 import { UsageService } from '../usage/usage.service';
-import type { RequestLogEntry, UsageGroup, UsageReport } from '../usage/usage.types';
+import type {
+  ErrorSummaryRow,
+  RequestLogEntry,
+  UsageGroup,
+  UsageReport,
+} from '../usage/usage.types';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 
@@ -49,11 +55,18 @@ interface HealthNote {
   tone: BadgeTone;
 }
 
-/** The recent-activity row shape the table renders. */
-interface ActivityRow {
-  entry: RequestLogEntry;
-  user: string;
-  provider: string;
+/** One slice of the request outcome bar. */
+interface RequestSegment {
+  label: string;
+  count: number;
+  tone: 'success' | 'warning' | 'info';
+}
+
+/** The single strip that surfaces problems before the cards. */
+interface Attention {
+  tone: 'danger' | 'warning';
+  parts: readonly string[];
+  links: readonly { label: string; path: string }[];
 }
 
 const LOG_SAMPLE = 100;
@@ -92,7 +105,17 @@ function errorPercent(entries: readonly RequestLogEntry[]): number | null {
  */
 @Component({
   selector: 'app-dashboard',
-  imports: [RouterLink, UiBadge, UiBanner, UiButton, UiCard, UiEmpty, UiSpinner, UiTable],
+  imports: [
+    RouterLink,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiCard,
+    UiEmpty,
+    UiIconButton,
+    UiSparkline,
+    DashboardActivity,
+  ],
   templateUrl: './dashboard.html',
   styleUrl: './dashboard.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -115,6 +138,11 @@ export class Dashboard {
   protected readonly logsLoading = signal(false);
   protected readonly logsError = signal<string | null>(null);
 
+  /** Failed attempts per provider in the last 24h (D49). */
+  protected readonly errorSummary = signal<ErrorSummaryRow[]>([]);
+  protected readonly errorSummaryLoading = signal(false);
+  protected readonly errorSummaryError = signal<string | null>(null);
+
   protected readonly providers = signal<Provider[]>([]);
   protected readonly overview = signal<ModelsOverview | null>(null);
   protected readonly offerings = signal<Offering[]>([]);
@@ -135,7 +163,6 @@ export class Dashboard {
   protected readonly actionNotice = signal<string | null>(null);
   protected readonly actionError = signal<string | null>(null);
 
-  protected readonly formatTime = formatTime;
   protected readonly formatUsd = formatUsd;
 
   protected readonly spend = computed<SpendView | null>(() => {
@@ -265,6 +292,89 @@ export class Dashboard {
     warnings: this.healthNotes().filter((note) => note.tone === 'warning').length,
   }));
 
+  /** Priced spend for the last seven local days, oldest first. */
+  protected readonly spendSeries = computed<readonly number[]>(() => {
+    const report = this.usage();
+    if (report === null) {
+      return [];
+    }
+    const byDay = new Map<string, number>();
+    for (const group of report.groups) {
+      if (group.day !== null) {
+        byDay.set(group.day, (byDay.get(group.day) ?? 0) + group.cost_usd);
+      }
+    }
+    const now = new Date();
+    const series: number[] = [];
+    for (let offset = 6; offset >= 0; offset -= 1) {
+      series.push(byDay.get(localDayKey(dayAt(now, -offset))) ?? 0);
+    }
+    return series;
+  });
+
+  protected readonly spendSeriesLabel = computed(() => {
+    const total = this.spendSeries().reduce((sum, value) => sum + value, 0);
+    return `Priced spend over the last 7 days: ${this.formatUsd(total)}`;
+  });
+
+  protected requestBarLabel(): string {
+    const totals = this.totals();
+    if (totals === null || totals.requests === 0) {
+      return '';
+    }
+    const parts = this.requestSegments().map((segment) => `${segment.count} ${segment.label}`);
+    return `${totals.requests} requests: ${parts.join(', ')}`;
+  }
+
+  protected readonly requestSegments = computed<readonly RequestSegment[]>(() => {
+    const totals = this.totals();
+    if (totals === null) {
+      return [];
+    }
+    return [
+      { label: 'priced', count: totals.priced_requests, tone: 'success' },
+      { label: 'partial', count: totals.partial_requests, tone: 'warning' },
+      { label: 'unpriced', count: totals.unpriced_requests, tone: 'warning' },
+      { label: 'refused', count: totals.refused_requests, tone: 'info' },
+    ];
+  });
+
+  protected readonly attention = computed<Attention | null>(() => {
+    if (this.providers().length === 0) {
+      return null;
+    }
+    const health = this.health();
+    const catalog = this.catalogView();
+    const parts: string[] = [];
+    const links: { label: string; path: string }[] = [];
+    if (health.errors > 0) {
+      parts.push(`${health.errors} credential error${health.errors === 1 ? '' : 's'}`);
+    }
+    if (health.warnings > 0) {
+      parts.push(`${health.warnings} credential warning${health.warnings === 1 ? '' : 's'}`);
+    }
+    if (catalog?.priceStale === true) {
+      parts.push('prices are stale');
+    }
+    if (catalog?.benchmarkStale === true) {
+      parts.push('benchmarks are stale');
+    }
+    if (parts.length === 0) {
+      return null;
+    }
+    if (health.errors > 0 || health.warnings > 0) {
+      links.push({ label: 'Review health', path: '/providers' });
+    }
+    if (catalog?.priceStale === true || catalog?.benchmarkStale === true) {
+      links.push({ label: 'Review sync', path: '/models' });
+    }
+    return {
+      tone: health.errors > 0 ? 'danger' : 'warning',
+      parts,
+      links,
+    };
+  });
+
   protected readonly recent = computed<ActivityRow[]>(() => {
     const providers = new Map(this.providers().map((provider) => [provider.id, provider.name]));
     const offerings = new Map(
@@ -294,6 +404,7 @@ export class Dashboard {
     }
     this.loadUsage();
     this.loadLogs();
+    this.loadErrorSummary();
     this.loadProviders();
     this.loadOverview();
     this.loadPriceStatus();
@@ -323,6 +434,18 @@ export class Dashboard {
       .then((page) => this.logs.set(page.entries))
       .catch((err: unknown) => this.logsError.set(mapError(err, 'Loading recent activity failed.')))
       .finally(() => this.logsLoading.set(false));
+  }
+
+  protected loadErrorSummary(): void {
+    this.errorSummaryLoading.set(true);
+    this.errorSummaryError.set(null);
+    void this.usageService
+      .errorSummary(24)
+      .then((rows) => this.errorSummary.set(rows))
+      .catch((err: unknown) =>
+        this.errorSummaryError.set(mapError(err, 'Loading upstream errors failed.')),
+      )
+      .finally(() => this.errorSummaryLoading.set(false));
   }
 
   protected loadProviders(): void {
@@ -393,6 +516,7 @@ export class Dashboard {
     this.actionNotice.set(null);
     this.loadUsage();
     this.loadLogs();
+    this.loadErrorSummary();
     this.loadProviders();
     this.loadOverview();
     this.loadPriceStatus();
@@ -450,22 +574,6 @@ export class Dashboard {
   }
 
   /** Status pill tone for a request-log HTTP status. */
-  protected statusTone(status: number | null): BadgeTone {
-    if (status === null) {
-      return 'neutral';
-    }
-    if (status < 300) {
-      return 'success';
-    }
-    if (status === 402 || status === 403 || status === 429) {
-      return 'warning';
-    }
-    return status >= 500 ? 'danger' : 'warning';
-  }
-
-  protected statusLabel(status: number | null): string {
-    return status === null ? '—' : String(status);
-  }
 
   protected async syncPrices(): Promise<void> {
     if (this.syncingPrices()) {

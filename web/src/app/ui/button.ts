@@ -1,4 +1,11 @@
-import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  ElementRef,
+  input,
+  output,
+  viewChild,
+} from '@angular/core';
 import { UiSpinner } from './spinner';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
@@ -33,6 +40,13 @@ export class UiButton {
   readonly ariaControls = input<string>('');
 
   readonly clicked = output<MouseEvent>();
+
+  private readonly buttonRef = viewChild<ElementRef<HTMLButtonElement>>('button');
+
+  /** Moves focus to the native button, for confirmations that replace a trigger. */
+  focus(): void {
+    this.buttonRef()?.nativeElement.focus();
+  }
 
   protected hostClass(): string {
     return ['ui-button', `variant-${this.variant()}`, `size-${this.size()}`].join(' ');

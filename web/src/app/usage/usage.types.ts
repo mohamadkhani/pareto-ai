@@ -82,6 +82,12 @@ export interface RequestLogEntry {
   decision_json: string | null;
   status: number | null;
   error_class: string | null;
+  /**
+   * The final failure's bounded, redacted provider text (D49). Never the
+   * provider's response body: the server keeps at most 512 characters after
+   * removing secrets.
+   */
+  error_detail: string | null;
   bytes_in: number | null;
   bytes_out: number | null;
   user_id: string | null;
@@ -109,4 +115,34 @@ export interface LogPage {
   entries: RequestLogEntry[];
   /** Position of the last entry of a full page; null when there is no next. */
   next_cursor: LogCursor | null;
+}
+
+/**
+ * One attempt of a request (D49): the gateway's taxonomy outcome plus the
+ * provider's own status, code, and bounded redacted text.
+ */
+export interface LogAttempt {
+  id: number;
+  request_id: string;
+  occurred_at: string;
+  offering_id: string;
+  credential_id: string | null;
+  /** Taxonomy code; null when the attempt completed. */
+  outcome: string | null;
+  upstream_status: number | null;
+  provider_error_code: string | null;
+  error_detail: string | null;
+  latency_ms: number | null;
+  ttft_ms: number | null;
+  output_tokens: number | null;
+}
+
+/** One provider's failed attempts in the dashboard window (D49). */
+export interface ErrorSummaryRow {
+  provider_id: string;
+  provider_name: string;
+  /** Failed attempts, including ones failover later recovered. */
+  errors: number;
+  /** `occurred_at` of the most recent failure. */
+  last_at: string;
 }

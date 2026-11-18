@@ -14,6 +14,7 @@ import { UiIconButton } from '../ui/icon-button';
 import { UiInput } from '../ui/input';
 import { UiMeter } from '../ui/meter';
 import { UiSelect } from '../ui/select';
+import { UiSparkline } from '../ui/sparkline';
 import { UiSpinner } from '../ui/spinner';
 import { UiSwitch } from '../ui/switch';
 import { UiTable } from '../ui/table';
@@ -48,6 +49,7 @@ interface TokenSwatch {
     UiInput,
     UiMeter,
     UiSelect,
+    UiSparkline,
     UiSpinner,
     UiSwitch,
     UiTable,
@@ -73,6 +75,7 @@ export class Styleguide {
     { token: '--border', label: 'Border (interactive)' },
     { token: '--border-subtle', label: 'Border subtle' },
     { token: '--border-strong', label: 'Border strong' },
+    { token: '--border-hover', label: 'Border hover' },
     { token: '--text', label: 'Text' },
     { token: '--text-muted', label: 'Text muted' },
     { token: '--accent', label: 'Accent' },
@@ -118,6 +121,7 @@ export class Styleguide {
   protected readonly dateTimeValue = signal('2026-11-18T09:30');
   protected readonly textareaValue = signal('One offering per provider/model pair.');
   protected readonly selectValue = signal('openrouter');
+  protected readonly compactSelect = signal('warn');
   protected readonly switchOn = signal(true);
   protected readonly switchDisabled = signal(false);
   protected readonly tab = signal('one');
@@ -125,6 +129,8 @@ export class Styleguide {
   protected readonly darkDialog = signal(false);
   protected readonly lightDrawer = signal(false);
   protected readonly darkDrawer = signal(false);
+  protected readonly lightWideDrawer = signal(false);
+  protected readonly darkWideDrawer = signal(false);
 
   protected readonly tabs: readonly TabItem[] = [
     { id: 'one', label: 'Overview' },

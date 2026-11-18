@@ -211,3 +211,14 @@
   flex-direction: column;
   gap: var(--space-2);
 }
+
+.card-example-link {
+  display: flex;
+  align-items: center;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.card-example-link:hover {
+  color: var(--accent);
+}

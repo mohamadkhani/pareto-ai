@@ -72,6 +72,43 @@ struct PairState {
     /// Total trips, for the "recently tripped" recovery signal.
     trips: u32,
     last_trip_at: Option<Instant>,
+    /// The class and bounded, redacted text of the last counted failure (D50).
+    last_error_class: Option<&'static str>,
+    last_error_detail: Option<String>,
+}
+
+/// One closed -> open transition, ready for the `breaker_trips` row (D50).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trip {
+    pub credential_id: String,
+    pub offering_id: String,
+    pub consecutive_failures: u32,
+    pub error_class: &'static str,
+    pub error_detail: Option<String>,
+}
+
+/// The result of recording one failure: the new status and, when the pair just
+/// opened, the trip to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakerSighting {
+    pub status: BreakerStatus,
+    pub trip: Option<Trip>,
+}
+
+/// One pair's state for the operator view (D50). Times are relative because
+/// the registry uses monotonic `Instant`s: `open_for_ms` is the remaining
+/// window, not a wall-clock timestamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakerSnapshot {
+    pub credential_id: String,
+    pub offering_id: String,
+    pub status: BreakerStatus,
+    pub consecutive: u32,
+    pub trips: u32,
+    /// Milliseconds until the open window elapses; `None` when not open.
+    pub open_for_ms: Option<u64>,
+    pub last_error_class: Option<&'static str>,
+    pub last_error_detail: Option<String>,
 }
 
 /// The shared breaker registry: `(credential_id, offering_id)` → state.
@@ -129,38 +166,59 @@ impl BreakerRegistry {
     /// half-open re-opens the pair immediately; a closed pair opens at the
     /// threshold. Callers gate on
     /// [`crate::upstream::FailureClass::counts_toward_breaker`] (review M1):
-    /// caller-fault and internal failures never reach this method. Failure
-    /// mode: none — worst case a stale lock is taken over.
+    /// caller-fault and internal failures never reach this method. `error_class`
+    /// and `detail` are kept on the pair and copied into the trip when one is
+    /// produced, so the operator sees why it opened (D50). Failure mode: none —
+    /// worst case a stale lock is taken over.
     pub fn record_failure(
         &self,
         credential_id: &str,
         offering_id: &str,
+        error_class: &'static str,
+        detail: Option<&str>,
         now: Instant,
-    ) -> BreakerStatus {
+    ) -> BreakerSighting {
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         let state = states
             .entry((credential_id.to_string(), offering_id.to_string()))
             .or_default();
         state.consecutive = state.consecutive.saturating_add(1);
+        state.last_error_class = Some(error_class);
+        state.last_error_detail = detail.map(str::to_string);
 
         let was_open = state.open_until.is_some_and(|until| now < until);
         let half_open_probe_failed = state.open_until.is_some_and(|until| now >= until);
         if was_open {
             // Raced an exclusion: keep the pair out for another window.
             state.open_until = Some(now + self.config.cooldown);
-            return BreakerStatus::Open {
-                until: now + self.config.cooldown,
+            return BreakerSighting {
+                status: BreakerStatus::Open {
+                    until: now + self.config.cooldown,
+                },
+                trip: None,
             };
         }
         if half_open_probe_failed || state.consecutive >= self.config.threshold {
             state.open_until = Some(now + self.config.cooldown);
             state.trips = state.trips.saturating_add(1);
             state.last_trip_at = Some(now);
-            return BreakerStatus::Open {
-                until: now + self.config.cooldown,
+            return BreakerSighting {
+                status: BreakerStatus::Open {
+                    until: now + self.config.cooldown,
+                },
+                trip: Some(Trip {
+                    credential_id: credential_id.to_string(),
+                    offering_id: offering_id.to_string(),
+                    consecutive_failures: state.consecutive,
+                    error_class,
+                    error_detail: detail.map(str::to_string),
+                }),
             };
         }
-        BreakerStatus::Closed
+        BreakerSighting {
+            status: BreakerStatus::Closed,
+            trip: None,
+        }
     }
 
     /// Records a completed attempt: the streak resets and a half-open probe
@@ -195,6 +253,53 @@ impl BreakerRegistry {
             .map(|state| state.consecutive)
             .unwrap_or(0)
     }
+
+    /// Every pair that has state at `now`, for the operator view (D50). Closed
+    /// pairs are included so a pair one failure from opening is visible too.
+    pub fn snapshot(&self, now: Instant) -> Vec<BreakerSnapshot> {
+        let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows: Vec<BreakerSnapshot> = states
+            .iter()
+            .map(|((credential_id, offering_id), state)| {
+                let status = match state.open_until {
+                    Some(until) if now < until => BreakerStatus::Open { until },
+                    Some(_) => BreakerStatus::HalfOpen,
+                    None => BreakerStatus::Closed,
+                };
+                BreakerSnapshot {
+                    credential_id: credential_id.clone(),
+                    offering_id: offering_id.clone(),
+                    status,
+                    consecutive: state.consecutive,
+                    trips: state.trips,
+                    open_for_ms: match status {
+                        BreakerStatus::Open { until } => {
+                            Some(until.saturating_duration_since(now).as_millis() as u64)
+                        }
+                        _ => None,
+                    },
+                    last_error_class: state.last_error_class,
+                    last_error_detail: state.last_error_detail.clone(),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            a.credential_id
+                .cmp(&b.credential_id)
+                .then_with(|| a.offering_id.cmp(&b.offering_id))
+        });
+        rows
+    }
+
+    /// Closes one pair and clears its streak (D50). Returns whether the pair
+    /// had state. Trip history is not touched: it lives in `breaker_trips`.
+    pub fn reset(&self, credential_id: &str, offering_id: &str) -> bool {
+        self.states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(credential_id.to_string(), offering_id.to_string()))
+            .is_some()
+    }
 }
 
 #[cfg(test)]
@@ -214,12 +319,14 @@ mod tests {
         let now = Instant::now();
         for _ in 0..2 {
             assert_eq!(
-                breaker.record_failure("cred", "off", now),
+                breaker
+                    .record_failure("cred", "off", "upstream_error", None, now)
+                    .status,
                 BreakerStatus::Closed
             );
         }
-        let opened = breaker.record_failure("cred", "off", now);
-        assert!(matches!(opened, BreakerStatus::Open { .. }));
+        let opened = breaker.record_failure("cred", "off", "upstream_error", None, now);
+        assert!(matches!(opened.status, BreakerStatus::Open { .. }));
         assert!(breaker.is_open("cred", "off", now));
         assert_eq!(breaker.trips("cred", "off"), 1);
     }
@@ -228,15 +335,19 @@ mod tests {
     fn a_success_resets_the_streak() {
         let breaker = registry(3);
         let now = Instant::now();
-        breaker.record_failure("cred", "off", now);
-        breaker.record_failure("cred", "off", now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
         breaker.record_success("cred", "off");
         assert_eq!(
-            breaker.record_failure("cred", "off", now),
+            breaker
+                .record_failure("cred", "off", "upstream_error", None, now)
+                .status,
             BreakerStatus::Closed
         );
         assert_eq!(
-            breaker.record_failure("cred", "off", now),
+            breaker
+                .record_failure("cred", "off", "upstream_error", None, now)
+                .status,
             BreakerStatus::Closed
         );
         assert!(!breaker.is_open("cred", "off", now));
@@ -249,8 +360,8 @@ mod tests {
         let breaker = registry(3);
         let now = Instant::now();
         assert_eq!(breaker.consecutive("cred", "off"), 0);
-        breaker.record_failure("cred", "off", now);
-        breaker.record_failure("cred", "off", now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
         assert_eq!(breaker.consecutive("cred", "off"), 2);
         assert_eq!(breaker.trips("cred", "off"), 0, "not opened yet");
         breaker.record_success("cred", "off");
@@ -265,7 +376,7 @@ mod tests {
     fn an_open_pair_excludes_until_the_window_then_half_opens() {
         let breaker = registry(1);
         let now = Instant::now();
-        breaker.record_failure("cred", "off", now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
         assert!(breaker.is_open("cred", "off", now));
         assert!(breaker.is_open("cred", "off", now + Duration::from_secs(9)));
 
@@ -281,12 +392,14 @@ mod tests {
     fn a_failed_probe_reopens_immediately_and_a_successful_one_closes() {
         let breaker = registry(2);
         let now = Instant::now();
-        breaker.record_failure("cred", "off", now);
-        breaker.record_failure("cred", "off", now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
         let later = now + Duration::from_secs(11);
 
         assert!(matches!(
-            breaker.record_failure("cred", "off", later),
+            breaker
+                .record_failure("cred", "off", "upstream_error", None, later)
+                .status,
             BreakerStatus::Open { .. }
         ));
         assert!(breaker.is_open("cred", "off", later), "re-opened");
@@ -299,7 +412,9 @@ mod tests {
             BreakerStatus::Closed
         );
         assert_eq!(
-            breaker.record_failure("cred", "off", even_later),
+            breaker
+                .record_failure("cred", "off", "upstream_error", None, even_later)
+                .status,
             BreakerStatus::Closed,
             "the streak restarted at zero"
         );
@@ -310,7 +425,7 @@ mod tests {
         let breaker = registry(1);
         let now = Instant::now();
         assert!(!breaker.is_recovering("cred", "off", now));
-        breaker.record_failure("cred", "off", now);
+        breaker.record_failure("cred", "off", "upstream_error", None, now);
         assert!(
             !breaker.is_recovering("cred", "off", now),
             "open pairs are excluded, not merely penalized"
@@ -327,7 +442,7 @@ mod tests {
     fn breakers_are_scoped_per_credential_and_offering() {
         let breaker = registry(1);
         let now = Instant::now();
-        breaker.record_failure("cred-1", "off-1", now);
+        breaker.record_failure("cred-1", "off-1", "upstream_error", None, now);
         assert!(breaker.is_open("cred-1", "off-1", now));
         assert!(!breaker.is_open("cred-2", "off-1", now), "other credential");
         assert!(!breaker.is_open("cred-1", "off-2", now), "other offering");

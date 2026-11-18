@@ -38,6 +38,10 @@ request sends the session's token in `X-CSRF-Token` (see `src/app/api.ts`).
 
 ## Development
 
+From the repository root, `just dev` starts the gateway together with this dev
+server, and `just setup` runs `pnpm install` once. To run only the frontend
+(against an already running backend):
+
 ```bash
 pnpm install
 pnpm start        # ng serve with proxy.conf.json

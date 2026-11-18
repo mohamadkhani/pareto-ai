@@ -64,6 +64,7 @@
 //! ends.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
@@ -85,6 +86,7 @@ use crate::money;
 use crate::reports;
 use crate::routing::{self, Strategy};
 use crate::telemetry;
+use crate::upstream::detail::ErrorDetail;
 use crate::upstream::sse::{self, SseInspector, Usage};
 use crate::upstream::{
     Budget, FailureClass, TimeoutKind, UpstreamCall, UpstreamError, UpstreamStream,
@@ -129,6 +131,10 @@ pub struct ChatFailure {
     pub message: String,
     /// Seconds to honour as `Retry-After` (upstream rate limits).
     pub retry_after: Option<u64>,
+    /// Bounded, redacted provider text for the operator (D49). Never serialized
+    /// into the client response: `into_api_error` and the in-band error event
+    /// read only `code`, `message`, and `retry_after`.
+    pub detail: Option<String>,
 }
 
 impl ChatFailure {
@@ -138,6 +144,7 @@ impl ChatFailure {
             code,
             message: message.into(),
             retry_after: None,
+            detail: None,
         }
     }
 
@@ -303,6 +310,7 @@ struct Candidate {
     model_id: String,
     canonical_name: String,
     upstream_model_id: String,
+    provider_id: String,
     provider_name: String,
     base_url: String,
     /// The offering and its provider are both enabled (D35 pools include
@@ -386,6 +394,7 @@ fn build_candidate(
         model_id: row.model_id,
         canonical_name: row.canonical_name,
         upstream_model_id: row.upstream_model_id,
+        provider_id: row.provider_id,
         provider_name: row.provider_name,
         base_url: row.base_url,
         enabled: row.offering_enabled == 1 && row.provider_enabled == 1,
@@ -1967,6 +1976,7 @@ pub async fn execute(
             code: "rate_limited",
             message: "the API key's token rate limit is exhausted".to_string(),
             retry_after: Some(wait.as_secs().max(1)),
+            detail: None,
         };
         settle(
             state,
@@ -2209,8 +2219,8 @@ async fn runner(
 
     // Settlement runs before the terminal item is sent, so the rows exist
     // when the failure reaches the client.
-    let (result, failure, status, error_class) = match end {
-        RunEnd::Delivered(result) => (result, None, 200i64, None),
+    let (result, failure, status, error_class, error_detail) = match end {
+        RunEnd::Delivered(result) => (result, None, 200i64, None, None),
         RunEnd::Failed { result, failure } => {
             // A stream that failed after its first byte was already committed
             // as 200; only failures before it can still change the status.
@@ -2219,13 +2229,15 @@ async fn runner(
                 false => failure.status.as_u16() as i64,
             };
             let code: &'static str = failure.code;
-            (result, Some(failure), status, Some(code))
+            let detail = failure.detail.clone();
+            (result, Some(failure), status, Some(code), detail)
         }
         RunEnd::Disconnected(result) => (
             result,
             None,
             CLIENT_DISCONNECTED_STATUS,
             Some("client_disconnected"),
+            None,
         ),
     };
     let mut decision = result.decision;
@@ -2269,6 +2281,7 @@ async fn runner(
             sent: result.sent,
             status,
             error_class,
+            error_detail,
             started,
             ttft_ms: result.ttft_ms,
             bytes_out: result.bytes_out,
@@ -2296,6 +2309,8 @@ enum AttemptStart {
         stream: UpstreamStream,
         first: Bytes,
         ttft_ms: i64,
+        /// Redacts provider text taken from this stream (D49).
+        redactor: Arc<crate::upstream::detail::Redactor>,
     },
     Failed(UpstreamError),
     Canceled,
@@ -2347,6 +2362,7 @@ async fn start_attempt(
     match or_cancel(cancel, stream.next_chunk()).await {
         Wait::Canceled => AttemptStart::Canceled,
         Wait::Done(Ok(Some(first))) => AttemptStart::Started {
+            redactor: stream.redactor(),
             stream,
             first,
             ttft_ms: attempt_started.elapsed().as_millis() as i64,
@@ -2379,7 +2395,7 @@ async fn run_streaming(
         // failure (401/403, 402, 429) advances to the next eligible credential
         // of the same offering before the request moves to another offering;
         // the failed credential is never retried in this request.
-        let (mut stream, first, ttft_ms, attempt_started) = 'credentials: loop {
+        let (mut stream, first, ttft_ms, attempt_started, redactor) = 'credentials: loop {
             let candidate = &attempt.candidate;
             let attempt_started = Instant::now();
             last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
@@ -2388,6 +2404,7 @@ async fn run_streaming(
                     stream,
                     first,
                     ttft_ms,
+                    redactor,
                 } => {
                     sent = true;
                     if let Some(credential_id) = candidate.credential.as_ref().map(|c| c.id.clone())
@@ -2403,7 +2420,7 @@ async fn run_streaming(
                             None,
                         );
                     }
-                    break 'credentials (stream, first, ttft_ms, attempt_started);
+                    break 'credentials (stream, first, ttft_ms, attempt_started, redactor);
                 }
                 AttemptStart::Canceled => {
                     return RunEnd::Disconnected(last_result(
@@ -2420,6 +2437,7 @@ async fn run_streaming(
                     };
                     let class = e.classify();
                     let status = upstream_status(&e);
+                    let error_detail = e.error_detail();
                     if let Some(cooldown) = class.cooldown {
                         record_cooldown(&state.pool, &credential.id, cooldown).await;
                     }
@@ -2434,7 +2452,7 @@ async fn run_streaming(
                         Some(&class),
                         status,
                     );
-                    record_breaker_failure(state, candidate, &class);
+                    record_breaker_failure(state, candidate, &class, error_detail.as_ref()).await;
                     push_attempt_sample(
                         &mut decision.samples,
                         candidate,
@@ -2442,6 +2460,8 @@ async fn run_streaming(
                         Some(class.code),
                         None,
                         None,
+                        status,
+                        error_detail.as_ref(),
                     );
                     if credential_attributable(&class) {
                         let cursor = attempt.credential_cursor;
@@ -2459,7 +2479,7 @@ async fn run_streaming(
                             }
                         }
                     }
-                    let failure = failure_from_class(&class);
+                    let failure = failure_from_class_with_detail(&class, error_detail.as_ref());
                     if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
                         last_failure = Some(failure);
                         continue 'candidates;
@@ -2483,8 +2503,12 @@ async fn run_streaming(
             // Line-cap overflow is terminal even here: retrying could just
             // buffer the cap again per candidate (review M2).
             let class = UpstreamError::Body("response line too large".to_string()).classify();
+            let detail = ErrorDetail {
+                provider_code: None,
+                detail: Some("the response line exceeded the size cap".to_string()),
+            };
             record_failure(decision, decision_idx, &class, None);
-            record_breaker_failure(state, candidate, &class);
+            record_breaker_failure(state, candidate, &class, Some(&detail)).await;
             push_attempt_sample(
                 &mut decision.samples,
                 candidate,
@@ -2492,16 +2516,22 @@ async fn run_streaming(
                 Some(class.code),
                 Some(ttft_ms),
                 attempt_output_tokens(None, inspector.output_chars),
+                None,
+                Some(&detail),
             );
             return RunEnd::Failed {
                 result: last_result(decision, &last, None, 0, 0, None, sent),
-                failure: failure_from_class(&class),
+                failure: failure_from_class_with_detail(&class, Some(&detail)),
             };
         }
         if inspector.protocol_error {
             let class = UpstreamError::Body("malformed SSE".to_string()).classify();
+            let detail = inspector
+                .provider_error
+                .as_ref()
+                .map(|error| error.detail(&redactor));
             record_failure(decision, decision_idx, &class, None);
-            record_breaker_failure(state, candidate, &class);
+            record_breaker_failure(state, candidate, &class, detail.as_ref()).await;
             push_attempt_sample(
                 &mut decision.samples,
                 candidate,
@@ -2509,8 +2539,10 @@ async fn run_streaming(
                 Some(class.code),
                 Some(ttft_ms),
                 attempt_output_tokens(None, inspector.output_chars),
+                None,
+                detail.as_ref(),
             );
-            let failure = failure_from_class(&class);
+            let failure = failure_from_class_with_detail(&class, detail.as_ref());
             if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
                 last_failure = Some(failure);
                 continue;
@@ -2538,6 +2570,8 @@ async fn run_streaming(
                     Some("client_disconnected"),
                     Some(ttft_ms),
                     attempt_output_tokens(None, inspector.output_chars),
+                    None,
+                    None,
                 );
                 return RunEnd::Disconnected(chosen_result(
                     decision,
@@ -2551,6 +2585,7 @@ async fn run_streaming(
                 ));
             }
             Sent::TimedOut => {
+                let failure = total_timeout_failure();
                 push_attempt_sample(
                     &mut decision.samples,
                     candidate,
@@ -2558,6 +2593,8 @@ async fn run_streaming(
                     Some("upstream_timeout"),
                     Some(ttft_ms),
                     attempt_output_tokens(None, inspector.output_chars),
+                    None,
+                    None,
                 );
                 return RunEnd::Failed {
                     result: chosen_result(
@@ -2570,7 +2607,7 @@ async fn run_streaming(
                         Some(ttft_ms),
                         sent,
                     ),
-                    failure: total_timeout_failure(),
+                    failure,
                 };
             }
             Sent::Ok => {}
@@ -2584,6 +2621,7 @@ async fn run_streaming(
             &mut cancel,
             &mut bytes_out,
             total,
+            &redactor,
         )
         .await;
         return match end {
@@ -2596,6 +2634,8 @@ async fn run_streaming(
                     None,
                     Some(ttft_ms),
                     attempt_output_tokens(inspector.usage.as_ref(), inspector.output_chars),
+                    None,
+                    None,
                 );
                 RunEnd::Delivered(chosen_result(
                     decision,
@@ -2608,12 +2648,16 @@ async fn run_streaming(
                     sent,
                 ))
             }
-            PumpEnd::Failed(class, failure) => {
+            PumpEnd::Failed {
+                class,
+                failure,
+                detail,
+            } => {
                 // The chosen record keeps its outcome but records how the
                 // stream ended; the response was already committed.
                 decision.candidates[decision_idx].error_class = Some(failure.code);
                 decision.candidates[decision_idx].status = Some(failure.status.as_u16() as i64);
-                record_breaker_failure(state, candidate, &class);
+                record_breaker_failure(state, candidate, &class, detail.as_ref()).await;
                 push_attempt_sample(
                     &mut decision.samples,
                     candidate,
@@ -2621,6 +2665,8 @@ async fn run_streaming(
                     Some(class.code),
                     Some(ttft_ms),
                     attempt_output_tokens(inspector.usage.as_ref(), inspector.output_chars),
+                    None,
+                    detail.as_ref(),
                 );
                 RunEnd::Failed {
                     result: chosen_result(
@@ -2644,6 +2690,8 @@ async fn run_streaming(
                     Some("client_disconnected"),
                     Some(ttft_ms),
                     attempt_output_tokens(inspector.usage.as_ref(), inspector.output_chars),
+                    None,
+                    None,
                 );
                 RunEnd::Disconnected(chosen_result(
                     decision,
@@ -2687,7 +2735,7 @@ async fn run_buffered(
         let decision_idx = attempt.decision_idx;
         // Same credential rotation as the streaming loop: retry the offering
         // with its next eligible credential before moving on.
-        let (mut stream, first, ttft_ms, attempt_started) = 'credentials: loop {
+        let (mut stream, first, ttft_ms, attempt_started, redactor) = 'credentials: loop {
             let candidate = &attempt.candidate;
             let attempt_started = Instant::now();
             last = Some((candidate.offering_id.clone(), candidate.model_id.clone()));
@@ -2696,6 +2744,7 @@ async fn run_buffered(
                     stream,
                     first,
                     ttft_ms,
+                    redactor,
                 } => {
                     sent = true;
                     if let Some(credential_id) = candidate.credential.as_ref().map(|c| c.id.clone())
@@ -2711,7 +2760,7 @@ async fn run_buffered(
                             None,
                         );
                     }
-                    break 'credentials (stream, first, ttft_ms, attempt_started);
+                    break 'credentials (stream, first, ttft_ms, attempt_started, redactor);
                 }
                 AttemptStart::Canceled => {
                     return RunEnd::Disconnected(last_result(
@@ -2721,6 +2770,7 @@ async fn run_buffered(
                 AttemptStart::Failed(e) => {
                     let class = e.classify();
                     let status = upstream_status(&e);
+                    let error_detail = e.error_detail();
                     let credential_id = candidate.credential.as_ref().map(|c| c.id.clone());
                     if let Some(credential) = &candidate.credential
                         && let Some(cooldown) = class.cooldown
@@ -2740,7 +2790,7 @@ async fn run_buffered(
                         );
                     }
                     record_failure(decision, decision_idx, &class, status);
-                    record_breaker_failure(state, candidate, &class);
+                    record_breaker_failure(state, candidate, &class, error_detail.as_ref()).await;
                     push_attempt_sample(
                         &mut decision.samples,
                         candidate,
@@ -2748,6 +2798,8 @@ async fn run_buffered(
                         Some(class.code),
                         None,
                         None,
+                        status,
+                        error_detail.as_ref(),
                     );
                     if credential_attributable(&class) {
                         let cursor = attempt.credential_cursor;
@@ -2765,7 +2817,7 @@ async fn run_buffered(
                             }
                         }
                     }
-                    let failure = failure_from_class(&class);
+                    let failure = failure_from_class_with_detail(&class, error_detail.as_ref());
                     if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
                         last_failure = Some(failure);
                         continue 'candidates;
@@ -2805,17 +2857,20 @@ async fn run_buffered(
                 }
             }
         };
-        let (usage, output_chars, failure) = match read_failure {
+        let (usage, output_chars, failure, error_detail) = match read_failure {
             // A cap failure is terminal and the oversized buffer is never
             // parsed (review m5).
-            Some(e) => (None, 0, Some(e)),
+            Some(e) => {
+                let detail = e.error_detail();
+                (None, 0, Some(e), detail)
+            }
             None => {
-                let (usage, output_chars, protocol_error) = sse::inspect_json_body(&buffer);
-                let failure = match protocol_error {
-                    true => Some(UpstreamError::Body("invalid JSON body".to_string())),
-                    false => None,
-                };
-                (usage, output_chars, failure)
+                let (usage, output_chars, provider_error) = sse::inspect_json_body(&buffer);
+                let error_detail = provider_error.map(|error| error.detail(&redactor));
+                let failure = error_detail
+                    .as_ref()
+                    .map(|_| UpstreamError::Body("invalid JSON body".to_string()));
+                (usage, output_chars, failure, error_detail)
             }
         };
         let Some(e) = failure else {
@@ -2835,6 +2890,8 @@ async fn run_buffered(
                         None,
                         Some(ttft_ms),
                         output_tokens,
+                        None,
+                        None,
                     );
                     RunEnd::Delivered(chosen_result(
                         decision,
@@ -2855,6 +2912,8 @@ async fn run_buffered(
                         Some("client_disconnected"),
                         Some(ttft_ms),
                         output_tokens,
+                        None,
+                        None,
                     );
                     RunEnd::Disconnected(chosen_result(
                         decision,
@@ -2875,6 +2934,8 @@ async fn run_buffered(
                         Some("upstream_timeout"),
                         Some(ttft_ms),
                         output_tokens,
+                        None,
+                        None,
                     );
                     RunEnd::Failed {
                         result: chosen_result(
@@ -2894,8 +2955,9 @@ async fn run_buffered(
         };
 
         let class = e.classify();
-        record_failure(decision, decision_idx, &class, upstream_status(&e));
-        record_breaker_failure(state, candidate, &class);
+        let status = upstream_status(&e);
+        record_failure(decision, decision_idx, &class, status);
+        record_breaker_failure(state, candidate, &class, error_detail.as_ref()).await;
         push_attempt_sample(
             &mut decision.samples,
             candidate,
@@ -2903,8 +2965,10 @@ async fn run_buffered(
             Some(class.code),
             Some(ttft_ms),
             attempt_output_tokens(usage.as_ref(), output_chars),
+            status,
+            error_detail.as_ref(),
         );
-        let failure = failure_from_class(&class);
+        let failure = failure_from_class_with_detail(&class, error_detail.as_ref());
         if can_fail_over(&class, &failure, &mut rate_budget, combo_member) {
             last_failure = Some(failure);
             continue;
@@ -2924,8 +2988,13 @@ async fn run_buffered(
 enum PumpEnd {
     Done,
     /// The stream failed mid-flight: its failure class (for breaker
-    /// accounting, review M1) and the client-visible failure.
-    Failed(FailureClass, ChatFailure),
+    /// accounting, review M1), the client-visible failure, and the bounded
+    /// provider detail for the operator (D49).
+    Failed {
+        class: FailureClass,
+        failure: ChatFailure,
+        detail: Option<ErrorDetail>,
+    },
     Disconnected,
 }
 
@@ -2940,6 +3009,7 @@ async fn pump(
     cancel: &mut oneshot::Receiver<()>,
     bytes_out: &mut u64,
     total: tokio::time::Instant,
+    redactor: &crate::upstream::detail::Redactor,
 ) -> PumpEnd {
     loop {
         let chunk = match or_cancel(cancel, stream.next_chunk()).await {
@@ -2949,14 +3019,25 @@ async fn pump(
         match chunk {
             Err(e) => {
                 let class = e.classify();
-                return PumpEnd::Failed(class.clone(), failure_from_class(&class));
+                let detail = e.error_detail();
+                let failure = failure_from_class_with_detail(&class, detail.as_ref());
+                return PumpEnd::Failed {
+                    class,
+                    failure,
+                    detail,
+                };
             }
             Ok(None) => {
                 return match inspector.truncated() {
                     false => PumpEnd::Done,
                     true => {
                         let class = UpstreamError::Body("truncated stream".to_string()).classify();
-                        PumpEnd::Failed(class.clone(), failure_from_class(&class))
+                        let detail = text_detail("the stream ended without [DONE]");
+                        PumpEnd::Failed {
+                            class: class.clone(),
+                            failure: failure_from_class_with_detail(&class, Some(&detail)),
+                            detail: Some(detail),
+                        }
                     }
                 };
             }
@@ -2967,18 +3048,37 @@ async fn pump(
                     // M2): both end the stream in-band, never fail over.
                     let class =
                         UpstreamError::Body("malformed or oversized SSE".to_string()).classify();
-                    return PumpEnd::Failed(class.clone(), failure_from_class(&class));
-                }
-                let len = bytes.len() as u64;
-                match send_item(cancel, tx, total, Ok(bytes)).await {
-                    Sent::Ok => *bytes_out += len,
-                    Sent::Gone => return PumpEnd::Disconnected,
-                    Sent::TimedOut => {
-                        let class = UpstreamError::Timeout {
-                            kind: TimeoutKind::Total,
+                    let detail = inspector
+                        .provider_error
+                        .as_ref()
+                        .map(|error| error.detail(redactor))
+                        .or_else(|| {
+                            inspector
+                                .overflowed
+                                .then(|| text_detail("the response line exceeded the size cap"))
+                        });
+                    return PumpEnd::Failed {
+                        class: class.clone(),
+                        failure: failure_from_class_with_detail(&class, detail.as_ref()),
+                        detail,
+                    };
+                } else {
+                    let len = bytes.len() as u64;
+                    match send_item(cancel, tx, total, Ok(bytes)).await {
+                        Sent::Ok => *bytes_out += len,
+                        Sent::Gone => return PumpEnd::Disconnected,
+                        Sent::TimedOut => {
+                            let class = UpstreamError::Timeout {
+                                kind: TimeoutKind::Total,
+                            }
+                            .classify();
+                            let detail = text_detail("the request deadline elapsed");
+                            return PumpEnd::Failed {
+                                class: class.clone(),
+                                failure: failure_from_class_with_detail(&class, Some(&detail)),
+                                detail: Some(detail),
+                            };
                         }
-                        .classify();
-                        return PumpEnd::Failed(class.clone(), failure_from_class(&class));
                     }
                 }
             }
@@ -3128,14 +3228,79 @@ fn record_failure(decision: &mut Decision, idx: usize, class: &FailureClass, sta
 /// One failed attempt counts toward the (credential, offering) circuit
 /// breaker (M5) — unless its class does not reflect the offering's service
 /// (`invalid_request`, `internal`; review M1). No-op without a credential.
-fn record_breaker_failure(state: &AppState, candidate: &Candidate, class: &FailureClass) {
+/// When the failure opens the pair, the trip is persisted with its cause (D50).
+async fn record_breaker_failure(
+    state: &AppState,
+    candidate: &Candidate,
+    class: &FailureClass,
+    detail: Option<&ErrorDetail>,
+) {
     if !class.counts_toward_breaker {
         return;
     }
-    if let Some(credential) = &candidate.credential {
-        state
-            .breaker
-            .record_failure(&credential.id, &candidate.offering_id, Instant::now());
+    let Some(credential) = &candidate.credential else {
+        return;
+    };
+    let sighting = state.breaker.record_failure(
+        &credential.id,
+        &candidate.offering_id,
+        class.code,
+        detail.and_then(|detail| detail.detail.as_deref()),
+        Instant::now(),
+    );
+    if let Some(trip) = sighting.trip {
+        persist_breaker_trip(state, candidate, &trip).await;
+    }
+}
+
+/// Writes one trip row and prunes rows older than 30 days (D50). Failure mode:
+/// a database error is logged and swallowed — breaker accounting must never
+/// fail a request.
+async fn persist_breaker_trip(
+    state: &AppState,
+    candidate: &Candidate,
+    trip: &crate::breaker::Trip,
+) {
+    let occurred_at = crate::catalog::now_ts();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(30))
+        .format(crate::auth::TS_FMT)
+        .to_string();
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!(error = %e, "breaker trip write failed");
+            return;
+        }
+    };
+    let result = async {
+        sqlx::query("DELETE FROM breaker_trips WHERE occurred_at < ?")
+            .bind(&cutoff)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO breaker_trips \
+             (provider_id, credential_id, offering_id, occurred_at, consecutive_failures, \
+              error_class, error_detail) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&candidate.provider_id)
+        .bind(&trip.credential_id)
+        .bind(&trip.offering_id)
+        .bind(&occurred_at)
+        .bind(i64::from(trip.consecutive_failures))
+        .bind(trip.error_class)
+        .bind(&trip.error_detail)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::error!(
+            error = %e,
+            offering_id = %candidate.offering_id,
+            "breaker trip write failed"
+        );
     }
 }
 
@@ -3161,6 +3326,7 @@ fn attempt_output_tokens(usage: Option<&Usage>, output_chars: usize) -> Option<i
 /// Records one classified attempt's telemetry sample (decision D26): every
 /// attempt teaches the router, including failures rescued by failover.
 /// `outcome` is the failure taxonomy code, `None` for a completed attempt.
+#[allow(clippy::too_many_arguments)]
 fn push_attempt_sample(
     samples: &mut Vec<telemetry::AttemptSample>,
     candidate: &Candidate,
@@ -3168,6 +3334,8 @@ fn push_attempt_sample(
     outcome: Option<&'static str>,
     ttft_ms: Option<i64>,
     output_tokens: Option<i64>,
+    upstream_status: Option<i64>,
+    detail: Option<&ErrorDetail>,
 ) {
     samples.push(telemetry::AttemptSample {
         offering_id: candidate.offering_id.clone(),
@@ -3176,6 +3344,9 @@ fn push_attempt_sample(
         latency_ms: Some(started.elapsed().as_millis() as i64),
         ttft_ms,
         output_tokens,
+        upstream_status,
+        provider_error_code: detail.and_then(|detail| detail.provider_code.clone()),
+        error_detail: detail.and_then(|detail| detail.detail.clone()),
     });
 }
 
@@ -3194,6 +3365,25 @@ fn failure_from_class(class: &FailureClass) -> ChatFailure {
     let mut failure = ChatFailure::new(class.status, class.code, message);
     failure.retry_after = class.cooldown.map(|cooldown| cooldown.as_secs());
     failure
+}
+
+/// The same client-visible failure plus the operator-only detail (D49).
+fn failure_from_class_with_detail(
+    class: &FailureClass,
+    detail: Option<&ErrorDetail>,
+) -> ChatFailure {
+    let mut failure = failure_from_class(class);
+    failure.detail = detail.and_then(|detail| detail.detail.clone());
+    failure
+}
+
+/// A synthetic detail for a failure that has no provider body (a truncation,
+/// an oversized line, a deadline).
+fn text_detail(message: &str) -> ErrorDetail {
+    ErrorDetail {
+        provider_code: None,
+        detail: Some(message.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3263,6 +3453,8 @@ struct Settlement {
     sent: bool,
     status: i64,
     error_class: Option<&'static str>,
+    /// Bounded, redacted provider text for the final failure (D49).
+    error_detail: Option<String>,
     started: Instant,
     ttft_ms: Option<i64>,
     bytes_out: u64,
@@ -3294,6 +3486,7 @@ impl Settlement {
             sent: false,
             status: failure.status.as_u16() as i64,
             error_class: Some(failure.code),
+            error_detail: failure.detail.clone(),
             started,
             ttft_ms: None,
             bytes_out: 0,
@@ -3441,8 +3634,8 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         "INSERT INTO request_logs \
          (request_id, client_request_id, occurred_at, method, path, requested_model, \
           resolved_offering_id, decision_json, status, error_class, bytes_in, bytes_out, user_id, \
-          api_key_id, has_request_body) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          api_key_id, has_request_body, error_detail) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.client_request_id)
@@ -3459,6 +3652,7 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     .bind(&settlement.meta.user_id)
     .bind(&api_key_id)
     .bind(i64::from(settlement.has_request_body))
+    .bind(&settlement.error_detail)
     .execute(&mut *tx)
     .await;
 
@@ -3768,6 +3962,7 @@ pub(crate) async fn settle_for_measurement(
         sent: true,
         status: 200,
         error_class: None,
+        error_detail: None,
         started: Instant::now(),
         ttft_ms: Some(25),
         bytes_out: 1500,
@@ -6029,16 +6224,19 @@ mod tests {
         let retryable = UpstreamError::Http {
             status: 500,
             retry_after: None,
+            detail: None,
         }
         .classify();
         let rate_limited = UpstreamError::Http {
             status: 429,
             retry_after: None,
+            detail: None,
         }
         .classify();
         let auth = UpstreamError::Http {
             status: 401,
             retry_after: None,
+            detail: None,
         }
         .classify();
 
@@ -7269,6 +7467,7 @@ mod tests {
             sent: true,
             status: 200,
             error_class: None,
+            error_detail: None,
             started: Instant::now(),
             ttft_ms: None,
             bytes_out: 0,
@@ -7425,6 +7624,7 @@ mod tests {
                 sent: true,
                 status: 200,
                 error_class: None,
+                error_detail: None,
                 started: Instant::now(),
                 ttft_ms: None,
                 bytes_out: 0,
@@ -7502,7 +7702,7 @@ mod tests {
         assert!(picked.cooled);
 
         // An open breaker pair sinks below a closed one.
-        breaker.record_failure("a", "offering", Instant::now());
+        breaker.record_failure("a", "offering", "upstream_error", None, Instant::now());
         let rows = vec![row("a", false), row("b", false)];
         assert_eq!(
             pick_credential(&rows, "offering", now, &breaker)

@@ -23,6 +23,7 @@
 
 pub(crate) mod audit;
 pub(crate) mod auth;
+pub(crate) mod breaker;
 pub(crate) mod catalog;
 pub(crate) mod chat;
 pub(crate) mod connectors;
@@ -117,6 +118,11 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .route("/usage/me", get(usage::usage_me))
         .route("/usage", get(usage::usage_admin))
         .route("/logs", get(usage::logs))
+        .route("/logs/{request_id}/attempts", get(usage::log_attempts))
+        .route("/errors/summary", get(usage::error_summary))
+        // The breaker's live state and its manual reset (D50).
+        .route("/breaker", get(breaker::list))
+        .route("/breaker/reset", axum::routing::post(breaker::reset))
         // Providers and credentials.
         .route("/providers", get(providers::list).post(providers::create))
         .route(

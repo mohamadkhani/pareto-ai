@@ -19,6 +19,7 @@
 //! attempts. Cancellation is not handled here: dropping [`UpstreamStream`]
 //! drops the response and closes the connection.
 
+pub mod detail;
 pub mod sse;
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ pub(crate) mod stub;
 mod tests;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -77,6 +79,9 @@ pub enum UpstreamError {
         status: u16,
         /// Parsed `Retry-After` (seconds), when the upstream sent one.
         retry_after: Option<Duration>,
+        /// Bounded, redacted provider error text (D49); `None` when the body
+        /// could not be read before the short error-body budget.
+        detail: Option<detail::ErrorDetail>,
     },
     /// The response body failed before it could be used: empty stream,
     /// truncated stream, or malformed SSE/JSON.
@@ -143,6 +148,7 @@ impl UpstreamError {
             UpstreamError::Http {
                 status: 401 | 403,
                 retry_after,
+                ..
             } => class(
                 "upstream_auth",
                 StatusCode::BAD_GATEWAY,
@@ -153,6 +159,7 @@ impl UpstreamError {
             UpstreamError::Http {
                 status: 402,
                 retry_after,
+                ..
             } => class(
                 "upstream_quota",
                 StatusCode::BAD_GATEWAY,
@@ -163,6 +170,7 @@ impl UpstreamError {
             UpstreamError::Http {
                 status: 429,
                 retry_after,
+                ..
             } => class(
                 "upstream_rate_limited",
                 StatusCode::TOO_MANY_REQUESTS,
@@ -211,6 +219,33 @@ impl UpstreamError {
         };
         tracing::warn!(error = %self, code = class.code, "upstream call failed");
         class
+    }
+
+    /// The operator-visible detail of this failure (D49): the provider's own
+    /// error text and code for an HTTP response, or a bounded description of
+    /// the transport/timeout/body failure. `None` for configuration failures,
+    /// which are ours rather than the provider's. Every string here is already
+    /// redacted: HTTP bodies are parsed with the call's [`detail::Redactor`],
+    /// and transport messages are redacted where the stream constructs them.
+    pub fn error_detail(&self) -> Option<detail::ErrorDetail> {
+        let text = |message: &str| {
+            Some(detail::ErrorDetail {
+                provider_code: None,
+                detail: Some(detail::truncate_chars(message, detail::MAX_MESSAGE_CHARS)),
+            })
+        };
+        match self {
+            UpstreamError::Http { detail, .. } => detail.clone(),
+            UpstreamError::Transport(message) => text(message),
+            UpstreamError::Timeout { kind } => text(match kind {
+                TimeoutKind::FirstByte => "timed out before the first response byte",
+                TimeoutKind::Idle => "timed out between response chunks",
+                TimeoutKind::Total => "the request deadline elapsed",
+            }),
+            UpstreamError::Body(message) => text(message),
+            UpstreamError::TooLarge => text("the response exceeded the buffering cap"),
+            UpstreamError::Credential(_) => None,
+        }
     }
 }
 
@@ -336,7 +371,8 @@ impl UpstreamClient {
             request = request.header(reqwest::header::AUTHORIZATION, bearer);
         }
 
-        let response = match tokio::time::timeout_at(
+        let redactor = Arc::new(detail::Redactor::new(&call.secret, &call.headers));
+        let mut response = match tokio::time::timeout_at(
             budget.first_byte.min(budget.total),
             request.send(),
         )
@@ -350,15 +386,28 @@ impl UpstreamClient {
                     },
                 });
             }
-            Ok(Err(e)) => return Err(UpstreamError::Transport(e.to_string())),
+            Ok(Err(e)) => return Err(UpstreamError::Transport(redactor.redact(&e.to_string()))),
             Ok(Ok(response)) => response,
         };
 
         let status = response.status();
         if !status.is_success() {
+            // The provider's error text is the operator's only clue (D49).
+            // Read a bounded excerpt under a short budget; the status and
+            // Retry-After are kept even when the body cannot be read.
+            let retry_after = parse_retry_after(response.headers());
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body = detail::read_error_body(&mut response).await;
+            let parsed =
+                body.map(|body| detail::detail_from_body(&body, request_id.as_deref(), &redactor));
             return Err(UpstreamError::Http {
                 status: status.as_u16(),
-                retry_after: parse_retry_after(response.headers()),
+                retry_after,
+                detail: parsed,
             });
         }
 
@@ -366,6 +415,7 @@ impl UpstreamClient {
             inner: response.bytes_stream().boxed(),
             budget,
             first: true,
+            redactor,
         })
     }
 }
@@ -376,6 +426,8 @@ pub struct UpstreamStream {
     inner: BoxStream<'static, reqwest::Result<Bytes>>,
     budget: Budget,
     first: bool,
+    /// Redacts transport messages with the same known secrets the call used.
+    redactor: Arc<detail::Redactor>,
 }
 
 impl std::fmt::Debug for UpstreamStream {
@@ -388,6 +440,12 @@ impl std::fmt::Debug for UpstreamStream {
 }
 
 impl UpstreamStream {
+    /// The redactor built from this call's secret and headers; the caller uses
+    /// it to redact provider text taken from the stream (D49).
+    pub fn redactor(&self) -> Arc<detail::Redactor> {
+        Arc::clone(&self.redactor)
+    }
+
     /// The next body chunk (`Ok(None)` = clean end), within the first-byte
     /// budget for the first chunk and the idle budget afterwards, never past
     /// the total deadline.
@@ -408,7 +466,9 @@ impl UpstreamStream {
             }),
             Ok(None) => Ok(None),
             Ok(Some(Ok(bytes))) => Ok(Some(bytes)),
-            Ok(Some(Err(e))) => Err(UpstreamError::Transport(e.to_string())),
+            Ok(Some(Err(e))) => Err(UpstreamError::Transport(
+                self.redactor.redact(&e.to_string()),
+            )),
         }
     }
 }

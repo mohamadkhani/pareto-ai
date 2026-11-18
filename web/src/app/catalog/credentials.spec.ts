@@ -204,9 +204,9 @@ describe('Credentials', () => {
       }),
     );
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    const rowRefresh = Array.from(root.querySelectorAll<HTMLButtonElement>('tbody button')).find(
-      (candidate) => candidate.textContent?.trim() === 'Refresh',
-    );
+    const rowRefresh = Array.from(
+      root.querySelectorAll<HTMLButtonElement>('.credential-item button'),
+    ).find((candidate) => candidate.textContent?.trim() === 'Refresh balance');
     if (rowRefresh === undefined) {
       throw new Error('no row refresh button');
     }
@@ -371,6 +371,7 @@ describe('Credentials', () => {
 
     (await waitForButton(fixture, root, 'Delete')).click();
     await waitForText(fixture, root, 'Delete prod from openrouter');
+    expect(document.activeElement?.textContent).toContain('Delete credential');
     expect(fetchMock.requests).toHaveLength(1);
 
     fetchMock.respond(noContentResponse());

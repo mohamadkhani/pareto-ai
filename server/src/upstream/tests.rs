@@ -159,6 +159,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 400,
                 retry_after: None,
+                detail: None,
             },
             "invalid_request",
             StatusCode::BAD_REQUEST,
@@ -168,6 +169,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 401,
                 retry_after: None,
+                detail: None,
             },
             "upstream_auth",
             StatusCode::BAD_GATEWAY,
@@ -177,6 +179,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 403,
                 retry_after: None,
+                detail: None,
             },
             "upstream_auth",
             StatusCode::BAD_GATEWAY,
@@ -186,6 +189,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 402,
                 retry_after: None,
+                detail: None,
             },
             "upstream_quota",
             StatusCode::BAD_GATEWAY,
@@ -195,6 +199,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 429,
                 retry_after: None,
+                detail: None,
             },
             "upstream_rate_limited",
             StatusCode::TOO_MANY_REQUESTS,
@@ -204,6 +209,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 500,
                 retry_after: None,
+                detail: None,
             },
             "upstream_error",
             StatusCode::BAD_GATEWAY,
@@ -213,6 +219,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 404,
                 retry_after: None,
+                detail: None,
             },
             "upstream_error",
             StatusCode::BAD_GATEWAY,
@@ -256,16 +263,19 @@ fn classify_covers_the_taxonomy_table() {
     let limited = UpstreamError::Http {
         status: 429,
         retry_after: Some(Duration::from_secs(7)),
+        detail: None,
     };
     assert_eq!(limited.classify().cooldown, Some(Duration::from_secs(7)));
     let limited_default = UpstreamError::Http {
         status: 429,
         retry_after: None,
+        detail: None,
     };
     assert_eq!(limited_default.classify().cooldown, Some(DEFAULT_COOLDOWN));
     let transient = UpstreamError::Http {
         status: 500,
         retry_after: None,
+        detail: None,
     };
     assert_eq!(transient.classify().cooldown, None);
 
@@ -277,6 +287,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 400,
                 retry_after: None,
+                detail: None,
             },
             false,
         ),
@@ -284,6 +295,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 422,
                 retry_after: None,
+                detail: None,
             },
             false,
         ),
@@ -292,6 +304,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 401,
                 retry_after: None,
+                detail: None,
             },
             true,
         ),
@@ -299,6 +312,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 402,
                 retry_after: None,
+                detail: None,
             },
             true,
         ),
@@ -306,6 +320,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 429,
                 retry_after: None,
+                detail: None,
             },
             true,
         ),
@@ -313,6 +328,7 @@ fn classify_covers_the_taxonomy_table() {
             UpstreamError::Http {
                 status: 500,
                 retry_after: None,
+                detail: None,
             },
             true,
         ),
@@ -393,13 +409,16 @@ async fn client_maps_statuses_and_retry_after() {
     let stub = Stub::spawn(vec![
         Scenario::Status {
             code: 429,
-            headers: vec![("retry-after".to_string(), "7".to_string())],
-            body: "{}".to_string(),
+            headers: vec![
+                ("retry-after".to_string(), "7".to_string()),
+                ("x-request-id".to_string(), "up-req-1".to_string()),
+            ],
+            body: r#"{"error":{"message":"slow down","code":"rate_limit_exceeded"}}"#.to_string(),
         },
         Scenario::Status {
             code: 500,
             headers: Vec::new(),
-            body: "{}".to_string(),
+            body: r#"{"error":{"message":"upstream exploded"}}"#.to_string(),
         },
     ])
     .await;
@@ -427,9 +446,17 @@ async fn client_maps_statuses_and_retry_after() {
     assert!(matches!(err, UpstreamError::Http { status: 429, .. }));
     assert_eq!(err.classify().code, "upstream_rate_limited");
     assert_eq!(err.classify().cooldown, Some(Duration::from_secs(7)));
+    let detail = err.error_detail().expect("detail");
+    assert_eq!(detail.provider_code.as_deref(), Some("rate_limit_exceeded"));
+    assert_eq!(
+        detail.detail.as_deref(),
+        Some("slow down (request id: up-req-1)")
+    );
 
     let err = client.open(&call(), budget()).await.expect_err("500");
     assert_eq!(err.classify().code, "upstream_error");
+    let detail = err.error_detail().expect("detail");
+    assert_eq!(detail.detail.as_deref(), Some("upstream exploded"));
 }
 
 #[tokio::test]

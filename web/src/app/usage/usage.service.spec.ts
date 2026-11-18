@@ -41,6 +41,7 @@ function logFixture(overrides: Partial<RequestLogEntry> = {}): RequestLogEntry {
     decision_json: null,
     status: 200,
     error_class: null,
+    error_detail: null,
     bytes_in: 10,
     bytes_out: 20,
     user_id: 'u1',

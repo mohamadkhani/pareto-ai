@@ -26,6 +26,30 @@
           }
         </ui-select>
       </ui-field>
+      <ui-field label="Provider" [controlId]="'logs-provider'">
+        <ui-select [value]="providerFilter()" (valueChange)="onProviderFilterChange($event)">
+          <option value="">All providers</option>
+          @for (provider of providers(); track provider.id) {
+            <option [value]="provider.id">{{ provider.name }}</option>
+          }
+        </ui-select>
+      </ui-field>
+      <ui-field label="Status" [controlId]="'logs-status'">
+        <ui-select [value]="statusFilter()" (valueChange)="onStatusFilterChange($event)">
+          <option value="">All statuses</option>
+          @for (status of statuses; track status) {
+            <option [value]="status">{{ status }}</option>
+          }
+        </ui-select>
+      </ui-field>
+      <ui-field label="Error class" [controlId]="'logs-error-class'">
+        <ui-select [value]="classFilter()" (valueChange)="onClassFilterChange($event)">
+          <option value="">All error classes</option>
+          @for (errorClass of errorClasses; track errorClass) {
+            <option [value]="errorClass">{{ errorClass }}</option>
+          }
+        </ui-select>
+      </ui-field>
       <span class="spacer"></span>
       <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
     </div>
@@ -44,10 +68,11 @@
               <th scope="col">Model</th>
               <th scope="col">Offering</th>
               <th scope="col">Status</th>
+              <th scope="col">Error</th>
               <th scope="col">Cost</th>
               <th scope="col">Tokens</th>
               <th scope="col">Latency</th>
-              <th scope="col">Why</th>
+              <th scope="col">Details</th>
             </tr>
           </thead>
           <tbody>
@@ -84,32 +109,101 @@
                     —
                   }
                 </td>
-                <td>{{ hasUsage(entry) ? formatUsd(entry.cost_usd) : '—' }}</td>
-                <td>{{ tokenText(entry) }}</td>
-                <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
-                <td class="actions">
-                  @if (entry.decision_json !== null) {
-                    <ui-button
-                      size="sm"
-                      variant="ghost"
-                      (clicked)="toggleDecision(entry)"
-                      [ariaExpanded]="expandedId() === entry.request_id"
-                      [ariaControls]="
-                        expandedId() === entry.request_id ? 'decision-' + entry.request_id : ''
-                      "
+                <td>
+                  @if (entry.error_class) {
+                    <ui-badge
+                      tone="danger"
+                      [title]="entry.error_detail ?? 'The provider returned an error.'"
+                      >{{ entry.error_class }}</ui-badge
                     >
-                      {{ expandedId() === entry.request_id ? 'Hide' : 'Why this model' }}
-                    </ui-button>
                   } @else {
                     —
                   }
                 </td>
+                <td>{{ hasUsage(entry) ? formatUsd(entry.cost_usd) : '—' }}</td>
+                <td>{{ tokenText(entry) }}</td>
+                <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
+                <td class="actions">
+                  <ui-button
+                    size="sm"
+                    variant="ghost"
+                    (clicked)="toggleDetails(entry)"
+                    [ariaExpanded]="expandedId() === entry.request_id"
+                    [ariaControls]="
+                      expandedId() === entry.request_id ? 'details-' + entry.request_id : ''
+                    "
+                  >
+                    {{ expandedId() === entry.request_id ? 'Hide' : 'Details' }}
+                  </ui-button>
+                </td>
               </tr>
               @if (expandedId() === entry.request_id) {
-                <tr class="decision-row" [attr.id]="'decision-' + entry.request_id">
-                  <td colspan="9">
+                <tr class="details-row" [attr.id]="'details-' + entry.request_id">
+                  <td colspan="10">
+                    @if (entry.error_detail) {
+                      <section class="error-detail">
+                        <h3>Provider error</h3>
+                        <p class="detail-text">{{ entry.error_detail }}</p>
+                      </section>
+                    }
+
+                    <section class="attempts">
+                      <h3>Attempts</h3>
+                      @if (attemptsLoading() === entry.request_id) {
+                        <p class="state-note">Loading attempts…</p>
+                      } @else if (expandedAttempts().length === 0) {
+                        <p class="state-note">No attempt record is available for this request.</p>
+                      } @else {
+                        <table class="attempts-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Time</th>
+                              <th scope="col">Offering</th>
+                              <th scope="col">Credential</th>
+                              <th scope="col">Outcome</th>
+                              <th scope="col">Provider status</th>
+                              <th scope="col">Provider code</th>
+                              <th scope="col">Provider detail</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @for (attempt of expandedAttempts(); track attempt.id) {
+                              <tr>
+                                <td class="col-time">{{ formatTime(attempt.occurred_at) }}</td>
+                                <td>
+                                  <code>{{ attempt.offering_id }}</code>
+                                </td>
+                                <td>
+                                  @if (attempt.credential_id) {
+                                    <code>{{ attempt.credential_id }}</code>
+                                  } @else {
+                                    —
+                                  }
+                                </td>
+                                <td>{{ attempt.outcome ?? 'completed' }}</td>
+                                <td>{{ attemptStatus(attempt) }}</td>
+                                <td>
+                                  @if (attempt.provider_error_code) {
+                                    <code>{{ attempt.provider_error_code }}</code>
+                                  } @else {
+                                    —
+                                  }
+                                </td>
+                                <td class="detail-text">
+                                  {{ attempt.error_detail ?? '—' }}
+                                </td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      }
+                    </section>
+
                     @if (expandedDecision(); as decision) {
-                      <app-decision-panel [decision]="decision" />
+                      <section class="routing">
+                        <h3>Why this model</h3>
+                        <app-decision-panel [decision]="decision" />
+                      </section>
                     } @else {
                       <p class="state-note">This entry carries no readable routing decision.</p>
                     }

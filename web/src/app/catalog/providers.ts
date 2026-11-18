@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
 import { BalanceCache } from './balance-cache';
+import { BreakerPanel } from './breaker-panel';
 import { CatalogService } from './catalog.service';
 import { Connectors } from './connectors';
 import type { ConnectorKind, PriceDisplay } from './connectors.types';
@@ -11,6 +12,7 @@ import { formatAge } from './format';
 import type {
   Credential,
   DiscoverySummary,
+  Offering,
   Provider,
   ProviderInput,
   ProviderKind,
@@ -25,7 +27,6 @@ import { UiField } from '../ui/field';
 import { UiInput } from '../ui/input';
 import { UiSelect } from '../ui/select';
 import { UiSwitch } from '../ui/switch';
-import { UiTable } from '../ui/table';
 import type { BadgeTone } from '../ui/badge';
 
 /** One provider-row connector badge. */
@@ -82,6 +83,7 @@ function emptyDraft(): ProviderDraft {
   selector: 'app-providers',
   imports: [
     RouterLink,
+    BreakerPanel,
     Connectors,
     Credentials,
     UiBadge,
@@ -93,7 +95,6 @@ function emptyDraft(): ProviderDraft {
     UiInput,
     UiSelect,
     UiSwitch,
-    UiTable,
   ],
   templateUrl: './providers.html',
   styleUrl: './providers.css',
@@ -105,14 +106,19 @@ export class Providers {
   private readonly balanceCache = inject(BalanceCache);
 
   protected readonly providers = signal<Provider[]>([]);
+  /** Full catalog lists shared with the breaker panel (D50). */
+  protected readonly offerings = signal<Offering[]>([]);
+  protected readonly credentials = signal<Credential[]>([]);
   protected readonly loading = signal(false);
   protected readonly loadError = signal<string | null>(null);
   protected readonly forbidden = signal(false);
   protected readonly actionError = signal<string | null>(null);
   protected readonly notice = signal<string | null>(null);
 
-  protected readonly selectedId = signal<string | null>(null);
+  protected readonly credentialsProvider = signal<Provider | null>(null);
   protected readonly togglingId = signal<string | null>(null);
+  /** The button that opened the credentials drawer, for focus restoration. */
+  private credentialsTrigger: HTMLElement | null = null;
 
   protected readonly formState = signal<FormState | null>(null);
   protected readonly draft = signal<ProviderDraft>(emptyDraft());
@@ -172,6 +178,8 @@ export class Providers {
         credentials.set(provider.id, credentialLists[index] ?? []);
       });
       this.credentialsByProvider.set(credentials);
+      this.credentials.set(credentialLists.flat());
+      this.offerings.set(offerings);
 
       const counts = new Map<string, number>();
       for (const offering of offerings) {
@@ -184,10 +192,11 @@ export class Providers {
       // catalog connector are skipped, so a plain provider list stays cheap.
       void this.loadDisplays(providers);
 
-      // Keep the expanded panel pointed at the fresh copy of its provider.
-      const selectedId = this.selectedId();
-      if (selectedId !== null && !providers.some((provider) => provider.id === selectedId)) {
-        this.selectedId.set(null);
+      // Keep an open credentials drawer pointed at the fresh copy of its
+      // provider, and close it when that provider no longer exists.
+      const openId = this.credentialsProvider()?.id;
+      if (openId !== undefined) {
+        this.credentialsProvider.set(providers.find((provider) => provider.id === openId) ?? null);
       }
     } catch (err) {
       this.handleError(err);
@@ -337,19 +346,17 @@ export class Providers {
     };
   }
 
-  /** "Last load" for the list: persisted on the provider, so it survives a reload. */
-  protected discoveryLabel(provider: Provider): string {
-    const at = provider.last_discovery_at;
-    if (at === null) {
-      return 'never';
-    }
-    const created = provider.last_discovery_created ?? 0;
-    const unchanged = provider.last_discovery_unchanged ?? 0;
-    return `+${created} models · ${unchanged} unchanged · ${formatAge(at)}`;
+  protected openCredentials(provider: Provider, event: MouseEvent): void {
+    this.credentialsTrigger =
+      event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    this.credentialsProvider.set(provider);
   }
 
-  protected toggleSelected(provider: Provider): void {
-    this.selectedId.set(this.selectedId() === provider.id ? null : provider.id);
+  protected closeCredentials(): void {
+    const trigger = this.credentialsTrigger;
+    this.credentialsTrigger = null;
+    this.credentialsProvider.set(null);
+    queueMicrotask(() => trigger?.focus());
   }
 
   // --- provider form -------------------------------------------------------
@@ -459,8 +466,8 @@ export class Providers {
     this.actionError.set(null);
     try {
       await this.catalog.deleteProvider(provider.id);
-      if (this.selectedId() === provider.id) {
-        this.selectedId.set(null);
+      if (this.credentialsProvider()?.id === provider.id) {
+        this.credentialsProvider.set(null);
       }
       this.deleting.set(null);
       this.notice.set('Provider deleted.');

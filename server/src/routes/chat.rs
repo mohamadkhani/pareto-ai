@@ -153,6 +153,7 @@ pub async fn chat_completions(
                         code: "invalid_request",
                         message: format!("request body exceeds the {limit} byte limit"),
                         retry_after: None,
+                        detail: None,
                     });
                     break;
                 }
@@ -165,6 +166,7 @@ pub async fn chat_completions(
                     code: "invalid_request",
                     message: "could not read the request body".to_string(),
                     retry_after: None,
+                    detail: None,
                 });
                 break;
             }

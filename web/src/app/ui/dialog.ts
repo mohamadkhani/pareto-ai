@@ -15,13 +15,16 @@ let nextDialogId = 0;
 /** `modal` is the centred dialog; `drawer` pins it to the right edge. */
 export type DialogVariant = 'modal' | 'drawer';
 
+/** Drawer width; `lg` is for content that needs room, such as the connectors editor. */
+export type DialogSize = 'md' | 'lg';
+
 /**
  * Modal built on native `<dialog>`. `open` is two-way bindable; `show()` and
  * `close()` are the imperative API. ESC closes and returns focus to the
  * previously focused element (native behavior); backdrop click is optional.
  * `title` names the dialog via `aria-labelledby` when present. `variant`
  * selects the centred modal or a right-edge drawer with the same focus and
- * Escape behavior.
+ * Escape behavior. A drawer becomes a bottom sheet below 40rem of viewport.
  */
 @Component({
   selector: 'ui-dialog',
@@ -32,6 +35,7 @@ export type DialogVariant = 'modal' | 'drawer';
 export class UiDialog implements AfterViewInit {
   readonly open = model(false);
   readonly variant = input<DialogVariant>('modal');
+  readonly size = input<DialogSize>('md');
   readonly title = input<string>('');
   readonly closeOnBackdrop = input(true);
   /** Accessible name when no visible title is rendered. */

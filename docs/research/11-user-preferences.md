@@ -21,7 +21,8 @@ scaffold or CLI resets `packageManager` to npm, change it back.
 
 The user said they like **Just** (the `just` command runner). The repo now has
 a `Justfile` as the single entry point: `just check` is the quality gate,
-`just build` the production binary, `just dev`/`just dev-ui` run the halves.
+`just build` the production binary, `just dev` runs both halves, `just dev-ui`
+only the frontend.
 `scripts/check.sh` and `scripts/build.sh` existed briefly as compatibility
 wrappers (`exec just ...`) and were removed on 2026-11-16.
 

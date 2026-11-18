@@ -17,6 +17,7 @@ html[data-theme='light'],
   --border: #838da0;
   --border-subtle: #d9e0e9;
   --border-strong: #5f6b7d;
+  --border-hover: #6f7b8c;
   --text: #16202e;
   --text-muted: #4d5968;
   --accent: #2456c4;
@@ -48,6 +49,7 @@ html[data-theme='dark'],
   --border: #7c8ba3;
   --border-subtle: #303a4b;
   --border-strong: #aab6c8;
+  --border-hover: #93a2b8;
   --text: #e8edf4;
   --text-muted: #aab6c8;
   --accent: #8fb3ff;

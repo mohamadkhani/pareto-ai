@@ -9,14 +9,16 @@
 
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::auth::{AuthUser, RequireAdmin, TS_FMT};
 use crate::error::{self, ApiError, ErrorBody};
-use crate::reports::{self, GroupBy, LogListResponse, MyUsageReport, UsageReport};
+use crate::reports::{
+    self, AttemptEntry, ErrorSummaryRow, GroupBy, LogListResponse, MyUsageReport, UsageReport,
+};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -49,6 +51,20 @@ pub struct LogQuery {
     pub before_request_id: Option<String>,
     /// Narrow to one user id.
     pub user: Option<String>,
+    /// Exact settled status (for example `502`).
+    pub status: Option<i64>,
+    /// Taxonomy code such as `upstream_auth` or `upstream_timeout`.
+    pub error_class: Option<String>,
+    /// Only requests served (or attempted) by this provider id.
+    pub provider: Option<String>,
+    /// Only requests whose resolved offering is this id.
+    pub offering: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorSummaryQuery {
+    /// Window in hours (1–168). Defaults to 24.
+    pub hours: Option<i64>,
 }
 
 /// Validates an inclusive `YYYY-MM-DD` day key.
@@ -169,7 +185,11 @@ pub async fn usage_admin(
         ("limit" = Option<i64>, Query, description = "Maximum entries to return (1-200). Default 50."),
         ("before" = Option<String>, Query, description = "RFC-3339 cursor timestamp; only strictly older entries are returned."),
         ("before_request_id" = Option<String>, Query, description = "Cursor request id from next_cursor; breaks ties with before."),
-        ("user" = Option<String>, Query, description = "narrow to one user id")
+        ("user" = Option<String>, Query, description = "narrow to one user id"),
+        ("status" = Option<i64>, Query, description = "exact settled status, e.g. 502"),
+        ("error_class" = Option<String>, Query, description = "taxonomy code, e.g. upstream_auth"),
+        ("provider" = Option<String>, Query, description = "narrow to one provider id"),
+        ("offering" = Option<String>, Query, description = "narrow to one offering id")
     ),
     responses(
         (status = 200, description = "request log entries, newest first", body = LogListResponse),
@@ -189,6 +209,14 @@ pub async fn logs(
         tracing::debug!(error = %e, "log query rejected");
         ApiError::bad_request("invalid query parameters").with_request_id(rid.clone())
     })?;
+    if let Some(status) = query.status
+        && !(100..600).contains(&status)
+    {
+        return Err(
+            ApiError::bad_request("status must be an HTTP status between 100 and 599")
+                .with_request_id(rid),
+        );
+    }
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let (before, before_request_id) = match (query.before, query.before_request_id) {
         (Some(raw), before_request_id) => {
@@ -211,6 +239,10 @@ pub async fn logs(
     let report = reports::list_request_logs(
         &state.pool,
         query.user.as_deref(),
+        query.status,
+        query.error_class.as_deref(),
+        query.provider.as_deref(),
+        query.offering.as_deref(),
         limit,
         before.as_deref(),
         before_request_id.as_deref(),
@@ -218,6 +250,64 @@ pub async fn logs(
     .await
     .map_err(|e| ApiError::internal("reading request logs", e).with_request_id(rid))?;
     Ok(Json(report))
+}
+
+/// Every attempt of one request in attempt order, with the provider's own
+/// error status, code, and bounded redacted text (D49). Admin only.
+#[utoipa::path(
+    get,
+    path = "/api/logs/{request_id}/attempts",
+    tag = "usage",
+    params(("request_id" = String, Path, description = "the request id")),
+    responses(
+        (status = 200, description = "attempts, oldest first", body = [AttemptEntry]),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn log_attempts(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    Path(request_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AttemptEntry>>, ApiError> {
+    let rid = error::request_id(&headers);
+    let attempts = reports::list_attempts(&state.pool, &request_id)
+        .await
+        .map_err(|e| ApiError::internal("reading request attempts", e).with_request_id(rid))?;
+    Ok(Json(attempts))
+}
+
+/// Failed attempts in the last `hours` grouped by provider, worst first, for
+/// the dashboard card (D49). Admin only.
+#[utoipa::path(
+    get,
+    path = "/api/errors/summary",
+    tag = "usage",
+    params(("hours" = Option<i64>, Query, description = "window in hours (1-168, default 24)")),
+    responses(
+        (status = 200, description = "providers with failed attempts, worst first", body = [ErrorSummaryRow]),
+        (status = 400, description = "invalid query parameters", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn error_summary(
+    State(state): State<AppState>,
+    RequireAdmin(_admin): RequireAdmin,
+    headers: HeaderMap,
+    query: Result<Query<ErrorSummaryQuery>, QueryRejection>,
+) -> Result<Json<Vec<ErrorSummaryRow>>, ApiError> {
+    let rid = error::request_id(&headers);
+    let Query(query) = query.map_err(|e| {
+        tracing::debug!(error = %e, "error summary query rejected");
+        ApiError::bad_request("invalid query parameters").with_request_id(rid.clone())
+    })?;
+    let hours = query.hours.unwrap_or(24).clamp(1, 168);
+    let rows = reports::error_summary(&state.pool, hours)
+        .await
+        .map_err(|e| ApiError::internal("reading the error summary", e).with_request_id(rid))?;
+    Ok(Json(rows))
 }
 
 #[cfg(test)]
@@ -355,5 +445,201 @@ mod tests {
             logs.body
         );
         let _ = admin_id;
+    }
+
+    #[tokio::test]
+    async fn upstream_error_detail_is_queryable_per_request_and_provider() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (admin_cookie, _) = test_support::login(&router, "admin@example.com").await;
+
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url) VALUES ('p1', 'P', 'https://p/v1')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("provider");
+        sqlx::query("INSERT INTO models (id, canonical_name) VALUES ('m1', 'm')")
+            .execute(&app.state.pool)
+            .await
+            .expect("model");
+        sqlx::query(
+            "INSERT INTO offerings (id, provider_id, model_id, upstream_model_id) \
+             VALUES ('o1', 'p1', 'm1', 'm-upstream')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("offering");
+        sqlx::query(
+            "INSERT INTO request_logs \
+             (request_id, occurred_at, method, path, resolved_offering_id, status, error_class, \
+              error_detail) \
+             VALUES ('r1', '2026-11-19T10:00:00.000Z', 'POST', '/v1/chat/completions', 'o1', \
+                     502, 'upstream_error', 'the provider exploded')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("log row");
+        for (id, outcome, status, code, detail) in [
+            (
+                1i64,
+                Some("upstream_error"),
+                Some(502i64),
+                Some("bad_gateway"),
+                Some("boom"),
+            ),
+            (2, None, None, None, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO telemetry_attempts \
+                 (id, request_id, offering_id, outcome, upstream_status, provider_error_code, \
+                  error_detail, occurred_at) \
+                 VALUES (?, 'r1', 'o1', ?, ?, ?, ?, '2026-11-19T10:00:01.000Z')",
+            )
+            .bind(id)
+            .bind(outcome)
+            .bind(status)
+            .bind(code)
+            .bind(detail)
+            .execute(&app.state.pool)
+            .await
+            .expect("attempt");
+        }
+
+        let filtered = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs?error_class=upstream_error&provider=p1",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(filtered.status, StatusCode::OK, "{}", filtered.body);
+        let entries = filtered.body["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["error_detail"], "the provider exploded");
+
+        let wrong_status = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs?status=200",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            wrong_status.body["entries"]
+                .as_array()
+                .expect("entries")
+                .len(),
+            0
+        );
+
+        let attempts = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs/r1/attempts",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(attempts.status, StatusCode::OK, "{}", attempts.body);
+        let rows = attempts.body.as_array().expect("attempts");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["error_detail"], "boom");
+        assert_eq!(rows[0]["upstream_status"], 502);
+        assert_eq!(rows[0]["provider_error_code"], "bad_gateway");
+        assert_eq!(rows[1]["outcome"], serde_json::Value::Null);
+
+        let summary = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/errors/summary?hours=168",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(summary.status, StatusCode::OK, "{}", summary.body);
+        let rows = summary.body.as_array().expect("summary");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["provider_id"], "p1");
+        assert_eq!(rows[0]["errors"], 1);
+    }
+
+    #[tokio::test]
+    async fn breaker_snapshot_and_reset_are_admin_only() {
+        let app = TestApp::new().await;
+        let admin_id = app
+            .create_user("admin@example.com", Role::Admin, true)
+            .await;
+        app.create_user("user@example.com", Role::User, true).await;
+        let router = app.router();
+        let (admin_cookie, admin_csrf) = test_support::login(&router, "admin@example.com").await;
+        let (user_cookie, _) = test_support::login(&router, "user@example.com").await;
+
+        app.state.breaker.record_failure(
+            "cred-1",
+            "o1",
+            "upstream_error",
+            Some("boom"),
+            std::time::Instant::now(),
+        );
+        let list = send(
+            router.clone(),
+            api_request(Method::GET, "/api/breaker", None, Some(&admin_cookie), None),
+        )
+        .await;
+        assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+        let entries = list.body["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["credential_id"], "cred-1");
+        assert_eq!(entries[0]["last_error_class"], "upstream_error");
+        assert_eq!(entries[0]["last_error_detail"], "boom");
+
+        let denied = send(
+            router.clone(),
+            api_request(Method::GET, "/api/breaker", None, Some(&user_cookie), None),
+        )
+        .await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+        let reset = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/breaker/reset",
+                Some(serde_json::json!({"credential_id": "cred-1", "offering_id": "o1"})),
+                Some(&admin_cookie),
+                Some(&admin_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(reset.status, StatusCode::NO_CONTENT, "{}", reset.body);
+        assert!(
+            !app.state
+                .breaker
+                .is_open("cred-1", "o1", std::time::Instant::now())
+        );
+
+        let audited: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'breaker.reset'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("audit count");
+        assert_eq!(audited, 1, "actor {}", admin_id);
     }
 }

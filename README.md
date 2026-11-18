@@ -20,14 +20,23 @@ resource use, and stability — not feature breadth.
 With no configuration at all:
 
 ```bash
-just dev            # or: cd server && cargo run
+just dev            # backend + Angular dev server; needs `just setup` once
 ```
 
-That listens on `127.0.0.1:8081`, keeps its database in `./data`, applies the
-migrations, and generates a credential master key. On the first visit the
-console opens the **setup wizard**: create the first administrator, or choose
-"Skip for now — local only" to run without a password on this machine. The
-choice is remembered; Settings can set a password later.
+That starts two processes:
+
+| Process | Address | Notes |
+| --- | --- | --- |
+| gateway | `127.0.0.1:8081` | database in `./data`, migrations applied, credential master key generated; serves the UI embedded from the last `just ui-build` |
+| Angular dev server | `http://localhost:4200` | hot reload; proxies `/api`, `/v1`, `/health` to the gateway |
+
+Use `http://localhost:4200` while working on the console. Ctrl-C stops both
+processes. `just dev --release` and other arguments go to `cargo run`. For a
+backend-only run use `cd server && cargo run`.
+
+On the first visit the console opens the **setup wizard**: create the first
+administrator, or choose "Skip for now — local only" to run without a password
+on this machine. The choice is remembered; Settings can set a password later.
 
 Serving the production binary is the same:
 

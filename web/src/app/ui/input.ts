@@ -38,12 +38,15 @@ export type InputType =
   templateUrl: './input.html',
   styleUrl: './control.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '[class.size-sm]': "size() === 'sm'" },
   providers: [{ provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => UiInput), multi: true }],
 })
 export class UiInput implements ControlValueAccessor {
   protected readonly field = inject(UI_FIELD, { optional: true });
 
   readonly id = input<string>('');
+  /** Compact height for toolbars and inline rows; matches `ui-button size="sm"`. */
+  readonly size = input<'sm' | 'md'>('md');
   readonly type = input<InputType>('text');
   readonly value = model<string>('');
   readonly placeholder = input<string>('');

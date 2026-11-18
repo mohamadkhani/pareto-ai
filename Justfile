@@ -29,13 +29,80 @@ lint:
 test:
     cd server && cargo test --offline
 
-# run the backend with no configuration: 127.0.0.1:8081, ./data, first-run
-# setup wizard (the master key is generated on first start; see README)
+# run both halves for development: gateway on 127.0.0.1:8081 (./data, first-run
+# setup wizard, master key generated on first start) plus the Angular dev server
+# on http://localhost:4200, which proxies /api, /v1 and /health to the gateway.
+# Extra arguments go to `cargo run` (e.g. `just dev --release`). Ctrl-C stops both.
 dev *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd server
-    exec cargo run --offline {{args}}
+
+    if [ ! -d web/node_modules ]; then
+        echo "error: web/node_modules is missing; run 'just setup' first" >&2
+        exit 1
+    fi
+
+    # The backend embeds web/dist at compile time, so the crate does not build
+    # without it. Build it once on a fresh clone; the :4200 dev server does not
+    # need it, only the binary's own copy served on :8081.
+    if [ ! -f web/dist/web/browser/index.html ]; then
+        echo "==> no UI build found; building it once for the embedded copy"
+        ( cd web && pnpm run build )
+    fi
+
+    pids=()
+
+    # Deepest child first: `pnpm start` and `cargo run` spawn children that
+    # survive a plain kill of the wrapper (leftover `ng serve` has bitten us).
+    kill_tree() {
+        local pid="$1" child
+        if command -v pgrep >/dev/null 2>&1; then
+            for child in $(pgrep -P "$pid" 2>/dev/null); do
+                kill_tree "$child"
+            done
+        fi
+        kill "$pid" 2>/dev/null || true
+    }
+
+    stop() {
+        trap - EXIT INT TERM
+        for pid in "${pids[@]}"; do
+            kill_tree "$pid"
+        done
+        for pid in "${pids[@]}"; do
+            wait "$pid" 2>/dev/null || true
+        done
+    }
+
+    trap stop EXIT
+    trap 'exit 130' INT TERM
+
+    ( cd server && exec cargo run --offline {{args}} ) &
+    api=$!
+    pids+=("$api")
+
+    ( cd web && exec pnpm start ) &
+    ui=$!
+    pids+=("$ui")
+
+    echo "==> gateway  http://127.0.0.1:8081  (UI embedded from the last build)"
+    echo "==> console  http://localhost:4200   (Vite dev server, proxies /api, /v1, /health)"
+
+    # Exit as soon as either half dies: a crashed backend under a live dev
+    # server looks like a broken app, and a dead dev server is easy to miss.
+    while kill -0 "$api" 2>/dev/null && kill -0 "$ui" 2>/dev/null; do
+        sleep 0.5
+    done
+
+    status=0
+    if kill -0 "$api" 2>/dev/null; then
+        wait "$ui" || status=$?
+        echo "==> UI dev server exited (status $status); stopping the gateway" >&2
+    else
+        wait "$api" || status=$?
+        echo "==> gateway exited (status $status); stopping the UI dev server" >&2
+    fi
+    exit "$status"
 
 # api-only binary, no embedded UI
 build-api:
