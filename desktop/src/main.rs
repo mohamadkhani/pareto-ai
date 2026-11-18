@@ -2,17 +2,17 @@
 //!
 //! A thin Tauri window around the unchanged gateway binary (decision D43):
 //!
-//! 1. pick a free loopback port,
-//! 2. spawn the gateway **sidecar** with a per-app data directory
-//!    (`<app-data>/gateway`), loopback listen address, insecure cookies (plain
-//!    HTTP on loopback) and no admin environment, so the first run shows the
-//!    setup wizard,
-//! 3. poll `GET /health` for up to 20 s,
-//! 4. open the main window at `http://127.0.0.1:<port>/` (the gateway keeps
+//! 1. run the gateway **sidecar** on the fixed loopback port `127.0.0.1:8081`
+//!    (fixed, not random, so API clients can rely on it) with a per-app data
+//!    directory (`<app-data>/gateway`), insecure cookies (plain HTTP on
+//!    loopback) and no admin environment, so the first run shows the setup
+//!    wizard,
+//! 2. poll `GET /health` for up to 20 s,
+//! 3. open the main window at `http://127.0.0.1:8081/` (the gateway keeps
 //!    serving its embedded console; no assets are duplicated here),
-//! 5. keep a system-tray icon: closing the window hides it instead of
+//! 4. keep a system-tray icon: closing the window hides it instead of
 //!    stopping the gateway, so the service keeps running in the background,
-//! 6. kill the sidecar when the app exits (tray "Quit Pareto AI").
+//! 5. kill the sidecar when the app exits (tray "Quit Pareto AI").
 //!
 //! The sidecar's stdout/stderr go to `<app-data>/gateway/sidecar.log`; the
 //! tail of that file is shown in a native error dialog if startup fails.
@@ -21,7 +21,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -42,6 +42,9 @@ const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const LOG_TAIL_LINES: usize = 40;
 /// Name of the process log inside the gateway data directory.
 const LOG_FILE: &str = "sidecar.log";
+/// Loopback port the gateway listens on. Fixed (never random) so API clients
+/// and the operator always know where the service is (D46).
+const GATEWAY_PORT: u16 = 8081;
 /// Label of the main (and only) window.
 const MAIN_WINDOW: &str = "main";
 /// Tray menu item id: show the main window.
@@ -134,10 +137,7 @@ fn start(app: &tauri::AppHandle) -> Result<(), StartupError> {
         log_tail: String::new(),
     })?;
 
-    let port = free_loopback_port().map_err(|error| StartupError {
-        message: format!("cannot reserve a loopback port: {error}"),
-        log_tail: String::new(),
-    })?;
+    let port = GATEWAY_PORT;
     let binary = sidecar_path().ok_or_else(|| StartupError {
         message: format!(
             "the gateway sidecar is missing.\n\nLooked for `pareto-gateway` next to \
@@ -304,19 +304,6 @@ fn show_startup_error(app: &tauri::AppHandle, error: &StartupError) {
         .blocking_show();
 }
 
-/// Binds port 0 on loopback and returns the port the OS assigned.
-///
-/// The listener is dropped immediately, so another process could in principle
-/// take the port before the gateway binds it; in practice the window is a few
-/// milliseconds and the gateway fails loudly (and the health poll reports it)
-/// if the port is gone.
-fn free_loopback_port() -> std::io::Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
-}
-
 /// Resolves the sidecar binary.
 ///
 /// Tauri bundles `externalBin` next to the app binary on every platform we
@@ -412,6 +399,17 @@ fn log_tail(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    /// Binds port 0 on loopback and returns the port the OS assigned; a test
+    /// helper for probe servers that need any free port. The gateway itself
+    /// uses the fixed [`GATEWAY_PORT`].
+    fn free_loopback_port() -> std::io::Result<u16> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
+    }
 
     #[test]
     fn free_port_is_usable_loopback() {

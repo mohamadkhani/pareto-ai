@@ -17,14 +17,14 @@ is no second frontend build and no custom webview assets.
 
 1. Tauri starts; a second launch focuses the existing window instead of opening
    a new one (`tauri-plugin-single-instance`).
-2. The shell picks a free loopback port (bind `127.0.0.1:0`, read the port,
-   release it).
+2. The shell starts the sidecar on the fixed loopback port `127.0.0.1:8081`
+   (never random, so API clients can rely on it — D46).
 3. It creates `<app-data>/gateway` and spawns the sidecar with:
 
    | Variable | Value |
    | --- | --- |
    | `GATEWAY_DATA_DIR` | `<app-data>/gateway` |
-   | `GATEWAY_LISTEN` | `127.0.0.1:<port>` |
+   | `GATEWAY_LISTEN` | `127.0.0.1:8081` |
    | `GATEWAY_INSECURE_COOKIES` | `1` (the app speaks plain HTTP on loopback) |
 
    `GATEWAY_ADMIN_EMAIL`, `GATEWAY_ADMIN_PASSWORD` and `GATEWAY_MASTER_KEY` are
@@ -32,7 +32,7 @@ is no second frontend build and no custom webview assets.
    the setup wizard.
 4. It polls `GET /health` every 200 ms for up to 20 s.
 5. On success it opens the main window (1280×800, minimum 900×600) at
-   `http://127.0.0.1:<port>/` and shows the system-tray icon.
+   `http://127.0.0.1:8081/` and shows the system-tray icon.
 6. On failure it shows a native error dialog containing the last 40 lines of
    `<app-data>/gateway/sidecar.log`, then exits with status 1.
 7. On exit it kills and reaps the sidecar.
@@ -167,9 +167,9 @@ sudo systemctl edit pareto-gateway           # or edit /etc/pareto-gateway.conf
 
 State lives in `/var/lib/pareto-gateway` (created by `StateDirectory`); the
 first run serves the setup wizard at the console URL. With the desktop family
-the tray app manages its **own** per-user instance (random port, data in
-`~/.local/share/dev.logicamp.paretoai/`), independent of the daemon — use one
-or the other.
+the tray app runs the same gateway on the **same fixed port** (`127.0.0.1:8081`,
+data in `~/.local/share/dev.logicamp.paretoai/`), so the daemon and the tray
+app must not run at the same time — use one or the other.
 
 ### Publishing to AUR
 
@@ -307,6 +307,7 @@ packages; see *Arch Linux (AUR)* above.
 | `cargo check` / `cargo clippy --all-targets -- -D warnings` in `desktop/` | clean |
 | `cargo test` in `desktop/` | 4 tests pass (health probe, free port, timeout, log tail) |
 | `just desktop-check` after the tray change | clean (fmt, clippy `-D warnings`, 4 tests); the tray and hide-on-close behaviour itself was not exercised (no usable display automation here) |
+| `just desktop-check` after the fixed-port change (D46) | clean (fmt, clippy `-D warnings`, 4 tests) |
 | AUR packaging (2026-11-18) | `makepkg --printsrcinfo` clean for all four PKGBUILDs, `systemd-analyze verify` clean for the unit (only "binary not installed" on this machine), `bash -n publish-aur.sh` clean; a real `makepkg` build is only possible after the first `v*` tag exists |
 | gateway sidecar with the app's env (`GATEWAY_DATA_DIR`, `GATEWAY_LISTEN`, `GATEWAY_INSECURE_COOKIES`) | `/health` 200, `/api/setup/status` reports `mode=setup`, master key generated in the data dir |
 | `pnpm tauri build --debug --no-bundle` | binary built |

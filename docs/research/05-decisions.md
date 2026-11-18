@@ -735,6 +735,19 @@ telemetry); killing it because the user closed the window would break API
 clients and scheduled work. An explicit quit keeps "stop the service"
 deliberate.
 
+### D46. The desktop gateway uses a fixed port, never a random one
+
+**Decision (user, 2026-11-18):** the desktop shell must not open a random
+port. The gateway listens on the fixed loopback address `127.0.0.1:8081` — the
+same default as the headless server — so API clients and the operator always
+know where the service is. Amends D43's startup sequence, which picked a free
+port per launch.
+
+**Consequences:** the desktop's gateway and the `pareto-gateway.service` daemon
+share the port, so only one of them may run at a time (documented in
+`docs/desktop.md`). If the port is taken by anything else, startup fails with
+the log-tail error dialog instead of silently moving.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or
