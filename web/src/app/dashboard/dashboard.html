@@ -186,21 +186,22 @@
             </div>
             <div class="legend">
               @for (segment of requestSegments(); track segment.label) {
-                <span class="legend-item">
-                  <span
-                    class="legend-dot"
-                    [class.is-success]="segment.tone === 'success'"
-                    [class.is-warning]="segment.tone === 'warning'"
-                    [class.is-info]="segment.tone === 'info'"
-                  ></span>
-                  {{ segment.count }} {{ segment.label }}
-                </span>
+                @if (segment.count > 0) {
+                  <span class="legend-item">
+                    <span
+                      class="legend-dot"
+                      [class.is-success]="segment.tone === 'success'"
+                      [class.is-warning]="segment.tone === 'warning'"
+                      [class.is-info]="segment.tone === 'info'"
+                    ></span>
+                    {{ segment.count }} {{ segment.label }}
+                  </span>
+                }
               }
             </div>
             <div class="secondary-row">
               <span>Error rate</span>
               <strong>{{ errorPercentLabel() }}</strong>
-              <span class="footnote">over the last {{ logs().length }} requests</span>
             </div>
           }
         }
@@ -302,7 +303,8 @@
         <a ui-card-header class="card-head" routerLink="/providers">
           <span
             class="card-icon"
-            [class.is-warning]="health().errors === 0"
+            [class.is-success]="health().errors === 0 && health().warnings === 0"
+            [class.is-warning]="health().warnings > 0 && health().errors === 0"
             [class.is-danger]="health().errors > 0"
             aria-hidden="true"
           >
@@ -345,17 +347,24 @@
           </ui-empty>
         } @else {
           <div class="metric">
-            <span class="metric-value">{{ health().errors }}</span>
-            <span class="metric-label">credential errors</span>
-          </div>
-          <div class="badge-row">
-            <ui-badge [tone]="health().warnings > 0 ? 'warning' : 'neutral'">
-              {{ health().warnings }} warnings
-            </ui-badge>
-            <span class="footnote">
-              {{ health().credentials }} credentials across {{ providers().length }} providers
+            <span class="metric-value">{{ health().errors + health().warnings }}</span>
+            <span class="metric-label">
+              credential {{ health().errors + health().warnings === 1 ? 'issue' : 'issues' }}
             </span>
           </div>
+          @if (health().errors + health().warnings > 0) {
+            <p class="health-breakdown footnote">
+              @if (health().errors > 0) {
+                {{ health().errors }} {{ health().errors === 1 ? 'error' : 'errors' }}
+              }
+              @if (health().errors > 0 && health().warnings > 0) {
+                <span aria-hidden="true">·</span>
+              }
+              @if (health().warnings > 0) {
+                {{ health().warnings }} {{ health().warnings === 1 ? 'warning' : 'warnings' }}
+              }
+            </p>
+          }
           @if (healthNotes().length === 0) {
             <p class="footnote">All credentials are healthy.</p>
           } @else {
@@ -375,7 +384,8 @@
           }
         }
         <div ui-card-footer class="card-foot">
-          {{ health().credentials }} credentials across {{ providers().length }} providers
+          {{ health().credentials }} credential{{ health().credentials === 1 ? '' : 's' }}
+          monitored.
         </div>
       </ui-card>
     </div>

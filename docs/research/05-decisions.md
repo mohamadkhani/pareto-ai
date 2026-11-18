@@ -847,6 +847,29 @@ consecutive failures), so persistence is cheap.
 **Consequence:** a trip is recorded even when the process later restarts;
 resetting a pair is an audited admin action, not a hidden operator trick.
 
+### D51. Dashboard cards: one primary number, opt-in hover, small real charts
+
+**Decision (user, 2026-11-19):** each dashboard card follows one skeleton —
+icon, linked title, one primary number, supporting rows, and a pinned footer
+status line — in a deterministic grid (4 columns at 1440px and above, 2 at
+800–1439px, 1 below 800px) with equal heights. Cards opt into
+`[interactive]="true"`; hover and focus-within strengthen the border with a new
+`--border-hover` token and `--shadow-sm`, while only the title link navigates
+(no whole-card click, so nested buttons stay honest).
+
+Spend gets a seven-day priced-spend sparkline and Requests a stacked outcome
+bar (priced, partial, unpriced, refused), both with text alternatives and no
+per-point tooltip. A non-dismissible attention strip above the cards lists
+credential problems and stale price/benchmark syncs when they exist. Empty
+states inside cards use the new compact `ui-empty` variant; loading uses
+skeletons. Recent activity keeps the dense table on desktop, capped at eight
+rows, and a two-line list on phones.
+
+**Consequences:** `UiCard`, `UiEmpty`, and the new `UiSparkline` gain variants
+shown on `/styleguide` (D28). Unpriced spend is never drawn as zero. The
+initial bundle warning budget rises to 850 kB for the richer dashboard; the
+page stays a lazy chunk.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

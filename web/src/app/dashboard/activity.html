@@ -67,7 +67,9 @@
               <ui-badge [tone]="statusTone(row.entry.status)">{{
                 statusLabel(row.entry.status)
               }}</ui-badge>
-              <span class="activity-cost">{{ formatUsd(row.entry.cost_usd) }}</span>
+              @if (row.entry.cost_usd !== null) {
+                <span class="activity-cost">{{ formatUsd(row.entry.cost_usd) }}</span>
+              }
             </div>
             <div class="activity-bottom">
               <code>{{ row.entry.requested_model ?? '—' }}</code>

@@ -12,6 +12,12 @@
 .card-head-row a,
 .recent-card a {
   color: var(--accent);
+  text-decoration: none;
+}
+
+.card-head-row a:hover,
+.recent-card a:hover {
+  text-decoration: underline;
 }
 
 .card-head-row a {
