@@ -11,7 +11,7 @@ const localStatus: SetupStatus = {
   is_local: true,
   setup_required: true,
   warning: null,
-  tls: { enabled: false, domain: null },
+  tls: { enabled: false, domain: null, reason: 'local', error: null, expires_at: null },
   master_key_source: 'file',
 };
 

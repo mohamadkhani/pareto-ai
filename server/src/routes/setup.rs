@@ -26,15 +26,7 @@ use crate::auth::{self, ClientIp};
 use crate::error::{self, ApiError, ErrorBody};
 use crate::routes::auth::{LoginResponse, UserSummary};
 use crate::setup::{self, Mode, SetupError};
-
-/// TLS is a separate task (there is no TLS listener yet); the field exists so
-/// the console and the API agree on the shape before that lands.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TlsStatus {
-    pub enabled: bool,
-    /// Certificate hostname when TLS is enabled.
-    pub domain: Option<String>,
-}
+use crate::tls::TlsStatus;
 
 /// The gateway's authentication state and exposure facts.
 #[derive(Debug, Serialize, ToSchema)]
@@ -261,10 +253,7 @@ fn build_status(state: &AppState, local: bool) -> SetupStatus {
         is_local: local,
         setup_required: mode == Mode::Setup,
         warning: setup::warning_for(mode, local),
-        tls: TlsStatus {
-            enabled: false,
-            domain: None,
-        },
+        tls: state.tls.status(),
         master_key_source: state.setup.master_key_source().as_str().to_string(),
     }
 }
@@ -300,6 +289,9 @@ mod tests {
         assert_eq!(status.body["bind"], "127.0.0.1:0");
         assert_eq!(status.body["tls"]["enabled"], false);
         assert_eq!(status.body["tls"]["domain"], serde_json::Value::Null);
+        assert_eq!(status.body["tls"]["reason"], "local");
+        assert_eq!(status.body["tls"]["error"], serde_json::Value::Null);
+        assert_eq!(status.body["tls"]["expires_at"], serde_json::Value::Null);
         assert_eq!(status.body["master_key_source"], "env");
         assert!(
             status.body["warning"]
@@ -366,6 +358,39 @@ mod tests {
         .await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         assert_eq!(again.body["error"]["code"], "setup_already_complete");
+    }
+
+    #[tokio::test]
+    async fn tls_status_moves_from_pending_to_failed_with_the_domain_kept() {
+        let app = TestApp::with_config(|config| {
+            config.listen = "0.0.0.0:8081".parse().expect("public bind");
+            config.tls.public_domain = Some("gateway.example.com".to_string());
+        })
+        .await;
+        let router = app.router();
+
+        let pending = send(
+            router.clone(),
+            status_request("/api/setup/status", Some("127.0.0.1:5000")),
+        )
+        .await;
+        assert_eq!(pending.body["tls"]["enabled"], false);
+        assert_eq!(pending.body["tls"]["domain"], "gateway.example.com");
+        assert_eq!(pending.body["tls"]["reason"], "pending");
+        assert_eq!(pending.body["tls"]["error"], serde_json::Value::Null);
+        assert_eq!(pending.body["tls"]["expires_at"], serde_json::Value::Null);
+
+        app.state
+            .tls
+            .set_error("ACME request failed: connection refused");
+        let failed = send(router, status_request("/api/setup/status", None)).await;
+        assert_eq!(failed.body["tls"]["enabled"], false);
+        assert_eq!(failed.body["tls"]["domain"], "gateway.example.com");
+        assert_eq!(failed.body["tls"]["reason"], serde_json::Value::Null);
+        assert_eq!(
+            failed.body["tls"]["error"],
+            "ACME request failed: connection refused"
+        );
     }
 
     #[tokio::test]

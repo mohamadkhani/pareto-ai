@@ -54,6 +54,7 @@ curl http://127.0.0.1:8081/health
 | Data | `./data/gateway.db`, created with migrations (`GATEWAY_DATA_DIR` overrides) |
 | Credential master key | `GATEWAY_MASTER_KEY` when set; otherwise generated on first start into `./data/master.key` (mode `0600`) and reused. Only the path is logged. |
 | First account | The setup wizard when no user exists (`GATEWAY_ADMIN_EMAIL` + `GATEWAY_ADMIN_PASSWORD` still create it non-interactively at startup) |
+| TLS | Off on the loopback default. A public bind with `GATEWAY_PUBLIC_DOMAIN` obtains a certificate automatically (*HTTPS on a domain* below) |
 
 Authentication modes:
 
@@ -73,6 +74,61 @@ banner. With the override, setup still has to be finished **locally** (or with
 the `GATEWAY_ADMIN_*` shortcut): the wizard's writes are loopback-only, and a
 cross-site `Origin` is refused so a random web page cannot claim the first
 account.
+
+### HTTPS on a domain
+
+When the gateway is meant to be reached at a public hostname, it can manage its
+own certificate (decision D54). Point the domain's DNS at the host, open ports
+80 and 443, and start with:
+
+```bash
+GATEWAY_LISTEN=0.0.0.0:8081 \
+GATEWAY_PUBLIC_DOMAIN=gateway.example.com \
+GATEWAY_ACME_EMAIL=you@example.com \
+./server/target/release/gateway
+```
+
+What happens, in order:
+
+1. The normal HTTP listener on `GATEWAY_LISTEN` starts immediately; nothing
+   waits for the certificate authority.
+2. A background task binds port 80, answers the ACME HTTP-01 challenge for the
+   domain, and asks Let's Encrypt for a certificate. The account key and the
+   certificate live in `<data>/tls/` (`account.json`, `fullchain.pem`,
+   `privkey.pem`; the private files are mode `0600`).
+3. Once a certificate exists, the gateway serves the same console and API over
+   HTTPS on `GATEWAY_HTTPS_PORT` and answers every other port-80 request with a
+   `308` to `https://<domain>/…`. HTTPS responses carry
+   `Strict-Transport-Security: max-age=31536000`.
+4. Renewal starts 30 days before expiry and hot-swaps the TLS configuration;
+   no restart is needed and in-flight connections finish on the old one.
+
+The plain-HTTP listener on `GATEWAY_LISTEN` keeps serving. That is deliberate:
+a reverse proxy on another port, a local operator, and the desktop app do not
+lose access, and a failed renewal never takes the gateway down. `/api/setup/status`
+reports `tls: {enabled, domain, reason, error, expires_at}`; `reason` is
+`local`, `no_domain`, `off`, or `pending`, and a failure fills `error` while
+`enabled` stays `false`. Settings shows the same facts, and the console shows a
+banner when a public bind is serving plain HTTP or a renewal is failing.
+
+Requirements and limits:
+
+- Ports 80 and 443 must be reachable from the internet; binding port 80 usually
+  needs root (or `CAP_NET_BIND_SERVICE` / a systemd socket).
+- A loopback, RFC 1918, or link-local bind is never upgraded: a public CA cannot
+  validate a private address. TLS stays off with reason `local`.
+- The domain must resolve to this host and answer `/.well-known/acme-challenge/*`
+  over port 80. A firewall or proxy that swallows port 80 makes HTTP-01 fail.
+- Let's Encrypt rate-limits issuance. For a first try, or while changing DNS,
+  use `GATEWAY_ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory`;
+  staging certificates are not trusted by browsers.
+- Live issuance was **not** verified in this repository's test environment (no
+  public domain and no ports 80/443). The decision matrix, the challenge
+  endpoint, the redirect, the certificate store, renewal scheduling, and both
+  issuance outcomes are covered with unit tests and a fake provider; verify the
+  network path on a real host as described above.
+- The desktop build stays on plain HTTP over loopback; see
+  [`docs/desktop.md`](docs/desktop.md).
 
 Frontend (development, proxying the API to `127.0.0.1:8081`):
 
@@ -135,7 +191,12 @@ run it and open `http://127.0.0.1:8081/` (see *Run* above). See
 | `GATEWAY_ADMIN_EMAIL` / `GATEWAY_ADMIN_PASSWORD` | unset | Optional non-interactive shortcut: when **both** are set and no user exists, the first admin is created at startup (flagged for password rotation). Otherwise the setup wizard runs. Half a configuration fails startup. |
 | `GATEWAY_ALLOW_PUBLIC_NO_AUTH` | unset | Set to `1` to start on a non-loopback bind while in `setup` or `unprotected` mode. Without it such a start is refused; with it the console keeps a red exposure banner. |
 | `GATEWAY_TIMEZONE` | `UTC` | IANA timezone (e.g. `Asia/Tehran`) for budget-period boundaries and usage-rollup days. Startup fails on an unknown zone. |
-| `GATEWAY_INSECURE_COOKIES` | unset | Set to `1` to send session cookies without `Secure`, so the gateway works over plain HTTP during development |
+| `GATEWAY_INSECURE_COOKIES` | unset | Set to `1` to send session cookies without `Secure`, so the gateway works over plain HTTP during development. Without it cookies are `Secure` whenever TLS is active. |
+| `GATEWAY_TLS` | `auto` | `auto` obtains a Let's Encrypt certificate when the bind is public and `GATEWAY_PUBLIC_DOMAIN` is set; `off` keeps plain HTTP on every bind. A loopback/private bind never gets TLS, even with a domain. |
+| `GATEWAY_PUBLIC_DOMAIN` | unset | Public hostname for the certificate (e.g. `gateway.example.com`). Must point at this host and be reachable on ports 80 and 443. |
+| `GATEWAY_ACME_EMAIL` | unset | Contact address registered with the ACME account (Let's Encrypt expiry notices). Optional but recommended. |
+| `GATEWAY_HTTPS_PORT` | `443` | Port HTTPS is served on. Port 80 stays reserved for ACME HTTP-01 challenges and the HTTP→HTTPS redirect. |
+| `GATEWAY_ACME_DIRECTORY` | Let's Encrypt production | ACME directory URL. Use `https://acme-staging-v02.api.letsencrypt.org/directory` for a staging dry run. |
 | `GATEWAY_TRUSTED_PROXY` | unset | Comma-separated IPv4/IPv6 CIDRs of reverse proxies allowed to vouch for the client address via `X-Forwarded-For`/`X-Real-IP` (e.g. `10.0.0.0/8,127.0.0.1/32`). This decides the client IP used for login rate limiting and audit rows: when unset, the peer address is the client and those headers are ignored ([review finding 4](docs/reviews/2026-11-16-m1-backend.md)). Startup warns when listening on a non-loopback address without it. |
 | `GATEWAY_MAX_BODY_BYTES` | `4194304` (4 MiB) | Largest `POST /v1/chat/completions` request body |
 | `GATEWAY_TIMEOUT_CONNECT_MS` | `10000` | Upstream TCP connect timeout |

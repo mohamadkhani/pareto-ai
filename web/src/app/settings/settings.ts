@@ -48,6 +48,30 @@ export class Settings {
     }
   });
 
+  /** One line describing automatic HTTPS, including why it is off. */
+  protected readonly tlsLabel = computed(() => {
+    const tls = this.status()?.tls;
+    if (!tls) {
+      return 'Unknown';
+    }
+    if (tls.enabled) {
+      const expiry = tls.expires_at ? `, expires ${tls.expires_at.slice(0, 10)}` : '';
+      return `HTTPS — ${tls.domain ?? 'enabled'}${expiry}`;
+    }
+    switch (tls.reason) {
+      case 'local':
+        return 'Off — plain HTTP (local bind)';
+      case 'off':
+        return 'Off — plain HTTP (GATEWAY_TLS=off)';
+      case 'no_domain':
+        return 'Off — plain HTTP (set GATEWAY_PUBLIC_DOMAIN to enable HTTPS)';
+      case 'pending':
+        return `Obtaining a certificate for ${tls.domain ?? 'this domain'}…`;
+      default:
+        return tls.error !== null ? 'Failing — plain HTTP (see below)' : 'Off — plain HTTP';
+    }
+  });
+
   protected readonly notice = signal<string | null>(null);
   protected readonly errorMessage = signal<string | null>(null);
 

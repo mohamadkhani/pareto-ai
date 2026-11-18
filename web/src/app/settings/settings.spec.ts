@@ -24,7 +24,7 @@ const protectedStatus: SetupStatus = {
   is_local: false,
   setup_required: false,
   warning: null,
-  tls: { enabled: false, domain: null },
+  tls: { enabled: false, domain: null, reason: 'local', error: null, expires_at: null },
   master_key_source: 'env',
 };
 
@@ -99,6 +99,40 @@ describe('Settings', () => {
     expect(text).toContain('Off — plain HTTP');
     expect(text).toContain('GATEWAY_MASTER_KEY environment variable');
     expect(text).not.toContain('Protect this gateway');
+  });
+
+  it('shows an active certificate with its expiry', async () => {
+    const fixture = await create(admin, {
+      ...protectedStatus,
+      tls: {
+        enabled: true,
+        domain: 'gateway.example.com',
+        reason: null,
+        error: null,
+        expires_at: '2027-02-17T00:00:00Z',
+      },
+    });
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+
+    expect(text).toContain('HTTPS — gateway.example.com, expires 2027-02-17');
+  });
+
+  it('explains a failed automatic HTTPS attempt', async () => {
+    const fixture = await create(admin, {
+      ...protectedStatus,
+      tls: {
+        enabled: false,
+        domain: 'gateway.example.com',
+        reason: null,
+        error: 'ACME could not validate the domain',
+        expires_at: null,
+      },
+    });
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+
+    expect(text).toContain('Failing — plain HTTP (see below)');
+    expect(text).toMatch(/Automatic HTTPS failed/);
+    expect(text).toContain('ACME could not validate the domain');
   });
 
   it('changes the own password with the CSRF token and reports success', async () => {

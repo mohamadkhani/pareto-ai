@@ -17,7 +17,7 @@ const protectedStatus: SetupStatus = {
   is_local: true,
   setup_required: false,
   warning: null,
-  tls: { enabled: false, domain: null },
+  tls: { enabled: false, domain: null, reason: 'local', error: null, expires_at: null },
   master_key_source: 'file',
 };
 
@@ -163,6 +163,47 @@ describe('Shell', () => {
     const fixture = await create(admin);
 
     expect((fixture.nativeElement as HTMLElement).querySelector('ui-banner')).toBeNull();
+  });
+
+  it('explains a public HTTP bind without automatic HTTPS', async () => {
+    const fixture = await create(admin);
+    TestBed.inject(SetupService).status.set({
+      ...protectedStatus,
+      bind: '0.0.0.0:8081',
+      is_local: false,
+      tls: {
+        enabled: false,
+        domain: null,
+        reason: 'no_domain',
+        error: null,
+        expires_at: null,
+      },
+    });
+    fixture.detectChanges();
+    const banner = (fixture.nativeElement as HTMLElement).querySelector('ui-banner');
+
+    expect(banner?.textContent).toContain('GATEWAY_PUBLIC_DOMAIN');
+    expect(banner?.classList).toContain('tone-warning');
+  });
+
+  it('shows a danger banner when automatic HTTPS is failing', async () => {
+    const fixture = await create(admin);
+    TestBed.inject(SetupService).status.set({
+      ...protectedStatus,
+      is_local: false,
+      tls: {
+        enabled: false,
+        domain: 'gateway.example.com',
+        reason: null,
+        error: 'ACME could not validate the domain',
+        expires_at: null,
+      },
+    });
+    fixture.detectChanges();
+    const banner = (fixture.nativeElement as HTMLElement).querySelector('ui-banner');
+
+    expect(banner?.textContent).toContain('Automatic HTTPS failed');
+    expect(banner?.classList).toContain('tone-danger');
   });
 
   it('does not link to the retired offerings, benchmarks, or sync routes', async () => {

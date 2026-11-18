@@ -134,7 +134,7 @@
           <dt>Setup</dt>
           <dd>{{ facts.setup_required ? 'Required' : 'Complete' }}</dd>
           <dt>TLS</dt>
-          <dd>{{ facts.tls.enabled ? (facts.tls.domain ?? 'Enabled') : 'Off — plain HTTP' }}</dd>
+          <dd>{{ tlsLabel() }}</dd>
           <dt>Credential master key</dt>
           <dd>
             {{
@@ -147,6 +147,13 @@
         @if (facts.mode === 'unprotected') {
           <ui-banner [tone]="facts.is_local ? 'warning' : 'danger'">
             {{ facts.warning }}
+          </ui-banner>
+        }
+        @if (facts.tls.error; as tlsError) {
+          <ui-banner tone="danger">
+            Automatic HTTPS failed: {{ tlsError }}. The gateway is still serving plain HTTP and
+            retries in the background; check that the domain points here and ports 80/443 are
+            reachable.
           </ui-banner>
         }
       } @else {

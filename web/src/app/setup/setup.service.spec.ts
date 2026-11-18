@@ -9,7 +9,7 @@ const setupStatus: SetupStatus = {
   is_local: true,
   setup_required: true,
   warning: 'This gateway is not protected yet. Finish setup to set an admin password.',
-  tls: { enabled: false, domain: null },
+  tls: { enabled: false, domain: null, reason: 'local', error: null, expires_at: null },
   master_key_source: 'file',
 };
 

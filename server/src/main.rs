@@ -40,6 +40,7 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod throttle;
+mod tls;
 mod upstream;
 mod users;
 
@@ -87,6 +88,9 @@ pub struct AppState {
     /// Guard shared by the background benchmark sync and the admin trigger,
     /// so two syncs never overlap (D31).
     pub benchmark_sync: Arc<tokio::sync::Mutex<()>>,
+    /// Automatic TLS state and the status reported by `/api/setup/status`
+    /// (D54). Always present; inert when the decision kept TLS off.
+    pub tls: Arc<tls::TlsRuntime>,
 }
 
 #[tokio::main]
@@ -189,6 +193,17 @@ async fn main() -> Result<()> {
 
     let breaker_threshold = config.breaker_threshold;
     let breaker_cooldown = config.breaker_cooldown;
+    let tls_runtime = Arc::new(tls::TlsRuntime::new(config.tls.clone(), config.listen));
+    match tls_runtime.decision() {
+        tls::TlsDecision::Enabled { domain } => tracing::info!(
+            %domain,
+            https_port = config.tls.https_port,
+            "automatic HTTPS will start in the background (D54)"
+        ),
+        tls::TlsDecision::Disabled { reason } => {
+            tracing::debug!(reason = reason.as_str(), "automatic HTTPS is off")
+        }
+    }
     let state = AppState {
         config,
         pool,
@@ -207,6 +222,7 @@ async fn main() -> Result<()> {
             cooldown: breaker_cooldown,
         })),
         benchmark_sync: Arc::new(tokio::sync::Mutex::new(())),
+        tls: tls_runtime,
     };
 
     // Warm the telemetry cache from `telemetry_snapshots` before the first
@@ -304,6 +320,11 @@ async fn main() -> Result<()> {
         database = %state.config.database_path().display(),
         "gateway started"
     );
+
+    // Automatic HTTPS (D54) runs beside the plain-HTTP listener. It binds port
+    // 80 and the HTTPS port in its own task, so a slow or failing ACME server
+    // never delays startup.
+    tls::service::spawn(&state, app.clone());
 
     axum::serve(
         listener,

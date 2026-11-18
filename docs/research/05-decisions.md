@@ -626,9 +626,9 @@ restart does not silently re-open the wizard. With the override flag the
 wizard is still loopback-only, so a remote operator finishes setup locally or
 with the `GATEWAY_ADMIN_*` shortcut. Setup mutations also require a same-origin
 (or absent) `Origin`, because a browser can reach a loopback gateway from any
-page; they are not CSRF-guarded (no session exists yet). TLS is still a
-separate task; the status reports `tls: {enabled: false, domain: null}` until a
-listener exists.
+page; they are not CSRF-guarded (no session exists yet). TLS was a separate
+task at the time; D54 now adds automatic certificates for a public domain, and
+the status reports the full `tls` shape.
 
 ### D41. Provider price mapping is user-authored; no mapping means unpriced
 
@@ -942,6 +942,55 @@ if any `.css` file reappears under `web/src` (the allowlist is empty). Declarati
 order is load order, so the `@use` list must stay fonts → tokens → themes →
 base → utilities → components. Note: the requested decision number "D50" was
 already taken by breaker visibility, so the styles decision is recorded as D53.
+
+### D54. Automatic TLS for a public domain, off everywhere else
+
+**Decision (user, 2026-11-19):** when the gateway is bound to a public interface
+and `GATEWAY_PUBLIC_DOMAIN` is set, it obtains and renews a Let's Encrypt
+certificate itself. The mode is chosen at startup by a pure decision:
+
+| Bind | `GATEWAY_TLS` | Domain | Result | `tls.reason` |
+| --- | --- | --- | --- | --- |
+| loopback, RFC 1918, or link-local | any | any | plain HTTP | `local` |
+| public | `off` | any | plain HTTP | `off` |
+| public | `auto` | unset | plain HTTP | `no_domain` |
+| public | `auto` | set | HTTPS on `GATEWAY_HTTPS_PORT`, HTTP→HTTPS on port 80 | `null` (`pending` until issued) |
+
+Configuration: `GATEWAY_TLS=auto|off` (default `auto`), `GATEWAY_PUBLIC_DOMAIN`,
+`GATEWAY_ACME_EMAIL`, `GATEWAY_HTTPS_PORT` (default 443), and
+`GATEWAY_ACME_DIRECTORY` (default Let's Encrypt production; staging is
+documented). The certificate store is `<data>/tls/` with `account.json`,
+`fullchain.pem`, and `privkey.pem`; the two private files are mode `0600` and
+writes are atomic renames.
+
+Issuance uses **HTTP-01 on port 80** through a small listener that answers
+`/.well-known/acme-challenge/*` and, once a certificate is active, `308`-redirects
+every other request to HTTPS. It runs in a background task and never blocks
+startup: the plain-HTTP listener on `GATEWAY_LISTEN` starts first and keeps
+serving. A failure only sets `tls.error` and retries hourly. Renewal is scheduled
+30 days before expiry; the new certificate is hot-swapped into the rustls
+configuration that each new connection reads, so nothing restarts. HTTPS
+responses add `Strict-Transport-Security: max-age=31536000`, and session cookies
+are `Secure` by default (unchanged `GATEWAY_INSECURE_COOKIES=1` escape hatch).
+
+The decision sits behind a `CertificateProvider` trait, so unit tests exercise
+issuance success and failure with a fake and do not touch the network.
+
+**Why:** a public gateway carrying API keys and admin sessions must not run on
+plain HTTP, and asking the operator to terminate TLS in a separate proxy is a
+setup step that gets skipped or misconfigured. Let's Encrypt over HTTP-01 needs
+nothing but DNS and ports 80/443, which a gateway host already has.
+
+**Consequences:** ports 80/443 are now used when TLS is active; binding 80 may
+need privilege, and a firewall that blocks port 80 makes issuance fail (the
+gateway still runs). No TLS is attempted on private/loopback binds, so the
+desktop sidecar and `just dev` are unchanged (D43). A reverse proxy in front of
+the gateway is still supported: it should talk to `GATEWAY_LISTEN`, and the
+operator can set `GATEWAY_TLS=off` if the proxy owns certificates. Live issuance
+cannot be verified in this repository's test environment (no public domain and
+no ports 80/443); the decision matrix, challenge endpoint, redirect handler,
+store, renewal math, status shape, and fake-provider outcomes are covered by
+tests, and the README documents the live procedure and the staging directory.
 
 ## Open questions
 

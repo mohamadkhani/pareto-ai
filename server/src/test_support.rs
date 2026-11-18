@@ -92,6 +92,7 @@ impl TestApp {
         let mut config = Config {
             listen: "127.0.0.1:0".parse().expect("static address"),
             data_dir: dir.clone(),
+            tls: crate::config::TlsConfig::local(&dir),
             master_key: Some(MasterKey::from_bytes([7u8; 32])),
             allow_public_no_auth: false,
             timezone: "UTC".to_string(),
@@ -114,6 +115,10 @@ impl TestApp {
             threshold: config.breaker_threshold,
             cooldown: config.breaker_cooldown,
         };
+        let tls = Arc::new(crate::tls::TlsRuntime::new(
+            config.tls.clone(),
+            config.listen,
+        ));
         let state = AppState {
             config: Arc::new(config),
             pool,
@@ -135,6 +140,7 @@ impl TestApp {
             telemetry: Arc::new(crate::telemetry::TelemetryStore::new()),
             breaker: Arc::new(crate::breaker::BreakerRegistry::new(breaker_config)),
             benchmark_sync: Arc::new(tokio::sync::Mutex::new(())),
+            tls,
         };
         Self { state, dir }
     }

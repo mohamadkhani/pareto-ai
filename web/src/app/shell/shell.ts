@@ -126,13 +126,42 @@ export class Shell {
    */
   protected readonly exposure = computed<ExposureNote | null>(() => {
     const status = this.setup.status();
-    if (status === null || status.mode !== 'unprotected') {
+    if (status === null) {
       return null;
     }
-    return {
-      tone: status.is_local ? 'info' : 'danger',
-      text: status.warning ?? 'This gateway is running without a password.',
-    };
+    if (status.mode === 'unprotected') {
+      return {
+        tone: status.is_local ? 'info' : 'danger',
+        text: status.warning ?? 'This gateway is running without a password.',
+      };
+    }
+    const tls = status.tls;
+    if (tls.enabled || tls.reason === 'local') {
+      return null;
+    }
+    if (tls.error !== null) {
+      return {
+        tone: 'danger',
+        text:
+          `Automatic HTTPS failed (${tls.error}). The gateway keeps serving plain HTTP; ` +
+          'check the logs and Settings.',
+      };
+    }
+    if (tls.reason === 'no_domain') {
+      return {
+        tone: 'warning',
+        text:
+          'This gateway is reachable over plain HTTP. Set GATEWAY_PUBLIC_DOMAIN ' +
+          '(and GATEWAY_ACME_EMAIL) to obtain a certificate automatically.',
+      };
+    }
+    if (tls.reason === 'off') {
+      return {
+        tone: 'warning',
+        text: 'This gateway is serving plain HTTP because GATEWAY_TLS=off.',
+      };
+    }
+    return null;
   });
 
   private readonly menuButton = viewChild<ElementRef<HTMLButtonElement>>('menuButton');

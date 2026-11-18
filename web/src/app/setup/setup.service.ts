@@ -5,10 +5,20 @@ import { AuthService, type AuthSession } from '../auth/auth.service';
 /** Which authentication state the gateway is in. */
 export type SetupMode = 'setup' | 'unprotected' | 'protected';
 
-/** TLS is not implemented yet; the shape is stable so the UI can show it. */
+/** Why automatic HTTPS is off. `null` once a certificate is active. */
+export type TlsOffReason = 'local' | 'off' | 'no_domain' | 'pending';
+
+/** Automatic TLS state (decision D54). */
 export interface TlsStatus {
+  /** True only once a certificate is installed and HTTPS is being served. */
   enabled: boolean;
+  /** Certificate hostname; configured even while issuance is failing. */
   domain: string | null;
+  reason: TlsOffReason | null;
+  /** The last issuance/renewal failure, kept until a retry succeeds. */
+  error: string | null;
+  /** Certificate expiry (ISO-8601) once enabled. */
+  expires_at: string | null;
 }
 
 /** What `GET /api/setup/status` returns. */

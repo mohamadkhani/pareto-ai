@@ -113,7 +113,7 @@ use utoipa::OpenApi;
         crate::routes::setup::SetupStatus,
         crate::routes::setup::SetupAdminRequest,
         crate::routes::setup::SetupSkipRequest,
-        crate::routes::setup::TlsStatus,
+        crate::tls::TlsStatus,
         crate::setup::Mode,
         crate::routes::audit::AuditEntry,
         crate::routes::audit::AuditCursor,

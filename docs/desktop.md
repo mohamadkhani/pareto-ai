@@ -67,6 +67,22 @@ exits and stops the sidecar, but the window close button never does.
 That directory holds `gateway.db`, `master.key` (generated on first start,
 mode 0600) and `sidecar.log`. Deleting it resets the app to the wizard.
 
+## TLS
+
+The desktop app deliberately stays on **plain HTTP over loopback**. Its gateway
+binds `127.0.0.1:8081`, which the automatic-TLS decision treats as local
+(decision D54): no certificate is requested, no port 80/443 listener is opened,
+and `/api/setup/status` reports `tls.reason = "local"`. This is also why the
+shell sets `GATEWAY_INSECURE_COOKIES=1`: a `Secure` cookie would not be sent
+over `http://127.0.0.1`.
+
+Do not set `GATEWAY_PUBLIC_DOMAIN` for the desktop sidecar. If the gateway must
+be public, run the server build (`pareto-gateway` / `pareto-ai` package) with a
+public bind and the TLS variables from the README; the desktop shell is not a
+deployment tool. A future "expose this app" feature would have to forward port
+80/443 and handle the ACME challenge, which is out of scope for D43's sidecar
+model.
+
 ## Prerequisites
 
 Common: Rust stable (1.77+; this repo is on 1.99), Node 22 and pnpm 10.27

@@ -15,6 +15,14 @@ use crate::secrets::{self, MasterKey};
 
 /// Bind address of a zero-configuration start (`GATEWAY_LISTEN` unset).
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
+/// Let's Encrypt production ACME directory (`GATEWAY_ACME_DIRECTORY` unset).
+pub const DEFAULT_ACME_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
+/// Let's Encrypt staging ACME directory, for a dry run without real certs.
+/// Documented for `GATEWAY_ACME_DIRECTORY`; referenced by the config tests.
+#[allow(dead_code)]
+pub const STAGING_ACME_DIRECTORY: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+/// Port HTTPS is served on by default (`GATEWAY_HTTPS_PORT`).
+pub const DEFAULT_HTTPS_PORT: u16 = 443;
 /// Data directory of a zero-configuration start, relative to the working
 /// directory (`GATEWAY_DATA_DIR` unset).
 pub const DEFAULT_DATA_DIR: &str = "data";
@@ -94,8 +102,65 @@ pub struct Config {
     /// `pricing.default_mix_profile` setting (decision D34); absent/blank
     /// means the setting decides.
     pub token_mix_profile: Option<String>,
+    /// Automatic TLS settings (D54). `GATEWAY_TLS`, `GATEWAY_PUBLIC_DOMAIN`,
+    /// `GATEWAY_ACME_EMAIL`, `GATEWAY_HTTPS_PORT`, `GATEWAY_ACME_DIRECTORY`.
+    pub tls: TlsConfig,
     /// Version reported by the health endpoint.
     pub version: String,
+}
+
+/// Whether automatic certificate management is allowed at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsMode {
+    /// Obtain a certificate when the bind is public and a domain is configured.
+    Auto,
+    /// Never request a certificate; keep serving plain HTTP (reason `off`).
+    Off,
+}
+
+impl TlsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Automatic TLS configuration (`GATEWAY_TLS` and friends, decision D54).
+///
+/// All fields are optional: with none set the gateway behaves exactly as before
+/// (plain HTTP, `tls.enabled = false`, reason `local` on a loopback bind).
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// `auto` (default) or `off`.
+    pub mode: TlsMode,
+    /// Public hostname whose certificate is requested (`GATEWAY_PUBLIC_DOMAIN`).
+    pub public_domain: Option<String>,
+    /// ACME account contact email (`GATEWAY_ACME_EMAIL`).
+    pub acme_email: Option<String>,
+    /// HTTPS listen port (`GATEWAY_HTTPS_PORT`, default 443).
+    pub https_port: u16,
+    /// ACME directory URL (`GATEWAY_ACME_DIRECTORY`), default Let's Encrypt
+    /// production. Use [`STAGING_ACME_DIRECTORY`] for a dry run.
+    pub acme_directory: String,
+    /// Certificate store under `<data>/tls/`.
+    pub cert_dir: PathBuf,
+}
+
+impl TlsConfig {
+    /// A disabled configuration rooted at `data_dir`, used by tests and by
+    /// callers that build a [`Config`] by hand.
+    pub fn local(data_dir: &std::path::Path) -> Self {
+        Self {
+            mode: TlsMode::Auto,
+            public_domain: None,
+            acme_email: None,
+            https_port: DEFAULT_HTTPS_PORT,
+            acme_directory: DEFAULT_ACME_DIRECTORY.to_string(),
+            cert_dir: data_dir.join("tls"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +176,12 @@ pub enum ConfigError {
     Timezone(String),
     #[error("{name} is not a positive integer: {value}")]
     Number { name: &'static str, value: String },
+    #[error("GATEWAY_TLS must be 'auto' or 'off', got: {0}")]
+    TlsMode(String),
+    #[error("GATEWAY_PUBLIC_DOMAIN is not a valid hostname: {0}")]
+    PublicDomain(String),
+    #[error("GATEWAY_ACME_DIRECTORY must be an http(s) URL, got: {0}")]
+    AcmeDirectory(String),
     #[error("cannot determine the current directory: {0}")]
     CurrentDir(#[from] std::io::Error),
     #[error("{0}")]
@@ -138,6 +209,7 @@ impl Config {
 
         let timezone = env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
         let tz = parse_timezone(&timezone)?;
+        let tls_cert_dir = data_dir.join("tls");
 
         Ok(Self {
             listen,
@@ -166,6 +238,24 @@ impl Config {
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            tls: TlsConfig {
+                mode: parse_tls_mode(env::var("GATEWAY_TLS").ok().as_deref())?,
+                public_domain: parse_public_domain(env::var("GATEWAY_PUBLIC_DOMAIN").ok())?,
+                acme_email: env::var("GATEWAY_ACME_EMAIL")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                https_port: checked_u16(
+                    "GATEWAY_HTTPS_PORT",
+                    parse_positive(
+                        "GATEWAY_HTTPS_PORT",
+                        env::var("GATEWAY_HTTPS_PORT").ok(),
+                        u64::from(DEFAULT_HTTPS_PORT),
+                    )?,
+                )?,
+                acme_directory: parse_acme_directory(env::var("GATEWAY_ACME_DIRECTORY").ok())?,
+                cert_dir: tls_cert_dir,
+            },
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
@@ -174,6 +264,77 @@ impl Config {
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("gateway.db")
     }
+}
+
+/// Parses `GATEWAY_TLS`: absent or blank means `auto`; anything else must be
+/// `auto` or `off` or startup fails naming the value.
+fn parse_tls_mode(raw: Option<&str>) -> Result<TlsMode, ConfigError> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(TlsMode::Auto),
+        Some(value) if value.eq_ignore_ascii_case("auto") => Ok(TlsMode::Auto),
+        Some(value) if value.eq_ignore_ascii_case("off") => Ok(TlsMode::Off),
+        Some(value) => Err(ConfigError::TlsMode(value.to_string())),
+    }
+}
+
+/// Reads `GATEWAY_PUBLIC_DOMAIN`, normalizing case and trimming whitespace.
+/// Absent or blank is `None`; a malformed hostname fails startup.
+fn parse_public_domain(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let domain = trimmed.to_ascii_lowercase();
+    if !is_valid_hostname(&domain) {
+        return Err(ConfigError::PublicDomain(trimmed.to_string()));
+    }
+    Ok(Some(domain))
+}
+
+/// A conservative public-hostname check: lowercase DNS labels, at least one
+/// dot, no scheme, port, path, underscore, or address literal. `localhost` is
+/// rejected because it can never obtain a public certificate.
+pub fn is_valid_hostname(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return false;
+    }
+    if domain == "localhost" || domain.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
+/// Reads `GATEWAY_ACME_DIRECTORY`: absent or blank keeps Let's Encrypt
+/// production; the value must be an http(s) URL.
+fn parse_acme_directory(raw: Option<String>) -> Result<String, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_ACME_DIRECTORY.to_string());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_ACME_DIRECTORY.to_string());
+    }
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err(ConfigError::AcmeDirectory(trimmed.to_string()));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The checked `u64 → u16` conversion behind `GATEWAY_HTTPS_PORT`.
+fn checked_u16(name: &'static str, value: u64) -> Result<u16, ConfigError> {
+    u16::try_from(value).map_err(|_| ConfigError::Number {
+        name,
+        value: value.to_string(),
+    })
 }
 
 /// Parses `GATEWAY_TIMEZONE` into an IANA timezone (default `UTC`). Failure
@@ -373,6 +534,75 @@ mod tests {
                 "the error names the variable: {err}"
             );
         }
+    }
+
+    #[test]
+    fn tls_mode_defaults_to_auto_and_rejects_unknown_values() {
+        assert_eq!(parse_tls_mode(None).expect("default"), TlsMode::Auto);
+        assert_eq!(parse_tls_mode(Some("  ")).expect("blank"), TlsMode::Auto);
+        assert_eq!(
+            parse_tls_mode(Some("OFF")).expect("case-insensitive"),
+            TlsMode::Off
+        );
+        let err = parse_tls_mode(Some("always")).expect_err("unknown value");
+        assert!(err.to_string().contains("always"), "{err}");
+    }
+
+    #[test]
+    fn public_domains_are_normalized_and_validated() {
+        assert_eq!(parse_public_domain(None).expect("absent"), None);
+        assert_eq!(
+            parse_public_domain(Some("   ".to_string())).expect("blank"),
+            None
+        );
+        assert_eq!(
+            parse_public_domain(Some(" Gateway.Example.COM ".to_string()))
+                .expect("valid")
+                .as_deref(),
+            Some("gateway.example.com")
+        );
+
+        for bad in [
+            "localhost",
+            "example",
+            "https://example.com",
+            "example.com/path",
+            "example.com:8443",
+            "exa_mple.com",
+            "-example.com",
+            "127.0.0.1",
+            "exa mple.com",
+        ] {
+            let err = parse_public_domain(Some(bad.to_string())).expect_err(bad);
+            assert!(
+                err.to_string().contains("GATEWAY_PUBLIC_DOMAIN"),
+                "{bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn acme_directory_defaults_and_requires_a_url() {
+        assert_eq!(
+            parse_acme_directory(None).expect("default"),
+            DEFAULT_ACME_DIRECTORY
+        );
+        assert_eq!(
+            parse_acme_directory(Some(STAGING_ACME_DIRECTORY.to_string())).expect("staging"),
+            STAGING_ACME_DIRECTORY
+        );
+        assert!(parse_acme_directory(Some("letsencrypt".to_string())).is_err());
+    }
+
+    #[test]
+    fn https_port_is_a_checked_u16() {
+        assert_eq!(checked_u16("GATEWAY_HTTPS_PORT", 443).expect("443"), 443);
+        assert_eq!(
+            checked_u16("GATEWAY_HTTPS_PORT", u64::from(u16::MAX)).expect("boundary"),
+            u16::MAX
+        );
+        let err = checked_u16("GATEWAY_HTTPS_PORT", u64::from(u16::MAX) + 1).expect_err("overflow");
+        assert!(err.to_string().contains("GATEWAY_HTTPS_PORT"), "{err}");
     }
 
     #[test]
