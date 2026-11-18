@@ -100,6 +100,22 @@ Serving rules: hashed assets (`main-<hash>.js`) are served with
 `Cache-Control: immutable`, `index.html` with `no-store`, and any path without a
 file extension falls back to `index.html` so Angular routes survive a reload.
 
+### Prebuilt server binaries
+
+CI (`.github/workflows/ci.yml`, the `gateway` job) builds and uploads both
+server binaries for Linux and Windows. The version in the names comes from
+`server/Cargo.toml`:
+
+| Artifact | Contents |
+| --- | --- |
+| `pareto-gateway-<version>-linux-x86_64` (`.tar.gz`) | `pareto-gateway` (embedded UI), `pareto-gateway-api` (api-only), `LICENSE`, `README.md` |
+| `pareto-gateway-<version>-windows-x64` (`.zip`) | `pareto-gateway.exe` (embedded UI), `pareto-gateway-api.exe` (api-only), `LICENSE`, `README.md` |
+
+Download them from the workflow run's **Artifacts** section, or from the GitHub
+Release when the commit is tagged `v*`. The embedded-UI binary is a single file:
+run it and open `http://127.0.0.1:8081/` (see *Run* above). See
+[`docs/desktop.md`](docs/desktop.md) for the desktop installers.
+
 ## Environment
 
 | Variable | Default | Meaning |

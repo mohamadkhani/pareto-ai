@@ -80,6 +80,7 @@ describe('Shell', () => {
     );
 
     expect(labels).toEqual([
+      'Overview',
       'Catalog',
       'Routing',
       'Access',

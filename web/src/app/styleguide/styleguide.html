@@ -83,11 +83,12 @@
     </section>
 
     <section class="section">
-      <h2>Dialog in both themes</h2>
+      <h2>Dialog and drawer variants in both themes</h2>
       <div class="theme-pair">
         <div class="theme-frame" data-theme="light">
           <span class="theme-tag">Light</span>
           <ui-button variant="primary" (clicked)="lightDialog.set(true)">Open dialog</ui-button>
+          <ui-button variant="secondary" (clicked)="lightDrawer.set(true)">Open drawer</ui-button>
           <ui-dialog [(open)]="lightDialog" title="Delete offering">
             <p>
               This removes the offering and its price. Requests already routed keep their log entry.
@@ -97,10 +98,20 @@
               <ui-button variant="danger" (clicked)="lightDialog.set(false)">Delete</ui-button>
             </div>
           </ui-dialog>
+          <ui-dialog variant="drawer" [(open)]="lightDrawer" title="Account drawer">
+            <p>
+              The drawer pins this same native dialog to the right edge. Focus is trapped, Escape
+              closes, and closing returns focus to the trigger.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="lightDrawer.set(false)">Close</ui-button>
+            </div>
+          </ui-dialog>
         </div>
         <div class="theme-frame" data-theme="dark">
           <span class="theme-tag">Dark</span>
           <ui-button variant="primary" (clicked)="darkDialog.set(true)">Open dialog</ui-button>
+          <ui-button variant="secondary" (clicked)="darkDrawer.set(true)">Open drawer</ui-button>
           <ui-dialog [(open)]="darkDialog" title="Delete offering">
             <p>
               This removes the offering and its price. Requests already routed keep their log entry.
@@ -108,6 +119,15 @@
             <div ui-dialog-actions>
               <ui-button (clicked)="darkDialog.set(false)">Cancel</ui-button>
               <ui-button variant="danger" (clicked)="darkDialog.set(false)">Delete</ui-button>
+            </div>
+          </ui-dialog>
+          <ui-dialog variant="drawer" [(open)]="darkDrawer" title="Account drawer">
+            <p>
+              The drawer pins this same native dialog to the right edge. Focus is trapped, Escape
+              closes, and closing returns focus to the trigger.
+            </p>
+            <div ui-dialog-actions>
+              <ui-button (clicked)="darkDrawer.set(false)">Close</ui-button>
             </div>
           </ui-dialog>
         </div>
@@ -322,6 +342,25 @@
         <ui-spinner size="md" label="Loading offerings" />
         <ui-spinner size="lg" label="Loading catalog" />
       </div>
+    </section>
+    <section class="block">
+      <h3>Meter</h3>
+      <div class="meter-stack">
+        <ui-meter [value]="35" label="Daily budget" />
+        <ui-meter [value]="82" label="Weekly budget" tone="warning" />
+        <ui-meter [value]="100" label="Monthly budget" tone="danger" />
+      </div>
+      <p class="note">0–100%; the tone carries normal, near-limit, and exhausted states.</p>
+    </section>
+
+    <section class="block">
+      <h3>Checkbox</h3>
+      <div class="checkbox-stack">
+        <ui-checkbox [checked]="true" label="Allow this model" />
+        <ui-checkbox [checked]="false" label="Unchecked" />
+        <ui-checkbox [checked]="true" [disabled]="true" label="Disabled" />
+      </div>
+      <p class="note">The input is the focus target; the label is the accessible name.</p>
     </section>
   </div>
 </ng-template>

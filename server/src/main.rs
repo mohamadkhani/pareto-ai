@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
     let benchmark_fetcher =
         benchmark_sync::HttpFetcher::new().context("building the benchmark sync client")?;
 
-    let _background: [tokio::task::JoinHandle<()>; 6] = [
+    let _background: [tokio::task::JoinHandle<()>; 7] = [
         supervisor::supervise("reservation reconciler", {
             let pool = state.pool.clone();
             let timeout = state.config.timeout_total;
@@ -255,11 +255,17 @@ async fn main() -> Result<()> {
         }),
         // D42: provider balance connectors refresh each credential on their
         // own cadence (default 15 min, min 60 s, max 24 h) with exponential
-        // backoff and jitter. Catalog refresh stays on demand.
+        // backoff and jitter. Catalog refresh stays on demand unless a
+        // connector opts in with `catalog.refresh_seconds`.
         supervisor::supervise("provider balance refresh", {
             let pool = state.pool.clone();
             let secrets = state.secrets.clone();
             move || connectors::spawn_balance_job(pool.clone(), secrets.clone())
+        }),
+        supervisor::supervise("provider catalog refresh", {
+            let pool = state.pool.clone();
+            let secrets = state.secrets.clone();
+            move || connectors::spawn_catalog_job(pool.clone(), secrets.clone())
         }),
     ];
 

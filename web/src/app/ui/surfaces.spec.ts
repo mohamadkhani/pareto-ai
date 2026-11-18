@@ -3,12 +3,14 @@ import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { UiBadge } from './badge';
 import { UiBanner } from './banner';
 import { UiCard } from './card';
+import { UiCheckbox } from './checkbox';
 import { UiEmpty } from './empty';
+import { UiMeter } from './meter';
 import { UiSpinner } from './spinner';
 import { UiTable } from './table';
 
 @Component({
-  imports: [UiBadge, UiBanner, UiCard, UiEmpty, UiSpinner, UiTable],
+  imports: [UiBadge, UiBanner, UiCard, UiCheckbox, UiEmpty, UiMeter, UiSpinner, UiTable],
   template: `
     <ui-badge tone="success">enabled</ui-badge>
     <ui-card>
@@ -38,6 +40,8 @@ import { UiTable } from './table';
       <span ui-empty-action>action</span>
     </ui-empty>
     <ui-spinner label="Loading prices" />
+    <ui-meter [value]="42" label="Daily budget" />
+    <ui-checkbox [checked]="true" label="Allow model" />
   `,
 })
 class SurfacesHost {
@@ -86,6 +90,17 @@ describe('Surface primitives', () => {
     const empties = root.querySelector('ui-empty');
     expect(empties?.textContent).toContain('No offerings yet');
     expect(empties?.textContent).toContain('action');
+  });
+
+  it('renders a meter with an accessible value and a checkbox', async () => {
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const meter = root.querySelector('ui-meter [role="progressbar"]');
+    const checkbox = root.querySelector<HTMLInputElement>('ui-checkbox input');
+
+    expect(meter?.getAttribute('aria-valuenow')).toBe('42');
+    expect(meter?.getAttribute('aria-label')).toBe('Daily budget');
+    expect(checkbox?.checked).toBe(true);
   });
 
   it('exposes the spinner as a status with a hidden label', async () => {

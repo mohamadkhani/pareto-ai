@@ -33,12 +33,13 @@
               "budgets": [
                 {
                   "type": "initial",
-                  // 700 kB: the initial total (~611 kB) includes the design
+                  // 800 kB: the initial total (~769 kB) includes the dashboard, the user
+                  // drawer, the design
                   // system's fonts (`@fontsource-variable`), the global token
                   // and primitive CSS, and the shared primitive chunk. The
                   // `/styleguide` route itself is lazy-loaded and no longer
                   // part of this number.
-                  "maximumWarning": "750kB",
+                  "maximumWarning": "800kB",
                   "maximumError": "1MB"
                 },
                 {

@@ -24,10 +24,14 @@ export type InputType =
   | 'datetime-local';
 
 /**
- * Text-like input. Inside a `ui-field` it adopts the field's id and
- * description wiring; outside, `id` and native attributes are passed through.
- * It is also a `ControlValueAccessor`, so reactive forms may bind it with
- * `formControlName`; numeric inputs emit numbers, every other type a string.
+ * Text-like input with a native picker for date/time types. Inside a `ui-field`
+ * it adopts the field's id and description wiring; outside, `id` and native
+ * attributes are passed through.
+ *
+ * The two-way `value` is always the DOM string. When the input is bound to a
+ * reactive form (`formControl` / `formControlName`), a `type="number"` control
+ * receives a `number` (or `null` when empty) so numeric validators keep
+ * working, matching Angular's native number value accessor.
  */
 @Component({
   selector: 'ui-input',
@@ -49,24 +53,24 @@ export class UiInput implements ControlValueAccessor {
   readonly autocomplete = input<string>('');
   /** Native `inputmode` hint, e.g. `numeric` for amounts. */
   readonly inputmode = input<string>('');
-  /** Native `step` for number and date/time inputs. */
-  readonly step = input<string>('');
-  /** Native `min` for number and date/time inputs. */
-  readonly min = input<string>('');
-  /** Native `max` for number and date/time inputs. */
-  readonly max = input<string>('');
+  /** Step for number, date, time, and datetime-local inputs. */
+  readonly step = input<string | number | null>(null);
+  /** Minimum value for number, date, time, and datetime-local inputs. */
+  readonly min = input<string | number | null>(null);
+  /** Maximum value for number, date, time, and datetime-local inputs. */
+  readonly max = input<string | number | null>(null);
   /** Accessible name for a control rendered without a visible `ui-field` label. */
   readonly ariaLabel = input<string>('');
 
+  /** Disabled state coming from the reactive form, separate from the input. */
   private readonly formDisabled = signal(false);
+  private onChange: (value: string | number | null) => void = () => undefined;
+  private onTouched: () => void = () => undefined;
 
   protected readonly controlId = computed(() => this.id() || this.field?.id() || null);
   protected readonly describedBy = computed(() => this.field?.describedBy() ?? null);
   protected readonly invalid = computed(() => this.field?.invalid() ?? false);
   protected readonly isDisabled = computed(() => this.disabled() || this.formDisabled());
-
-  private onChange: (value: string | number | null) => void = () => {};
-  private onTouched: () => void = () => {};
 
   writeValue(value: unknown): void {
     this.value.set(value === null || value === undefined ? '' : String(value));
@@ -86,26 +90,24 @@ export class UiInput implements ControlValueAccessor {
 
   protected onInput(event: Event): void {
     const target = event.target;
-    if (target instanceof HTMLInputElement) {
-      // Forms see a number for `type="number"` (empty clears to null); the
-      // two-way `value` model stays a string for the text-like call sites.
-      this.onChange(this.emitValue(target.value));
-      this.value.set(target.value);
+    if (!(target instanceof HTMLInputElement)) {
+      return;
     }
+    const raw = target.value;
+    this.value.set(raw);
+    this.onChange(this.type() === 'number' ? parseNumber(raw) : raw);
   }
 
   protected onBlur(): void {
     this.onTouched();
   }
+}
 
-  private emitValue(raw: string): string | number | null {
-    if (this.type() !== 'number') {
-      return raw;
-    }
-    if (raw.trim() === '') {
-      return null;
-    }
-    const parsed = Number(raw);
-    return Number.isNaN(parsed) ? null : parsed;
+/** An empty number field is `null`; anything else goes through `Number`. */
+function parseNumber(raw: string): number | null {
+  if (raw.trim() === '') {
+    return null;
   }
+  const parsed = Number(raw);
+  return Number.isNaN(parsed) ? null : parsed;
 }

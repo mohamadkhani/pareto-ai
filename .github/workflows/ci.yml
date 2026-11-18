@@ -17,6 +17,12 @@
 #   rebuilding Angular, because the server embeds it at compile time
 #   (`rust-embed`).
 #
+# The `gateway` job packages the two server binaries (embedded UI and api-only)
+# for Linux and Windows and, on a `v*` tag, attaches them to the GitHub
+# Release. It reuses the web job's `web-dist` artifact instead of rebuilding
+# Angular, and falls back to a local `pnpm run build` only when the artifact is
+# unavailable (for example a re-run of a single job).
+#
 # No secrets are required. Desktop packaging lives in desktop.yml.
 
 name: CI
@@ -24,6 +30,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -117,3 +124,163 @@ jobs:
       - name: API-only release build
         working-directory: server
         run: cargo build --locked --release --no-default-features
+
+  # Builds the shippable server binaries for each platform. Nothing is
+  # cross-compiled: the Windows binary comes from windows-latest, the same
+  # proven step as the desktop sidecar in desktop.yml.
+  gateway:
+    name: Gateway binary (${{ matrix.name }})
+    needs: web
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Same flow as the rust job: `build.rs` needs
+      # web/dist/web/browser/index.html at compile time for the embedded UI.
+      - name: Restore web/dist from the web job
+        id: web-dist
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/web/browser
+
+      # Fallback only: a re-run of this job alone has no artifact to download.
+      - name: Set up pnpm (fallback)
+        if: steps.web-dist.outcome != 'success'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - name: Set up Node (fallback)
+        if: steps.web-dist.outcome != 'success'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Build the web console (fallback)
+        if: steps.web-dist.outcome != 'success'
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Check the embedded UI input exists
+        shell: bash
+        run: test -f web/dist/web/browser/index.html
+
+      - name: Read the version from server/Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$(sed -n '1,10s/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -n1)"
+          if [ -z "$raw" ]; then
+            echo "could not read the package version from server/Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      # Both feature sets write `target/<triple>/release/gateway[.exe]`, so each
+      # binary is copied to dist/bin before the next build can overwrite it.
+      - name: Build the gateway with the embedded UI
+        working-directory: server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "${{ matrix.target }}"
+          mkdir -p ../dist/bin
+          cp "target/${{ matrix.target }}/release/gateway${{ matrix.ext }}" \
+             "../dist/bin/pareto-gateway${{ matrix.ext }}"
+
+      - name: Build the api-only gateway
+        working-directory: server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --no-default-features \
+            --target "${{ matrix.target }}"
+          mkdir -p ../dist/bin
+          cp "target/${{ matrix.target }}/release/gateway${{ matrix.ext }}" \
+             "../dist/bin/pareto-gateway-api${{ matrix.ext }}"
+
+      # Layout inside the archive: the two binaries plus LICENSE and README.md.
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="pareto-gateway-${VERSION}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
+          cp dist/bin/* "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ls -l "dist/$name.tar.gz"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $name = "pareto-gateway-$env:VERSION-${{ matrix.name }}"
+          $stage = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "dist/bin/*" $stage
+          Copy-Item LICENSE, README.md $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
+          Get-ChildItem "dist/$name.zip" | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pareto-gateway-${{ steps.version.outputs.version }}-${{ matrix.name }}
+          if-no-files-found: error
+          # Exactly one archive per platform; the expression avoids a warning
+          # about the pattern that cannot match on this runner.
+          path: ${{ runner.os == 'Windows' && 'dist/*.zip' || 'dist/*.tar.gz' }}
+          retention-days: 7
+
+  release:
+    name: Attach gateway binaries to the GitHub Release
+    needs: gateway
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pareto-gateway-*
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          fail_on_unmatched_files: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

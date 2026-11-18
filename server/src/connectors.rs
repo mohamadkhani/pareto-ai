@@ -551,6 +551,26 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         balance: None,
         health: None,
     };
+    let openrouter_balance = ConnectorConfig {
+        // Best effort: `/api/v1/credits` reports purchased credits and
+        // lifetime usage, not a remaining balance, so the fields are
+        // documented rather than guessed further. `/data/total_credits` is the
+        // credit balance and `/data/total_usage` the spend so far.
+        url: "/api/v1/credits".to_string(),
+        headers: BTreeMap::new(),
+        allow_private: false,
+        catalog: None,
+        balance: Some(BalanceConfig {
+            balance: "/data/total_credits".to_string(),
+            available: None,
+            currency: Some("USD".to_string()),
+            period_spend: Some("/data/total_usage".to_string()),
+            burn_rate: None,
+            days_remaining: None,
+            refresh_seconds: Some(DEFAULT_REFRESH_SECONDS),
+        }),
+        health: None,
+    };
     let generic = ConnectorConfig {
         url: "/models".to_string(),
         headers: BTreeMap::new(),
@@ -588,8 +608,12 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         ConnectorTemplate {
             id: "openrouter_per_token",
             label: "OpenRouter (per token)",
-            description: "OpenRouter publishes USD strings per token; the engine multiplies by 1e6.",
-            configs: catalog_only(openrouter),
+            description: "OpenRouter publishes USD strings per token; the engine multiplies by 1e6. Balance is best effort: /api/v1/credits reports purchased credits (/data/total_credits) and lifetime usage (/data/total_usage), not a remaining balance.",
+            configs: ConnectorTemplateConfigs {
+                catalog: Some(openrouter),
+                balance: Some(openrouter_balance),
+                health: None,
+            },
         },
         ConnectorTemplate {
             id: "generic_pricing_object",
@@ -1982,10 +2006,23 @@ async fn credential_material(
         Some(id) => catalog::get_credential(pool, id)
             .await?
             .filter(|row| row.provider_id == provider_id),
-        None => catalog::list_credentials(pool, provider_id)
-            .await?
-            .into_iter()
-            .next(),
+        None => {
+            // "First active": skip credentials in an unexpired cooldown, then
+            // oldest first. When every credential is cooling the oldest is
+            // still used, because a connector run is an operator/upkeep action
+            // rather than request traffic (the same rule as discovery).
+            let now = catalog::now_ts();
+            let rows = catalog::list_credentials(pool, provider_id).await?;
+            let active = rows
+                .iter()
+                .position(|row| {
+                    row.cooldown_until
+                        .as_deref()
+                        .is_none_or(|until| until <= now.as_str())
+                })
+                .unwrap_or(0);
+            rows.into_iter().nth(active)
+        }
     };
     let Some(credential) = credential else {
         if requested.is_some() {
@@ -2675,6 +2712,84 @@ pub fn spawn_balance_job(
             tokio::time::sleep(BALANCE_TICK).await;
         }
     })
+}
+
+/// The background catalog job: opt-in only. Every [`BALANCE_TICK`] it runs
+/// [`run_catalog_sweep`], which touches nothing unless a connector sets
+/// `catalog.refresh_seconds` (absent by default), so a provider is never
+/// polled for prices without the operator asking.
+pub fn spawn_catalog_job(
+    pool: SqlitePool,
+    secrets: std::sync::Arc<SecretBox>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = run_catalog_sweep(&pool, &secrets).await {
+                tracing::warn!(error = %error, "catalog sweep failed");
+            }
+            tokio::time::sleep(BALANCE_TICK).await;
+        }
+    })
+}
+
+/// One sweep over enabled catalog connectors that opted into a cadence.
+///
+/// `catalog.refresh_seconds` is the opt-in: without it the connector is
+/// on-demand only (`POST /api/providers/{id}/prices/refresh`, discovery) and
+/// this sweep skips it. Due-ness uses the newest catalog run for the provider
+/// (any credential) with the same backoff/jitter rules as balances.
+pub async fn run_catalog_sweep(
+    pool: &SqlitePool,
+    secrets: &SecretBox,
+) -> Result<usize, ConnectorError> {
+    use rand::Rng;
+    let connectors = sqlx::query_as::<_, (String, String)>(
+        "SELECT provider_id, config_json FROM provider_connectors \
+         WHERE kind = 'catalog' AND enabled = 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut refreshed = 0usize;
+    for (provider_id, config_json) in connectors {
+        let Ok(config) = serde_json::from_str::<ConnectorConfig>(&config_json) else {
+            tracing::warn!(provider_id, "catalog connector config is corrupt");
+            continue;
+        };
+        let Some(interval) = config.refresh_seconds(ConnectorKind::Catalog) else {
+            continue;
+        };
+        let runs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT status, finished_at FROM connector_runs \
+             WHERE provider_id = ? AND kind = 'catalog' \
+             ORDER BY finished_at DESC, rowid DESC LIMIT 20",
+        )
+        .bind(&provider_id)
+        .fetch_all(pool)
+        .await?;
+        let last = runs.first().map(|(_, finished)| finished.as_str());
+        let errors = runs
+            .iter()
+            .take_while(|(status, _)| status == "error")
+            .count() as u32;
+        let jitter = rand::rng().random_range(0..=60);
+        if !refresh_due(last, errors, interval, jitter, chrono::Utc::now()) {
+            continue;
+        }
+        match refresh_prices(pool, secrets, None, &provider_id, None).await {
+            Ok(view) if view.ok => refreshed += 1,
+            Ok(view) => tracing::warn!(
+                provider_id,
+                error = view.error.as_deref().unwrap_or("catalog refresh failed"),
+                "catalog refresh failed"
+            ),
+            Err(error) => tracing::warn!(
+                provider_id,
+                error = %error,
+                "catalog refresh failed"
+            ),
+        }
+    }
+    Ok(refreshed)
 }
 
 /// One sweep over every enabled balance connector. Exposed for tests.
@@ -3443,5 +3558,166 @@ mod tests {
         let parsed: ConnectorConfig = serde_json::from_str(&raw).expect("parse");
         assert_eq!(parsed, config);
         assert!(raw.contains("pricing_usd_per_million_tokens/balanced/input"));
+    }
+
+    /// Inserts a provider directly: the sweep and run-pruning tests do not need
+    /// an admin session, and a connector can fetch without a credential.
+    async fn insert_provider(pool: &SqlitePool, id: &str, base_url: &str) {
+        sqlx::query("INSERT INTO providers (id, name, base_url) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(id)
+            .bind(base_url)
+            .execute(pool)
+            .await
+            .expect("provider");
+    }
+
+    async fn insert_catalog_connector(
+        pool: &SqlitePool,
+        provider_id: &str,
+        refresh_seconds: Option<u64>,
+    ) {
+        let config = serde_json::json!({
+            "url": "/models",
+            "allow_private": true,
+            "catalog": {
+                "entries": "/data",
+                "model_id": "/id",
+                "input": "/pricing/input",
+                "output": "/pricing/output",
+                "refresh_seconds": refresh_seconds,
+            }
+        });
+        sqlx::query(
+            "INSERT INTO provider_connectors (provider_id, kind, config_json, enabled) \
+             VALUES (?, 'catalog', ?, 1)",
+        )
+        .bind(provider_id)
+        .bind(config.to_string())
+        .execute(pool)
+        .await
+        .expect("connector");
+    }
+
+    /// Requirement 4: catalog refresh is on demand by default. Only a connector
+    /// that sets `catalog.refresh_seconds` is polled, and then only when the
+    /// cadence (plus jitter) says it is due.
+    #[tokio::test]
+    async fn catalog_sweep_only_polls_connectors_that_opt_into_a_cadence() {
+        use crate::test_support::{TestApp, spawn_static_server};
+
+        let (addr, seen) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"alpha","pricing":{"input":1.5,"output":2.5}}]}"#,
+        )
+        .await;
+        let app = TestApp::new().await;
+        let base = format!("http://{addr}/v1");
+        insert_provider(&app.state.pool, "polled", &base).await;
+        insert_provider(&app.state.pool, "on-demand", &base).await;
+        insert_catalog_connector(&app.state.pool, "polled", Some(60)).await;
+        insert_catalog_connector(&app.state.pool, "on-demand", None).await;
+
+        let refreshed = run_catalog_sweep(&app.state.pool, &app.state.secrets)
+            .await
+            .expect("sweep");
+        assert_eq!(refreshed, 1, "only the opted-in connector is polled");
+
+        let runs: Vec<(String, String)> =
+            sqlx::query_as("SELECT provider_id, status FROM connector_runs ORDER BY finished_at")
+                .fetch_all(&app.state.pool)
+                .await
+                .expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, "polled");
+        assert_eq!(runs[0].1, "success");
+
+        // The no-cadence connector was never fetched: exactly one request.
+        assert_eq!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "an on-demand connector is never polled"
+        );
+
+        // The opted-in connector's next run is not due yet (60 s cadence).
+        let refreshed = run_catalog_sweep(&app.state.pool, &app.state.secrets)
+            .await
+            .expect("second sweep");
+        assert_eq!(refreshed, 0, "a fresh run is not immediately due");
+        assert_eq!(
+            seen.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "no extra fetch before the cadence elapses"
+        );
+    }
+
+    /// Observability stays bounded: the newest [`MAX_RUNS`] rows per
+    /// (provider, kind) survive and older ones are pruned by the writer.
+    #[tokio::test]
+    async fn connector_runs_are_pruned_to_thirty_per_kind() {
+        use crate::test_support::TestApp;
+
+        let app = TestApp::new().await;
+        insert_provider(&app.state.pool, "pruned", "https://api.example.com/v1").await;
+
+        for index in 0..35u32 {
+            let finished = format!("2026-01-01T00:{:02}:{:02}.000Z", index / 60, index % 60);
+            let mut tx = app.state.pool.begin().await.expect("transaction");
+            record_run(
+                &mut tx,
+                RunRecord {
+                    provider_id: "pruned",
+                    credential_id: None,
+                    kind: ConnectorKind::Balance,
+                    started_at: &finished,
+                    finished_at: &finished,
+                    status: "success",
+                    detail: None,
+                    error: None,
+                },
+            )
+            .await
+            .expect("run row");
+            tx.commit().await.expect("commit");
+        }
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connector_runs")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("count");
+        assert_eq!(count, MAX_RUNS, "the history is capped per kind");
+        let oldest: String = sqlx::query_scalar("SELECT MIN(finished_at) FROM connector_runs")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("oldest");
+        assert_eq!(
+            oldest, "2026-01-01T00:00:05.000Z",
+            "the five oldest are gone"
+        );
+
+        // A different kind has its own budget.
+        let mut tx = app.state.pool.begin().await.expect("transaction");
+        record_run(
+            &mut tx,
+            RunRecord {
+                provider_id: "pruned",
+                credential_id: None,
+                kind: ConnectorKind::Catalog,
+                started_at: "2026-01-02T00:00:00.000Z",
+                finished_at: "2026-01-02T00:00:00.000Z",
+                status: "success",
+                detail: None,
+                error: None,
+            },
+        )
+        .await
+        .expect("catalog run");
+        tx.commit().await.expect("commit");
+        let balance: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM connector_runs WHERE kind = 'balance'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("balance count");
+        assert_eq!(balance, MAX_RUNS, "pruning is scoped to (provider, kind)");
     }
 }

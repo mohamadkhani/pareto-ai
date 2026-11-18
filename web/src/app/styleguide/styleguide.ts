@@ -6,11 +6,13 @@ import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
+import { UiCheckbox } from '../ui/checkbox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
 import { UiIconButton } from '../ui/icon-button';
 import { UiInput } from '../ui/input';
+import { UiMeter } from '../ui/meter';
 import { UiSelect } from '../ui/select';
 import { UiSpinner } from '../ui/spinner';
 import { UiSwitch } from '../ui/switch';
@@ -38,11 +40,13 @@ interface TokenSwatch {
     UiBanner,
     UiButton,
     UiCard,
+    UiCheckbox,
     UiDialog,
     UiEmpty,
     UiField,
     UiIconButton,
     UiInput,
+    UiMeter,
     UiSelect,
     UiSpinner,
     UiSwitch,
@@ -119,6 +123,8 @@ export class Styleguide {
   protected readonly tab = signal('one');
   protected readonly lightDialog = signal(false);
   protected readonly darkDialog = signal(false);
+  protected readonly lightDrawer = signal(false);
+  protected readonly darkDrawer = signal(false);
 
   protected readonly tabs: readonly TabItem[] = [
     { id: 'one', label: 'Overview' },

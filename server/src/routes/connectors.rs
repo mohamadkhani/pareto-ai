@@ -599,6 +599,19 @@ mod tests {
             response.body[0]["configs"]["balance"]["balance"]["balance"],
             "/balance"
         );
+        // OpenRouter's balance is best effort and documented as such.
+        assert_eq!(
+            response.body[1]["configs"]["balance"]["url"],
+            "/api/v1/credits"
+        );
+        assert_eq!(
+            response.body[1]["configs"]["balance"]["balance"]["balance"],
+            "/data/total_credits"
+        );
+        assert_eq!(
+            response.body[1]["configs"]["balance"]["balance"]["period_spend"],
+            "/data/total_usage"
+        );
     }
 
     #[tokio::test]
@@ -1199,6 +1212,87 @@ mod tests {
             "the health connector replaces /models: {}",
             requests[0]
         );
+    }
+
+    /// A `provider_api` price row must bill exactly like a `manual` row with
+    /// the same components: the connector path (source, currency, provenance)
+    /// never enters `money::compute_cost`. This pins the settlement path
+    /// against the D41/D44 price-table and currency changes.
+    #[tokio::test]
+    async fn provider_api_prices_charge_exactly_like_manual_prices() {
+        let (addr, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"billable","pricing_usd_per_million_tokens":
+                {"balanced":{"input":150,"output":250,"cached_input":50}}}]}"#,
+        )
+        .await;
+        let s = seeded(&format!("http://{addr}/v1")).await;
+        let model_id = model(&s.app, "billable", None).await;
+        let offering_id = offering(&s.app, &s.provider_id, &model_id, "billable").await;
+        put_connector(&s, "catalog", catalog_config("/models", false)).await;
+
+        let refreshed = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/prices/refresh", s.provider_id),
+                None,
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(refreshed.status, StatusCode::OK, "{}", refreshed.body);
+        assert_eq!(refreshed.body["created"], 1, "{}", refreshed.body);
+
+        let api_price = crate::catalog::get_price(&s.app.state.pool, &offering_id)
+            .await
+            .expect("read price")
+            .expect("provider_api price row");
+        assert_eq!(api_price.source, "provider_api");
+
+        let usage = crate::upstream::sse::Usage {
+            input_tokens: Some(2_000_000),
+            output_tokens: Some(1_000_000),
+            cache_read_tokens: Some(500_000),
+            ..Default::default()
+        };
+        let api_cost = crate::money::compute_cost(Some(&api_price), Some(&usage));
+        assert!(api_cost.priced, "a provider_api price is a real price");
+        assert!(api_cost.cost_usd.is_some_and(|cost| cost > 0.0));
+
+        // Same numbers through the manual price path (source = 'manual').
+        let manual = send(
+            s.router.clone(),
+            api_request(
+                Method::PUT,
+                &format!("/api/offerings/{offering_id}/price"),
+                Some(json!({
+                    "input_per_m": api_price.input_per_m,
+                    "output_per_m": api_price.output_per_m,
+                    "cache_read_per_m": api_price.cache_read_per_m,
+                    "cache_write_per_m": api_price.cache_write_per_m,
+                    "reasoning_per_m": api_price.reasoning_per_m,
+                    "request_fee": api_price.request_fee,
+                })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(manual.status, StatusCode::OK, "{}", manual.body);
+        let manual_price = crate::catalog::get_price(&s.app.state.pool, &offering_id)
+            .await
+            .expect("read price")
+            .expect("manual price row");
+        assert_eq!(manual_price.source, "manual");
+        let manual_cost = crate::money::compute_cost(Some(&manual_price), Some(&usage));
+
+        assert_eq!(
+            api_cost.cost_usd, manual_cost.cost_usd,
+            "source and provenance never change what a request bills"
+        );
+        assert_eq!(api_cost.priced, manual_cost.priced);
     }
 
     #[tokio::test]

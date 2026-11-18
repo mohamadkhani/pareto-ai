@@ -92,6 +92,11 @@ from a click in the UI:
   one run row.
 - `apply_on_discovery`: after a successful discovery apply, run the refresh in
   the same flow (counts merged into the discovery result).
+- `refresh_seconds`: optional. Balances default to 900 s (min 60, max 86 400)
+  and are refreshed by a supervised job with exponential backoff (cap 1 h) and
+  jitter. Catalog refresh stays **on demand** unless the connector sets
+  `catalog.refresh_seconds`, in which case the same job cadence applies — no
+  provider is polled by default.
 - Templates: `sailresearch`, `openrouter_per_token`, `generic_pricing_object`
   (best-effort defaults) — selecting a template prefills the mapping; it is
   still fully editable.

@@ -19,6 +19,7 @@ import { UiInput } from '../ui/input';
 import { UiSelect } from '../ui/select';
 import { UiSwitch } from '../ui/switch';
 import { UiTable } from '../ui/table';
+import { UserDrawer } from './users-drawer';
 import { UsersService } from './users.service';
 import { MIN_PASSWORD_LEN, type UserPatch, type UserView } from './users.types';
 
@@ -62,6 +63,7 @@ function fieldErrorText(control: AbstractControl, field: string): string {
     UiSelect,
     UiSwitch,
     UiTable,
+    UserDrawer,
   ],
   templateUrl: './users.html',
   styleUrl: './users.css',
@@ -83,6 +85,9 @@ export class Users {
   protected readonly resetting = signal(false);
   /** The reset's second click: the first arms, the second sends the request. */
   protected readonly resetArmed = signal(false);
+  /** The row whose focused drawer is open, and the element that opened it. */
+  protected readonly drawerUser = signal<UserView | null>(null);
+  private drawerTrigger: HTMLElement | null = null;
 
   protected readonly formatTime = formatTime;
   protected readonly minLength = MIN_PASSWORD_LEN;
@@ -163,6 +168,25 @@ export class Users {
     this.attempted.set(false);
     this.actionError.set(null);
     this.formState.set({ mode: 'edit', user });
+  }
+
+  protected openDrawer(user: UserView, event: Event): void {
+    const target = event.currentTarget;
+    this.drawerTrigger = target instanceof HTMLElement ? target : null;
+    this.drawerUser.set(user);
+    this.actionError.set(null);
+  }
+
+  /** Closes the drawer and returns focus to the row that opened it. */
+  protected closeDrawer(): void {
+    this.drawerUser.set(null);
+    queueMicrotask(() => this.drawerTrigger?.focus());
+  }
+
+  /** Keeps the table row in sync after a drawer action without a page reload. */
+  protected onUserChanged(updated: UserView): void {
+    this.users.update((users) => users.map((user) => (user.id === updated.id ? updated : user)));
+    this.drawerUser.set(updated);
   }
 
   protected closeForm(): void {

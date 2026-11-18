@@ -19,12 +19,12 @@ import { Users } from './users/users';
 import { Shell } from './shell/shell';
 
 /**
- * Where `/` lands for a signed-in account. Admins start on the audit log; a
- * `user` account starts on usage, a page it is allowed to read. A plain
- * redirect to `audit` would greet self-service accounts with 403s.
+ * Where `/` lands for a signed-in account. Admins start on the dashboard;
+ * a `user` account starts on usage, a page it is allowed to read. A plain
+ * redirect to an admin page would greet self-service accounts with 403s.
  */
 export function landingRedirect(): string {
-  return inject(AuthService).isAdmin() ? 'audit' : 'usage';
+  return inject(AuthService).isAdmin() ? 'dashboard' : 'usage';
 }
 
 export const routes: Routes = [
@@ -42,6 +42,11 @@ export const routes: Routes = [
     canActivate: [setupGuard, authGuard],
     component: Shell,
     children: [
+      // Admin landing page: cards composed client-side from existing endpoints.
+      {
+        path: 'dashboard',
+        loadComponent: () => import('./dashboard/dashboard').then((m) => m.Dashboard),
+      },
       // Admin-only pages; the server enforces admin on every catalog call.
       { path: 'providers', component: Providers },
       // D31: models, prices, and quality live on one page; `/offerings`,

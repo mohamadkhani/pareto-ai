@@ -124,6 +124,13 @@ The deb installs `pareto-desktop` and `pareto-gateway` side by side in
 `/usr/bin`; the shell finds the sidecar in its own directory, so the bundled
 layout needs no extra configuration.
 
+The plain server binaries — no desktop shell — are a separate CI artifact from
+`.github/workflows/ci.yml` (the `gateway` job):
+`pareto-gateway-<version>-linux-x86_64.tar.gz` and
+`pareto-gateway-<version>-windows-x64.zip`, each holding the embedded-UI binary
+as `pareto-gateway[.exe]` and the api-only one as `pareto-gateway-api[.exe]`.
+They are attached to the GitHub Release on a `v*` tag.
+
 ## Icons
 
 `desktop/icons/placeholder.svg` is a **placeholder** mark, not final branding.

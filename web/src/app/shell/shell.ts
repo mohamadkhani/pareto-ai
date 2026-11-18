@@ -39,6 +39,11 @@ interface NavSection {
  * non-admin header short and matches the API's access model.
  */
 const NAV_SECTIONS: readonly NavSection[] = [
+  // The admin landing page; `role=user` accounts never see it and land on Usage.
+  {
+    label: 'Overview',
+    links: [{ label: 'Dashboard', path: '/dashboard', adminOnly: true }],
+  },
   // D31: one Models page carries the catalog, prices, and quality. Offerings,
   // Benchmarks, and Price sync no longer have pages or nav links.
   {

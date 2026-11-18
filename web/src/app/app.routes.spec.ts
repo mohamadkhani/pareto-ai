@@ -13,11 +13,11 @@ const admin: User = {
 const selfService: User = { ...admin, id: 'u2', email: 'user@example.com', role: 'user' };
 
 describe('landingRedirect', () => {
-  it('starts admins on the audit log', () => {
+  it('starts admins on the dashboard', () => {
     const auth = TestBed.inject(AuthService);
     auth.user.set(admin);
 
-    expect(TestBed.runInInjectionContext(landingRedirect)).toBe('audit');
+    expect(TestBed.runInInjectionContext(landingRedirect)).toBe('dashboard');
   });
 
   it('starts a self-service account on usage', () => {
@@ -38,6 +38,7 @@ describe('landingRedirect', () => {
     const root = routes.find((route) => route.path === '');
     const paths = root?.children?.map((route) => route.path) ?? [];
 
+    expect(paths).toContain('dashboard');
     expect(paths).toContain('models');
     expect(paths).toContain('providers');
     expect(paths).toContain('combos');

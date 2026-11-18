@@ -1,13 +1,7 @@
 /*
- * The native select renders its own arrow with platform-specific chrome, so
- * the control hides it and draws a token-coloured chevron instead.
+ * Select-only chrome: suppress the native widget and draw the chevron.
+ * Kept separate from control.css so `ui-input` never inherits it.
  */
-
-select.control {
-  appearance: none;
-  padding-right: calc(var(--space-3) + 1.5rem);
-}
-
 :host {
   position: relative;
 }
@@ -23,4 +17,21 @@ select.control {
   border-bottom: 2px solid var(--text-muted);
   transform: translateY(-70%) rotate(45deg);
   pointer-events: none;
+}
+
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: calc(var(--space-3) * 2 + 0.45rem);
+  background-image: none;
+  cursor: pointer;
+}
+
+.select:disabled {
+  cursor: not-allowed;
+}
+
+/* The chevron belongs to the component, not to the native control. */
+.select::-ms-expand {
+  display: none;
 }

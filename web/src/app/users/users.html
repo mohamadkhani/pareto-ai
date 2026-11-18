@@ -179,7 +179,14 @@
           </thead>
           <tbody>
             @for (user of users(); track user.id) {
-              <tr>
+              <tr
+                class="user-row"
+                tabindex="0"
+                [attr.aria-label]="'Open details for ' + user.email"
+                (click)="openDrawer(user, $event)"
+                (keydown.enter)="openDrawer(user, $event)"
+                (keydown.space)="openDrawer(user, $event)"
+              >
                 <td>
                   <code>{{ user.email }}</code>
                 </td>
@@ -198,7 +205,11 @@
                   }
                 </td>
                 <td>{{ formatTime(user.last_login_at) }}</td>
-                <td class="actions">
+                <td
+                  class="actions"
+                  (click)="$event.stopPropagation()"
+                  (keydown)="$event.stopPropagation()"
+                >
                   <ui-button size="sm" variant="ghost" (clicked)="openEdit(user)">Edit</ui-button>
                   <ui-button size="sm" variant="danger" (clicked)="openReset(user)">
                     Reset password
@@ -209,6 +220,14 @@
           </tbody>
         </table>
       </ui-table>
+    }
+
+    @if (drawerUser(); as user) {
+      <app-user-drawer
+        [user]="user"
+        (closed)="closeDrawer()"
+        (userChanged)="onUserChanged($event)"
+      />
     }
   }
 </div>

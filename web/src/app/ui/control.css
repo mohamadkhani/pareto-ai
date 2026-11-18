@@ -44,37 +44,37 @@
   border-color: var(--danger);
 }
 
-/*
- * Number inputs keep the native spinner behaviour for keyboard arrows but
- * hide the browser-rendered steppers, whose chrome varies per platform.
- */
+.control[aria-invalid='true']:focus-visible {
+  outline-color: var(--danger);
+}
+
+/* --- Number: no native spinner, at any zoom level or platform. --- */
+
 .control[type='number'] {
-  appearance: none;
+  appearance: textfield;
   -moz-appearance: textfield;
 }
 
 .control[type='number']::-webkit-outer-spin-button,
 .control[type='number']::-webkit-inner-spin-button {
   -webkit-appearance: none;
+  appearance: none;
   margin: 0;
 }
 
-/*
- * Date and time inputs keep the native picker popup; only the field chrome is
- * ours. The picker glyph inherits its colour from `color-scheme`, which the
- * theme sets on the document (and the styleguide sets per frame).
- */
+/* --- Date/time: native picker kept, field and indicator styled. --- */
+
 .control[type='date'],
 .control[type='time'],
 .control[type='datetime-local'] {
-  min-height: var(--control-height-md);
+  cursor: pointer;
 }
 
 .control[type='date']::-webkit-calendar-picker-indicator,
 .control[type='time']::-webkit-calendar-picker-indicator,
 .control[type='datetime-local']::-webkit-calendar-picker-indicator {
-  cursor: pointer;
   opacity: 0.7;
+  cursor: pointer;
   transition: opacity var(--duration-fast) var(--ease-standard);
 }
 
@@ -82,4 +82,16 @@
 .control[type='time']::-webkit-calendar-picker-indicator:hover,
 .control[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
   opacity: 1;
+}
+
+/*
+ * `color-scheme` on the theme already colours the picker popup; the glyph is
+ * a browser bitmap, so dark mode inverts it to stay visible on --surface.
+ */
+:host-context([data-theme='dark']) .control[type='date']::-webkit-calendar-picker-indicator,
+:host-context([data-theme='dark']) .control[type='time']::-webkit-calendar-picker-indicator,
+:host-context([data-theme='dark'])
+  .control[type='datetime-local']::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  opacity: 0.8;
 }

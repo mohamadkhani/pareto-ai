@@ -56,7 +56,10 @@ describe('Styleguide', () => {
     expect(root.querySelector('ui-input [aria-invalid="true"]')).not.toBeNull();
     expect(root.querySelectorAll('ui-badge').length).toBeGreaterThan(5);
     expect(root.querySelectorAll('ui-banner').length).toBeGreaterThan(3);
-    expect(root.querySelectorAll('ui-dialog').length).toBe(2);
+    expect(root.querySelectorAll('ui-dialog').length).toBe(4);
+    expect(root.querySelectorAll('.dialog--drawer').length).toBe(2);
+    expect(root.querySelectorAll('ui-meter').length).toBeGreaterThan(2);
+    expect(root.querySelectorAll('ui-checkbox').length).toBeGreaterThan(2);
     expect(root.querySelectorAll('[role="tab"]').length).toBeGreaterThan(2);
     expect(root.querySelectorAll('ui-spinner').length).toBeGreaterThan(2);
   });

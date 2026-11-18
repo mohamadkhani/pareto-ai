@@ -27,6 +27,16 @@ describe('UiDialog', () => {
     expect(dialog?.hasAttribute('open')).toBe(false);
   });
 
+  it('adds the drawer class only for the drawer variant', async () => {
+    const fixture = await create();
+    const dialog = (fixture.nativeElement as HTMLElement).querySelector('dialog');
+    expect(dialog?.classList.contains('dialog--drawer')).toBe(false);
+
+    fixture.componentRef.setInput('variant', 'drawer');
+    fixture.detectChanges();
+    expect(dialog?.classList.contains('dialog--drawer')).toBe(true);
+  });
+
   it('names the dialog from its title', async () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;

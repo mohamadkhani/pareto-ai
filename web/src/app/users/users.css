@@ -14,3 +14,13 @@
 .reset-panel form {
   margin-top: var(--space-4);
 }
+
+/* The row is the drawer trigger, so it must read as interactive. */
+.user-row {
+  cursor: pointer;
+}
+
+.user-row:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}

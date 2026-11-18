@@ -1,0 +1,487 @@
+<ui-dialog variant="drawer" [open]="true" [title]="user().email" (closed)="close()">
+  @if (actionError()) {
+    <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="actionError.set(null)">
+      {{ actionError() }}
+    </ui-banner>
+  }
+  @if (notice()) {
+    <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+      {{ notice() }}
+    </ui-banner>
+  }
+
+  <ui-tabs [tabs]="tabs" [selected]="tab()" (selectedChange)="onTab($event)" label="User sections">
+    @switch (tab()) {
+      @case ('limits') {
+        <section class="drawer-section">
+          <h3>Budgets</h3>
+          <p class="drawer-note">
+            A missing period is unlimited. Empty fields keep the stored limit (D20); Clear removes
+            the row.
+          </p>
+          @if (limitsError()) {
+            <ui-banner tone="danger" actionLabel="Retry" (actioned)="loadLimits()">
+              {{ limitsError() }}
+            </ui-banner>
+          } @else if (limitsLoading() && budgets().length === 0 && caps().length === 0) {
+            <div class="drawer-loading">
+              <ui-spinner size="sm" label="Loading limits" /> Loading limits…
+            </div>
+          } @else {
+            @for (period of periods; track period) {
+              <div class="limit-row">
+                <div class="limit-head">
+                  <strong>{{ period }}</strong>
+                  @if (budgetOf(period); as budget) {
+                    <span class="drawer-meta">
+                      {{ formatUsd(budget.used_usd) }} of {{ formatUsd(budget.limit_usd) }}
+                    </span>
+                  } @else {
+                    <span class="drawer-meta">unlimited</span>
+                  }
+                </div>
+                @if (budgetOf(period); as budget) {
+                  <ui-meter
+                    [value]="budgetPercent(budget)"
+                    [tone]="budgetTone(budget)"
+                    [label]="period + ' budget'"
+                  />
+                }
+                <div class="limit-edit">
+                  <ui-input
+                    type="number"
+                    min="0"
+                    [value]="budgetValue(period)?.toString() ?? ''"
+                    [ariaLabel]="period + ' budget limit in USD'"
+                    (valueChange)="onBudgetInput(period, $event)"
+                  />
+                  <ui-button
+                    size="sm"
+                    [loading]="savingBudget() === period"
+                    (clicked)="saveBudget(period)"
+                    >Save</ui-button
+                  >
+                  @if (budgetOf(period)) {
+                    <ui-button size="sm" variant="ghost" (clicked)="clearBudget(period)">
+                      Clear
+                    </ui-button>
+                  }
+                </div>
+              </div>
+            }
+          }
+        </section>
+
+        <section class="drawer-section">
+          <h3>Token caps</h3>
+          @if (caps().length === 0) {
+            <p class="drawer-note">
+              No per-model token caps; every model is unlimited for this user.
+            </p>
+          } @else {
+            @for (cap of caps(); track cap.model_id + '|' + cap.period) {
+              <div class="limit-row">
+                <div class="limit-head">
+                  <strong>{{ modelName(cap.model_id) }}</strong>
+                  <ui-badge tone="neutral">{{ cap.period }}</ui-badge>
+                  <span class="drawer-meta">
+                    {{ formatTokens(cap.used_tokens) }} of {{ formatTokens(cap.limit_tokens) }}
+                  </span>
+                </div>
+                <ui-meter
+                  [value]="capPercent(cap)"
+                  [tone]="capTone(cap)"
+                  [label]="modelName(cap.model_id) + ' ' + cap.period + ' token cap'"
+                />
+                <div class="limit-edit">
+                  <ui-input
+                    type="number"
+                    min="0"
+                    [value]="capValue(cap)?.toString() ?? ''"
+                    [ariaLabel]="modelName(cap.model_id) + ' ' + cap.period + ' token limit'"
+                    (valueChange)="onCapInput(cap, $event)"
+                  />
+                  <ui-button
+                    size="sm"
+                    [loading]="savingCap() === cap.model_id + '|' + cap.period"
+                    (clicked)="saveCap(cap)"
+                    >Save</ui-button
+                  >
+                  <ui-button
+                    size="sm"
+                    variant="ghost"
+                    [loading]="removingCap() === cap.model_id + '|' + cap.period"
+                    (clicked)="removeCap(cap)"
+                    >Remove</ui-button
+                  >
+                </div>
+              </div>
+            }
+          }
+
+          <div class="cap-add">
+            <ui-field label="Model" [controlId]="'drawer-cap-model'">
+              <ui-select
+                [id]="'drawer-cap-model'"
+                [value]="newCap().modelId"
+                (valueChange)="setNewCapModel($event)"
+              >
+                <option value="">Choose a model…</option>
+                @for (model of models(); track model.id) {
+                  <option [value]="model.id">{{ model.canonical_name }}</option>
+                }
+              </ui-select>
+            </ui-field>
+            <ui-field label="Period" [controlId]="'drawer-cap-period'">
+              <ui-select
+                [id]="'drawer-cap-period'"
+                [value]="newCap().period"
+                (valueChange)="setNewCapPeriod($event)"
+              >
+                @for (period of periods; track period) {
+                  <option [value]="period">{{ period }}</option>
+                }
+              </ui-select>
+            </ui-field>
+            <ui-field label="Token limit" [controlId]="'drawer-cap-limit'">
+              <ui-input
+                [id]="'drawer-cap-limit'"
+                type="number"
+                min="0"
+                [value]="newCap().limit?.toString() ?? ''"
+                (valueChange)="setNewCapLimit($event)"
+              />
+            </ui-field>
+            <ui-button [loading]="addingCap()" (clicked)="addCap()">Add cap</ui-button>
+          </div>
+        </section>
+      }
+
+      @case ('grants') {
+        <section class="drawer-section">
+          <h3>Model allow-list</h3>
+          <p class="drawer-note">
+            Checked models map to <code>allow</code> grants for this user. A <code>deny</code> grant
+            wins over an allow and can be removed under Advanced.
+          </p>
+          @if (grantsError()) {
+            <ui-banner tone="danger" actionLabel="Retry" (actioned)="loadGrants()">
+              {{ grantsError() }}
+            </ui-banner>
+          } @else if (grantsLoading() && grantModels().length === 0) {
+            <div class="drawer-loading">
+              <ui-spinner size="sm" label="Loading grants" /> Loading grants…
+            </div>
+          } @else {
+            <div class="grant-toolbar">
+              <ui-input
+                type="search"
+                placeholder="Search models…"
+                [ariaLabel]="'Search models'"
+                [value]="search()"
+                (valueChange)="onSearch($event)"
+              />
+              <ui-button size="sm" (clicked)="allowAll()">Allow all</ui-button>
+              <ui-button size="sm" variant="ghost" (clicked)="clearAll()">Clear</ui-button>
+            </div>
+            @if (filteredModels().length === 0) {
+              <p class="drawer-note">No catalog models match “{{ search() }}”.</p>
+            } @else {
+              <div class="grant-list">
+                @for (model of filteredModels(); track model.id) {
+                  <div class="grant-item">
+                    <ui-checkbox
+                      [checked]="isChecked(model.id)"
+                      [disabled]="deniedIds().has(model.id)"
+                      [label]="model.canonical_name"
+                      (checkedChange)="toggleModel(model.id, $event)"
+                    />
+                    @if (deniedIds().has(model.id)) {
+                      <ui-badge tone="danger">denied</ui-badge>
+                    }
+                  </div>
+                }
+              </div>
+            }
+            <div class="drawer-actions">
+              <ui-button variant="primary" [loading]="savingGrants()" (clicked)="saveAllowList()">
+                Save allow-list
+              </ui-button>
+              <ui-button variant="ghost" (clicked)="toggleAdvanced()">
+                {{ advanced() ? 'Hide advanced' : 'Advanced matrix' }}
+              </ui-button>
+            </div>
+
+            @if (advanced()) {
+              <div class="advanced">
+                <h4>Advanced subject × resource × mode</h4>
+                <p class="drawer-note">
+                  Every grant for this account, including deny grants and offering/credential
+                  resources.
+                </p>
+                <div class="advanced-form">
+                  <ui-field label="Resource type" [controlId]="'drawer-grant-type'">
+                    <ui-select
+                      [id]="'drawer-grant-type'"
+                      [value]="resourceType()"
+                      (valueChange)="setResourceType($event)"
+                    >
+                      <option value="model">model</option>
+                      <option value="offering">offering</option>
+                      <option value="credential">credential</option>
+                    </ui-select>
+                  </ui-field>
+                  <ui-field label="Resource" [controlId]="'drawer-grant-resource'">
+                    <ui-select
+                      [id]="'drawer-grant-resource'"
+                      [value]="resourceId()"
+                      (valueChange)="setResourceId($event)"
+                    >
+                      <option value="">Choose…</option>
+                      @for (option of resourceOptions(); track option.id) {
+                        <option [value]="option.id">{{ option.label }}</option>
+                      }
+                    </ui-select>
+                  </ui-field>
+                  <ui-field label="Mode" [controlId]="'drawer-grant-mode'">
+                    <ui-select
+                      [id]="'drawer-grant-mode'"
+                      [value]="grantMode()"
+                      (valueChange)="setGrantMode($event)"
+                    >
+                      <option value="allow">allow</option>
+                      <option value="deny">deny</option>
+                    </ui-select>
+                  </ui-field>
+                  <ui-button [loading]="addingGrant()" (clicked)="addGrant()">Add grant</ui-button>
+                </div>
+                @if (grants().length === 0) {
+                  <p class="drawer-note">No grants yet.</p>
+                } @else {
+                  <ui-table [dense]="true">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">Resource type</th>
+                          <th scope="col">Resource</th>
+                          <th scope="col">Mode</th>
+                          <th scope="col">Created</th>
+                          <th scope="col"><span class="visually-hidden">Actions</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @for (grant of grants(); track grant.id) {
+                          <tr>
+                            <td>{{ grant.resource_type }}</td>
+                            <td>{{ resourceLabel(grant) }}</td>
+                            <td>
+                              <ui-badge [tone]="grant.mode === 'deny' ? 'danger' : 'success'">
+                                {{ grant.mode }}
+                              </ui-badge>
+                            </td>
+                            <td>{{ formatTime(grant.created_at) }}</td>
+                            <td>
+                              <ui-button size="sm" variant="danger" (clicked)="removeGrant(grant)">
+                                Remove
+                              </ui-button>
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </ui-table>
+                }
+              </div>
+            }
+          }
+        </section>
+      }
+
+      @case ('keys') {
+        <section class="drawer-section">
+          <h3>API keys</h3>
+          @if (keysError()) {
+            <ui-banner tone="danger" actionLabel="Retry" (actioned)="loadKeys()">
+              {{ keysError() }}
+            </ui-banner>
+          } @else if (keysLoading() && keys().length === 0) {
+            <div class="drawer-loading">
+              <ui-spinner size="sm" label="Loading keys" /> Loading keys…
+            </div>
+          } @else {
+            @if (createdKey(); as shown) {
+              <ui-banner tone="warning">
+                This is the only copy of <strong>{{ shown.name }}</strong>. Copy it now; it cannot
+                be recovered later.
+              </ui-banner>
+              <div class="key-row">
+                <code class="key-value">{{ shown.key }}</code>
+                <ui-button (clicked)="copyKey()">{{ copied() ? 'Copied' : 'Copy' }}</ui-button>
+                <ui-button variant="primary" (clicked)="dismissKey()">I have copied it</ui-button>
+              </div>
+            }
+            <div class="key-create">
+              <ui-field label="New key name" [controlId]="'drawer-key-name'">
+                <ui-input
+                  [id]="'drawer-key-name'"
+                  [value]="keyName()"
+                  placeholder="laptop"
+                  (valueChange)="setKeyName($event)"
+                />
+              </ui-field>
+              <ui-button variant="primary" [loading]="creatingKey()" (clicked)="createKey()">
+                Create key
+              </ui-button>
+            </div>
+            @if (keys().length === 0) {
+              <ui-empty title="No keys yet" description="Create the first key for this account." />
+            } @else {
+              <ui-table [dense]="true">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Prefix</th>
+                      <th scope="col">Last used</th>
+                      <th scope="col">Expires</th>
+                      <th scope="col">Status</th>
+                      <th scope="col"><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (key of keys(); track key.id) {
+                      <tr>
+                        <td>{{ key.name }}</td>
+                        <td>
+                          <code>{{ key.prefix }}</code>
+                        </td>
+                        <td>{{ formatTime(key.last_used_at) }}</td>
+                        <td>{{ formatTime(key.expires_at) }}</td>
+                        <td>
+                          @if (key.revoked_at !== null) {
+                            <ui-badge tone="danger">revoked</ui-badge>
+                          } @else if (isExpired(key)) {
+                            <ui-badge tone="warning">expired</ui-badge>
+                          } @else {
+                            <ui-badge tone="success">active</ui-badge>
+                          }
+                        </td>
+                        <td>
+                          @if (revokeTarget()?.id === key.id) {
+                            <ui-button
+                              size="sm"
+                              variant="danger"
+                              [loading]="revoking()"
+                              (clicked)="revokeKey()"
+                              >Confirm revoke</ui-button
+                            >
+                            <ui-button size="sm" variant="ghost" (clicked)="revokeTarget.set(null)">
+                              Cancel
+                            </ui-button>
+                          } @else {
+                            <ui-button size="sm" variant="danger" (clicked)="revokeTarget.set(key)">
+                              Revoke
+                            </ui-button>
+                          }
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </ui-table>
+            }
+          }
+        </section>
+      }
+
+      @case ('overview') {
+        <section class="drawer-section">
+          <h3>Account</h3>
+          <dl class="overview-list">
+            <div>
+              <dt>Role</dt>
+              <dd>
+                <ui-badge [tone]="user().role === 'admin' ? 'accent' : 'neutral'">
+                  {{ user().role }}
+                </ui-badge>
+              </dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>
+                <ui-badge [tone]="user().is_active ? 'success' : 'danger'">
+                  {{ user().is_active ? 'active' : 'inactive' }}
+                </ui-badge>
+              </dd>
+            </div>
+            <div>
+              <dt>Password rotation</dt>
+              <dd>
+                @if (user().must_change_password) {
+                  <ui-badge tone="warning">change required</ui-badge>
+                } @else {
+                  <span class="drawer-meta">up to date</span>
+                }
+              </dd>
+            </div>
+            <div>
+              <dt>Last login</dt>
+              <dd>{{ formatTime(user().last_login_at) }}</dd>
+            </div>
+            <div>
+              <dt>Created</dt>
+              <dd>{{ formatTime(user().created_at) }}</dd>
+            </div>
+          </dl>
+
+          <div class="drawer-actions">
+            <ui-button (clicked)="resetOpen.set(!resetOpen())">
+              {{ resetOpen() ? 'Cancel password reset' : 'Reset password' }}
+            </ui-button>
+            @if (user().is_active) {
+              @if (deactivateArmed()) {
+                <ui-button variant="danger" [loading]="savingActive()" (clicked)="setActive(false)">
+                  Confirm deactivate
+                </ui-button>
+                <ui-button variant="ghost" (clicked)="deactivateArmed.set(false)">Cancel</ui-button>
+              } @else {
+                <ui-button variant="danger" (clicked)="setActive(false)">Deactivate</ui-button>
+              }
+            } @else {
+              <ui-button [loading]="savingActive()" (clicked)="setActive(true)">Activate</ui-button>
+            }
+          </div>
+
+          @if (resetOpen()) {
+            <div class="reset-form">
+              <ui-banner tone="warning">
+                Resetting the password revokes the account's API keys and sessions and forces a
+                change at next sign-in (D23).
+              </ui-banner>
+              <ui-field
+                label="New password"
+                [controlId]="'drawer-reset-password'"
+                [hint]="'At least ' + minPasswordLength + ' characters.'"
+              >
+                <ui-input
+                  [id]="'drawer-reset-password'"
+                  type="password"
+                  [value]="newPassword()"
+                  autocomplete="new-password"
+                  (valueChange)="setNewPassword($event)"
+                />
+              </ui-field>
+              <ui-button variant="danger" [loading]="resetting()" (clicked)="resetPassword()"
+                >Set new password</ui-button
+              >
+            </div>
+          }
+        </section>
+      }
+    }
+  </ui-tabs>
+
+  <div ui-dialog-actions>
+    <ui-button (clicked)="close()">Close</ui-button>
+  </div>
+</ui-dialog>

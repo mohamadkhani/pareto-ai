@@ -230,3 +230,55 @@ describe('Users', () => {
     expect(root.querySelector('.reset-panel')).toBeNull();
   });
 });
+
+describe('Users drawer', () => {
+  let fetchMock: FetchMock;
+
+  beforeEach(() => {
+    fetchMock = new FetchMock();
+    vi.stubGlobal('fetch', fetchMock.fetch);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('opens the row drawer, closes on Escape, and returns focus to the row', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    // Limits tab loads on open: budgets, token caps, models.
+    fetchMock.respond(jsonResponse(200, []));
+    fetchMock.respond(jsonResponse(200, []));
+    fetchMock.respond(jsonResponse(200, []));
+
+    TestBed.configureTestingModule({
+      imports: [Users],
+      providers: [{ provide: AuthService, useValue: authStub('admin') }],
+    });
+    await TestBed.compileComponents();
+    const fixture = TestBed.createComponent(Users);
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+    const row = root.querySelector<HTMLTableRowElement>('tbody tr');
+    if (row === null) {
+      throw new Error('no user row');
+    }
+    row.focus();
+    row.click();
+    await fixture.whenStable();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const drawer = root.querySelector('app-user-drawer');
+    expect(drawer).not.toBeNull();
+    expect(drawer?.querySelectorAll('[role="tab"]')).toHaveLength(4);
+
+    drawer?.querySelector('dialog')?.dispatchEvent(new Event('cancel', { cancelable: true }));
+    await fixture.whenStable();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    expect(root.querySelector('app-user-drawer')).toBeNull();
+    expect(document.activeElement).toBe(row);
+  });
+});
