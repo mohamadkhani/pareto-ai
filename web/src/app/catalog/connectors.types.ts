@@ -62,15 +62,34 @@ export interface CatalogConfig {
   refresh_seconds: number | null;
 }
 
+/** A balance amount's unit (D52): the catalog unit without a token base. */
+export interface BalanceUnit {
+  /** Applied to balance, period spend, and burn rate; e.g. `0.01` for cents. */
+  multiplier: number;
+  /** ISO currency of the published numbers (used when `currency` is absent). */
+  currency: string;
+  /** Static conversion; non-USD balances are gated on only when this is set. */
+  fx_to_usd: number | null;
+  display: PriceDisplay;
+  /** Free-text reminder shown by the UI. */
+  note: string | null;
+}
+
 /** Pointers into the balance payload (all relative to the response root). */
 export interface BalanceConfig {
   balance: string;
+  /**
+   * Optional pointer subtracted from `balance` before the multiplier, e.g.
+   * OpenRouter's remaining = total_credits − total_usage.
+   */
+  subtract: string | null;
   available: string | null;
   /** Literal currency code or a pointer to a currency string. */
   currency: string | null;
   period_spend: string | null;
   burn_rate: string | null;
   days_remaining: string | null;
+  unit: BalanceUnit;
   /** Defaults to 900 server-side, bounded to 60…86 400. */
   refresh_seconds: number | null;
 }
@@ -179,11 +198,19 @@ export interface ConnectorTestView {
 
 export interface ExtractedBalance {
   available: boolean;
+  /** USD when routable, otherwise the amount in `currency`. */
   balance_usd: number | null;
   currency: string;
+  /** The value after `subtract`, before the unit multiplier. */
+  raw: number | null;
+  /** `raw × multiplier`, in the source currency. */
+  converted: number | null;
+  /** False for a non-USD balance without FX; routing and the gate ignore it. */
+  routable: boolean;
   period_spend: number | null;
   burn_rate: number | null;
   days_remaining: number | null;
+  warnings: string[];
 }
 
 export interface ExtractedHealth {
@@ -214,9 +241,13 @@ export interface BalanceRefreshView {
   available: boolean;
   balance_usd: number | null;
   currency: string;
+  raw: number | null;
+  converted: number | null;
+  routable: boolean;
   period_spend: number | null;
   burn_rate: number | null;
   days_remaining: number | null;
+  warnings: string[];
   error: string | null;
   fetched_at: string;
 }
@@ -265,11 +296,19 @@ export function emptyConnectorConfig(kind: ConnectorKind): ConnectorConfig {
       kind === 'balance'
         ? {
             balance: '/balance',
+            subtract: null,
             available: null,
             currency: 'USD',
             period_spend: null,
             burn_rate: null,
             days_remaining: null,
+            unit: {
+              multiplier: 1,
+              currency: 'USD',
+              fx_to_usd: null,
+              display: { symbol: '$', decimals: 2 },
+              note: null,
+            },
             refresh_seconds: 900,
           }
         : null,

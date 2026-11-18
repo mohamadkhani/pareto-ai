@@ -9,7 +9,7 @@ import {
   viewChild,
 } from '@angular/core';
 import { Location } from '@angular/common';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { ApiError } from '../api';
 import { AuthService } from '../auth/auth.service';
 import { RoutingService } from '../routing/routing.service';
@@ -197,6 +197,7 @@ export class Models {
   private readonly mix = inject(MixService);
   private readonly routing = inject(RoutingService);
   private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
   private readonly location = inject(Location);
   private readonly destroyRef = inject(DestroyRef);
   private readonly searchControl = viewChild(UiInput, { read: ElementRef });
@@ -295,6 +296,17 @@ export class Models {
     }
     return this.rows().find((row) => overviewRowKey(row) === key) ?? null;
   });
+  /**
+   * Opens the provider's setup dialog on the Prices tab. Uses the deep link so
+   * the behaviour matches a hand-typed URL and back/forward.
+   */
+  protected openPriceSetup(): void {
+    const id = this.providerId();
+    void this.router.navigate(['/providers'], {
+      queryParams: { setup: id === 'all' ? null : id, tab: 'prices' },
+    });
+  }
+
   /** True while the table shows mix prices instead of the three components. */
   protected readonly mixSelected = computed(() => this.priceBasis() !== COMPONENTS_BASIS);
   protected readonly activeProfile = computed<MixProfile | null>(() => {

@@ -255,9 +255,17 @@ fn four() -> u8 {
 pub struct BalanceConfig {
     /// Pointer to the remaining balance; required and numeric.
     pub balance: String,
+    /// Optional pointer subtracted from `balance` **before** the unit
+    /// multiplier, for payloads that publish a total and a usage separately
+    /// (OpenRouter's credits endpoint: remaining = total_credits −
+    /// total_usage). A missing or non-numeric value is an error naming the
+    /// pointer, never a silent zero.
+    #[serde(default)]
+    pub subtract: Option<String>,
     #[serde(default)]
     pub available: Option<String>,
-    /// Literal currency or a pointer to a currency string. Default `USD`.
+    /// Literal currency or a pointer to a currency string. When absent the
+    /// unit's `currency` applies. Default `USD`.
     #[serde(default)]
     pub currency: Option<String>,
     #[serde(default)]
@@ -266,9 +274,55 @@ pub struct BalanceConfig {
     pub burn_rate: Option<String>,
     #[serde(default)]
     pub days_remaining: Option<String>,
+    /// How the published balance/spend numbers are expressed (D52). The
+    /// multiplier applies to `balance`, `period_spend`, and `burn_rate`;
+    /// `days_remaining` is a count of days and is never scaled.
+    #[serde(default)]
+    pub unit: BalanceUnit,
     /// Refresh cadence; default 900, bounded to 60…86 400.
     #[serde(default)]
     pub refresh_seconds: Option<u64>,
+}
+
+/// A balance unit: the catalog's [`PriceUnit`] without the token base, because
+/// a balance is a plain amount of money rather than a price per token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct BalanceUnit {
+    /// Applied to `balance`, `period_spend`, and `burn_rate`; e.g. `0.01` for
+    /// an amount quoted in cents. A non-positive or non-finite value makes the
+    /// balance unavailable and raises a warning.
+    #[serde(default = "one")]
+    pub multiplier: f64,
+    /// ISO currency of the published numbers (used when the `currency`
+    /// pointer/literal is absent). Non-USD values only feed routing and the
+    /// balance gate when `fx_to_usd` is supplied.
+    #[serde(default = "usd")]
+    pub currency: String,
+    /// Static conversion to USD; no live FX feed exists.
+    #[serde(default)]
+    pub fx_to_usd: Option<f64>,
+    /// Symbol and decimals for the balance display.
+    #[serde(default)]
+    pub display: PriceDisplay,
+    /// Free-text reminder shown by the UI (e.g. "quoted in cents — verify
+    /// against an invoice").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Default for BalanceUnit {
+    fn default() -> Self {
+        Self {
+            multiplier: 1.0,
+            currency: "USD".to_string(),
+            fx_to_usd: None,
+            display: PriceDisplay {
+                symbol: "$".to_string(),
+                decimals: 2,
+            },
+            note: None,
+        }
+    }
 }
 
 /// Health connector options.
@@ -284,13 +338,7 @@ impl ConnectorConfig {
     /// Validates the document for its kind and normalizes nothing else.
     /// Failure mode: [`ConnectorError::Invalid`] naming the offending field.
     pub fn validate(&self, kind: ConnectorKind) -> Result<(), ConnectorError> {
-        if self.url.trim().is_empty() {
-            return Err(ConnectorError::Invalid("url must not be empty".to_string()));
-        }
-        for (name, value) in &self.headers {
-            let map = BTreeMap::from([(name.clone(), Value::String(value.clone()))]);
-            headers::normalize(&map).map_err(|error| ConnectorError::Invalid(error.to_string()))?;
-        }
+        self.validate_connection()?;
         match kind {
             ConnectorKind::Catalog => {
                 let catalog = self.catalog.as_ref().ok_or_else(|| {
@@ -343,6 +391,7 @@ impl ConnectorConfig {
                 })?;
                 validate_pointer(&balance.balance, "balance.balance")?;
                 for (value, field) in [
+                    (&balance.subtract, "balance.subtract"),
                     (&balance.available, "balance.available"),
                     (&balance.period_spend, "balance.period_spend"),
                     (&balance.burn_rate, "balance.burn_rate"),
@@ -351,6 +400,21 @@ impl ConnectorConfig {
                     if let Some(pointer) = value {
                         validate_pointer(pointer, field)?;
                     }
+                }
+                if balance.unit.currency.trim().is_empty() {
+                    return Err(ConnectorError::Invalid(
+                        "balance.unit.currency must not be empty".to_string(),
+                    ));
+                }
+                if balance.unit.display.symbol.trim().is_empty() {
+                    return Err(ConnectorError::Invalid(
+                        "balance.unit.display.symbol must not be empty".to_string(),
+                    ));
+                }
+                if balance.unit.display.decimals > 8 {
+                    return Err(ConnectorError::Invalid(
+                        "balance.unit.display.decimals must be at most 8".to_string(),
+                    ));
                 }
                 if let Some(pointer) = balance.currency.as_deref()
                     && pointer.starts_with('/')
@@ -370,6 +434,130 @@ impl ConnectorConfig {
                     validate_pointer(pointer, "health.ok_pointer")?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// URL, headers, and nothing else. `sample` fetches the raw document and
+    /// never applies the mapping, so an empty mapping must still be sampleable.
+    /// Failure mode: [`ConnectorError::Invalid`] naming the field.
+    pub fn validate_for_sample(&self) -> Result<(), ConnectorError> {
+        self.validate_connection()
+    }
+
+    /// Lenient validation for `test`/preview: present fields must be
+    /// well-formed, while missing required fields come back as warnings for
+    /// the operator instead of a global error. Failure mode:
+    /// [`ConnectorError::Invalid`] only for a malformed present field.
+    pub fn validate_present(&self, kind: ConnectorKind) -> Result<Vec<String>, ConnectorError> {
+        self.validate_connection()?;
+        let mut warnings = Vec::new();
+        match kind {
+            ConnectorKind::Catalog => {
+                let Some(catalog) = self.catalog.as_ref() else {
+                    return Ok(vec![
+                        "this document has no catalog mapping; add one to preview prices"
+                            .to_string(),
+                    ]);
+                };
+                for (value, field) in [
+                    (Some(catalog.entries.as_str()), "catalog.entries"),
+                    (Some(catalog.model_id.as_str()), "catalog.model_id"),
+                    (catalog.input.as_deref(), "catalog.input"),
+                    (catalog.output.as_deref(), "catalog.output"),
+                    (catalog.cache_read.as_deref(), "catalog.cache_read"),
+                    (catalog.cache_write.as_deref(), "catalog.cache_write"),
+                    (catalog.reasoning.as_deref(), "catalog.reasoning"),
+                    (
+                        catalog.modalities_input.as_deref(),
+                        "catalog.modalities_input",
+                    ),
+                    (
+                        catalog.modalities_output.as_deref(),
+                        "catalog.modalities_output",
+                    ),
+                    (catalog.context_length.as_deref(), "catalog.context_length"),
+                    (catalog.max_output.as_deref(), "catalog.max_output"),
+                ] {
+                    match value {
+                        Some(pointer) if pointer.trim().is_empty() => {
+                            warnings.push(format!(
+                                "set {field} before previewing; it is required for an extraction"
+                            ));
+                        }
+                        Some(pointer) => validate_pointer(pointer, field)?,
+                        None => {}
+                    }
+                }
+                if catalog.input.is_none() && catalog.output.is_none() {
+                    warnings.push(
+                        "set input or output to preview prices; without one the extracted prices stay empty"
+                            .to_string(),
+                    );
+                }
+                if !catalog.unit.currency.trim().is_empty()
+                    && catalog.unit.display.symbol.trim().is_empty()
+                {
+                    warnings.push(
+                        "set catalog.unit.display.symbol so converted prices are readable"
+                            .to_string(),
+                    );
+                }
+                if let Some(seconds) = catalog.refresh_seconds {
+                    validate_refresh_seconds(seconds, "catalog.refresh_seconds")?;
+                }
+            }
+            ConnectorKind::Balance => {
+                let Some(balance) = self.balance.as_ref() else {
+                    return Ok(vec![
+                        "this document has no balance section; add one to preview a balance"
+                            .to_string(),
+                    ]);
+                };
+                for (value, field) in [
+                    (Some(balance.balance.as_str()), "balance.balance"),
+                    (balance.subtract.as_deref(), "balance.subtract"),
+                    (balance.available.as_deref(), "balance.available"),
+                    (balance.period_spend.as_deref(), "balance.period_spend"),
+                    (balance.burn_rate.as_deref(), "balance.burn_rate"),
+                    (balance.days_remaining.as_deref(), "balance.days_remaining"),
+                ] {
+                    match value {
+                        Some(pointer) if pointer.trim().is_empty() => {
+                            warnings.push(format!(
+                                "set {field} before previewing; it is required for an extraction"
+                            ));
+                        }
+                        Some(pointer) => validate_pointer(pointer, field)?,
+                        None => {}
+                    }
+                }
+                if let Some(seconds) = balance.refresh_seconds {
+                    validate_refresh_seconds(seconds, "balance.refresh_seconds")?;
+                }
+            }
+            ConnectorKind::Health => {
+                if let Some(pointer) = self
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.ok_pointer.as_deref())
+                    && !pointer.trim().is_empty()
+                {
+                    validate_pointer(pointer, "health.ok_pointer")?;
+                }
+            }
+        }
+        Ok(warnings)
+    }
+
+    /// URL and header checks shared by every entry point.
+    fn validate_connection(&self) -> Result<(), ConnectorError> {
+        if self.url.trim().is_empty() {
+            return Err(ConnectorError::Invalid("url must not be empty".to_string()));
+        }
+        for (name, value) in &self.headers {
+            let map = BTreeMap::from([(name.clone(), Value::String(value.clone()))]);
+            headers::normalize(&map).map_err(|error| ConnectorError::Invalid(error.to_string()))?;
         }
         Ok(())
     }
@@ -501,11 +689,24 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         catalog: None,
         balance: Some(BalanceConfig {
             balance: "/balance".to_string(),
+            subtract: None,
             available: Some("/available".to_string()),
             currency: Some("/currency".to_string()),
             period_spend: Some("/period_spend".to_string()),
             burn_rate: Some("/burn_rate".to_string()),
             days_remaining: Some("/days_remaining".to_string()),
+            unit: BalanceUnit {
+                // Same treatment as the prices: the usage payload is quoted in
+                // cents, so one multiplier turns every money field into USD.
+                multiplier: 0.01,
+                currency: "USD".to_string(),
+                fx_to_usd: None,
+                display: PriceDisplay {
+                    symbol: "$".to_string(),
+                    decimals: 2,
+                },
+                note: Some("quoted in cents — verify against an invoice".to_string()),
+            },
             refresh_seconds: Some(DEFAULT_REFRESH_SECONDS),
         }),
         health: None,
@@ -552,21 +753,21 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         health: None,
     };
     let openrouter_balance = ConnectorConfig {
-        // Best effort: `/api/v1/credits` reports purchased credits and
-        // lifetime usage, not a remaining balance, so the fields are
-        // documented rather than guessed further. `/data/total_credits` is the
-        // credit balance and `/data/total_usage` the spend so far.
+        // `/api/v1/credits` reports purchased credits and lifetime usage, not a
+        // remaining balance: remaining = total_credits − total_usage.
         url: "/api/v1/credits".to_string(),
         headers: BTreeMap::new(),
         allow_private: false,
         catalog: None,
         balance: Some(BalanceConfig {
             balance: "/data/total_credits".to_string(),
+            subtract: Some("/data/total_usage".to_string()),
             available: None,
             currency: Some("USD".to_string()),
             period_spend: Some("/data/total_usage".to_string()),
             burn_rate: None,
             days_remaining: None,
+            unit: BalanceUnit::default(),
             refresh_seconds: Some(DEFAULT_REFRESH_SECONDS),
         }),
         health: None,
@@ -608,7 +809,7 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         ConnectorTemplate {
             id: "openrouter_per_token",
             label: "OpenRouter (per token)",
-            description: "OpenRouter publishes USD strings per token; the engine multiplies by 1e6. Balance is best effort: /api/v1/credits reports purchased credits (/data/total_credits) and lifetime usage (/data/total_usage), not a remaining balance.",
+            description: "OpenRouter publishes USD strings per token; the engine multiplies by 1e6. Balance comes from /api/v1/credits: remaining = total_credits − total_usage.",
             configs: ConnectorTemplateConfigs {
                 catalog: Some(openrouter),
                 balance: Some(openrouter_balance),
@@ -818,9 +1019,16 @@ pub struct BalanceRefreshView {
     pub available: bool,
     pub balance_usd: Option<f64>,
     pub currency: String,
+    /// Raw value after `subtract`, before the unit multiplier (D52).
+    pub raw: Option<f64>,
+    /// `raw × unit.multiplier`, in the source currency.
+    pub converted: Option<f64>,
+    /// False for a non-USD balance without FX; routing and the gate ignore it.
+    pub routable: bool,
     pub period_spend: Option<f64>,
     pub burn_rate: Option<f64>,
     pub days_remaining: Option<f64>,
+    pub warnings: Vec<String>,
     pub error: Option<String>,
     pub fetched_at: String,
 }
@@ -1387,25 +1595,51 @@ pub fn extract_discovery_entries(
     Ok(out)
 }
 
+/// A converted balance above this many USD is assumed to be a unit mistake
+/// (for example a cents feed left without its `0.01` multiplier).
+pub const IMPLAUSIBLE_BALANCE_USD: f64 = 10_000_000.0;
+
 /// A resolved provider balance.
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq)]
 pub struct ExtractedBalance {
     /// The provider said the balance is usable.
     pub available: bool,
-    /// Remaining balance; `None` when unavailable. Never 0 as a stand-in.
+    /// The stored amount: USD when routable, otherwise the source currency.
+    /// `None` when the provider reported unavailable or the unit multiplier is
+    /// not a positive number. Never 0 as a stand-in.
     pub balance_usd: Option<f64>,
+    /// The stored currency: `USD` when routable, otherwise the source code.
     pub currency: String,
+    /// The number the pointers resolved to, after `subtract` and before the
+    /// unit multiplier.
+    pub raw: Option<f64>,
+    /// `raw × unit.multiplier`, in the source currency.
+    pub converted: Option<f64>,
+    /// False for a non-USD currency without a usable `fx_to_usd`; the balance
+    /// gate and routing ignore such a value.
+    pub routable: bool,
+    /// Period spend and burn rate follow the same multiplier/FX as the
+    /// balance; `days_remaining` is copied as-is.
     pub period_spend: Option<f64>,
     pub burn_rate: Option<f64>,
     pub days_remaining: Option<f64>,
+    /// Unit and plausibility warnings ("check the multiplier").
+    pub warnings: Vec<String>,
 }
 
 /// Reads the balance pointers from a document.
 ///
-/// Failure modes: [`ConnectorError::Invalid`] when the required balance
-/// pointer is missing or not numeric, or when `available` is present but not
-/// a boolean. A negative balance is unrepresentable and treated the same as a
-/// missing number.
+/// `balance = balance_pointer − subtract_pointer` (when `subtract` is set),
+/// then `× unit.multiplier`, then `× fx_to_usd` for a non-USD currency. The
+/// multiplier and FX apply to `period_spend` and `burn_rate` too;
+/// `days_remaining` is never scaled.
+///
+/// Failure modes: [`ConnectorError::Invalid`] when a required pointer is
+/// missing or not numeric, or when `available` is present but not a boolean.
+/// A negative balance is unrepresentable and treated the same as a missing
+/// number; a negative *converted* balance (possible only through `subtract`)
+/// is stored with a warning. A non-positive `unit.multiplier` makes the value
+/// unavailable with a warning instead of failing the whole refresh.
 pub fn extract_balance(
     document: &Value,
     config: &BalanceConfig,
@@ -1417,6 +1651,16 @@ pub fn extract_balance(
             "balance.balance pointer {} did not resolve to a non-negative number",
             config.balance
         )));
+    };
+    let subtract = match config.subtract.as_deref() {
+        None => 0.0,
+        Some(pointer) => resolve_pointer(document, pointer)
+            .and_then(number)
+            .ok_or_else(|| {
+                ConnectorError::Invalid(format!(
+                    "balance.subtract pointer {pointer} did not resolve to a number"
+                ))
+            })?,
     };
     let available = match config.available.as_deref() {
         None => true,
@@ -1433,12 +1677,61 @@ pub fn extract_balance(
             })?
         }
     };
-    let currency = match config.currency.as_deref() {
-        None | Some("") => "USD".to_string(),
+    let reported_currency = match config.currency.as_deref() {
+        None | Some("") => config.unit.currency.clone(),
         Some(pointer) if pointer.starts_with('/') => {
-            string_at(document, pointer).unwrap_or_else(|| "USD".to_string())
+            string_at(document, pointer).unwrap_or_else(|| config.unit.currency.clone())
         }
         Some(literal) => literal.to_string(),
+    };
+    let currency = reported_currency.trim().to_ascii_uppercase();
+    let mut warnings = Vec::new();
+    let multiplier = config.unit.multiplier;
+    let multiplier_ok = multiplier.is_finite() && multiplier > 0.0;
+    if !multiplier_ok {
+        warnings.push(format!(
+            "balance.unit.multiplier {multiplier} is not a positive number; the balance is unavailable"
+        ));
+    }
+    let (fx, routable) = if currency == "USD" {
+        (1.0, true)
+    } else {
+        match config.unit.fx_to_usd {
+            Some(fx) if fx.is_finite() && fx > 0.0 => (fx, true),
+            Some(fx) => {
+                warnings.push(format!(
+                    "currency {currency} has an invalid fx_to_usd {fx}; the balance is excluded from routing and the balance gate"
+                ));
+                (0.0, false)
+            }
+            None => {
+                warnings.push(format!(
+                    "currency {currency} has no fx_to_usd; the balance is stored but excluded from routing and the balance gate"
+                ));
+                (0.0, false)
+            }
+        }
+    };
+    let raw = balance - subtract;
+    let converted = multiplier_ok.then_some(raw * multiplier);
+    let usd = converted.map(|value| value * fx);
+    if routable
+        && multiplier_ok
+        && let Some(value) = usd
+        && (value < 0.0 || value > IMPLAUSIBLE_BALANCE_USD)
+    {
+        let display = &config.unit.display;
+        warnings.push(format!(
+            "converted balance is {}{value:.decimals$} (raw {raw}); check the unit multiplier and subtract pointer",
+            display.symbol,
+            decimals = usize::from(display.decimals.min(8)),
+        ));
+    }
+    let scale = |value: f64| -> Option<f64> {
+        if !multiplier_ok {
+            return None;
+        }
+        Some(value * multiplier * fx)
     };
     let optional = |pointer: Option<&str>| {
         pointer
@@ -1446,13 +1739,26 @@ pub fn extract_balance(
             .and_then(number)
             .filter(|value| *value >= 0.0)
     };
+    let days_remaining = optional(config.days_remaining.as_deref());
+    let stored_currency = if routable {
+        "USD".to_string()
+    } else {
+        currency
+    };
+    // A non-routable balance keeps its own currency amount for display; a
+    // routable one is already USD.
+    let stored_amount = if routable { usd } else { converted };
     Ok(ExtractedBalance {
         available,
-        balance_usd: available.then_some(balance),
-        currency,
-        period_spend: optional(config.period_spend.as_deref()),
-        burn_rate: optional(config.burn_rate.as_deref()),
-        days_remaining: optional(config.days_remaining.as_deref()),
+        balance_usd: available.then_some(stored_amount).flatten(),
+        currency: stored_currency,
+        raw: Some(raw),
+        converted,
+        routable,
+        period_spend: optional(config.period_spend.as_deref()).and_then(scale),
+        burn_rate: optional(config.burn_rate.as_deref()).and_then(scale),
+        days_remaining,
+        warnings,
     })
 }
 
@@ -2079,7 +2385,8 @@ pub async fn sample(
                 ConnectorError::Invalid(format!("no {} connector is configured", kind.as_str()))
             })?,
     };
-    config.validate(kind)?;
+    // A sample is just the raw document: the mapping may still be empty.
+    config.validate_for_sample()?;
     let base_url = provider_base_url(pool, provider_id).await?;
     let material = credential_material(pool, secrets, provider_id, credential_id).await?;
     let empty = BTreeMap::new();
@@ -2120,7 +2427,10 @@ pub async fn test_connector(
                 ConnectorError::Invalid(format!("no {} connector is configured", kind.as_str()))
             })?,
     };
-    config.validate(kind)?;
+    // Preview validates the fields that are present and reports the missing
+    // ones as warnings, so an unfinished mapping still answers with what it
+    // can extract instead of a single global error.
+    let field_warnings = config.validate_present(kind)?;
     let base_url = provider_base_url(pool, provider_id).await?;
     let material = credential_material(pool, secrets, provider_id, credential_id).await?;
     let empty = BTreeMap::new();
@@ -2148,36 +2458,49 @@ pub async fn test_connector(
         balance: None,
         health: None,
     };
+    view.warnings = field_warnings;
     match kind {
         ConnectorKind::Catalog => {
             let catalog = config.catalog.as_ref().expect("validated");
-            match extract_catalog(&document, catalog) {
-                Ok(extraction) => {
-                    view.entries_seen = Some(extraction.entries_seen);
-                    view.matched = Some(extraction.matched);
-                    view.skipped = Some(extraction.skipped);
-                    view.samples = extraction.samples;
-                    view.errors = extraction.errors;
-                    view.warnings = extraction.warnings;
-                    view.currency = Some(catalog.unit.currency.to_ascii_uppercase());
-                    view.ok = extraction.matched > 0;
-                }
-                Err(error) => {
-                    view.ok = false;
-                    view.errors.push(error.to_string());
+            let incomplete = catalog.entries.trim().is_empty()
+                || catalog.model_id.trim().is_empty()
+                || (catalog.input.is_none() && catalog.output.is_none());
+            if incomplete {
+                view.ok = false;
+            } else {
+                match extract_catalog(&document, catalog) {
+                    Ok(extraction) => {
+                        view.entries_seen = Some(extraction.entries_seen);
+                        view.matched = Some(extraction.matched);
+                        view.skipped = Some(extraction.skipped);
+                        view.samples = extraction.samples;
+                        view.errors = extraction.errors;
+                        view.warnings.extend(extraction.warnings);
+                        view.currency = Some(catalog.unit.currency.to_ascii_uppercase());
+                        view.ok = extraction.matched > 0;
+                    }
+                    Err(error) => {
+                        view.ok = false;
+                        view.errors.push(error.to_string());
+                    }
                 }
             }
         }
         ConnectorKind::Balance => {
             let balance = config.balance.as_ref().expect("validated");
-            match extract_balance(&document, balance) {
-                Ok(balance) => {
-                    view.currency = Some(balance.currency.clone());
-                    view.balance = Some(balance);
-                }
-                Err(error) => {
-                    view.ok = false;
-                    view.errors.push(error.to_string());
+            if balance.balance.trim().is_empty() {
+                view.ok = false;
+            } else {
+                match extract_balance(&document, balance) {
+                    Ok(balance) => {
+                        view.currency = Some(balance.currency.clone());
+                        view.warnings.extend(balance.warnings.clone());
+                        view.balance = Some(balance);
+                    }
+                    Err(error) => {
+                        view.ok = false;
+                        view.errors.push(error.to_string());
+                    }
                 }
             }
         }
@@ -2449,6 +2772,10 @@ pub async fn refresh_balance(
     let mut tx = pool.begin().await?;
     match outcome {
         Ok(balance) => {
+            // An unusable unit (non-positive multiplier) leaves no amount even
+            // when the provider said the balance is usable: mark it
+            // unavailable instead of showing "available · —".
+            let available = balance.available && balance.balance_usd.is_some();
             sqlx::query(
                 "UPDATE provider_credentials SET \
                    balance_usd = ?, \
@@ -2464,7 +2791,7 @@ pub async fn refresh_balance(
             )
             .bind(balance.balance_usd)
             .bind(&finished_at)
-            .bind(i64::from(balance.available))
+            .bind(i64::from(available))
             .bind(&balance.currency)
             .bind(&finished_at)
             .bind(&finished_at)
@@ -2472,12 +2799,16 @@ pub async fn refresh_balance(
             .execute(&mut *tx)
             .await?;
             let detail = serde_json::json!({
-                "available": balance.available,
+                "available": available,
                 "balance_usd": balance.balance_usd,
                 "currency": balance.currency,
+                "raw": balance.raw,
+                "converted": balance.converted,
+                "routable": balance.routable,
                 "period_spend": balance.period_spend,
                 "burn_rate": balance.burn_rate,
                 "days_remaining": balance.days_remaining,
+                "warnings": balance.warnings,
             });
             record_run(
                 &mut tx,
@@ -2497,12 +2828,16 @@ pub async fn refresh_balance(
             Ok(BalanceRefreshView {
                 ok: true,
                 credential_id: credential_id.to_string(),
-                available: balance.available,
+                available,
                 balance_usd: balance.balance_usd,
                 currency: balance.currency,
+                raw: balance.raw,
+                converted: balance.converted,
+                routable: balance.routable,
                 period_spend: balance.period_spend,
                 burn_rate: balance.burn_rate,
                 days_remaining: balance.days_remaining,
+                warnings: balance.warnings,
                 error: None,
                 fetched_at: finished_at,
             })
@@ -2547,9 +2882,13 @@ pub async fn refresh_balance(
                 available: false,
                 balance_usd: None,
                 currency: "USD".to_string(),
+                raw: None,
+                converted: None,
+                routable: false,
                 period_spend: None,
                 burn_rate: None,
                 days_remaining: None,
+                warnings: Vec::new(),
                 error: Some(message),
                 fetched_at: finished_at,
             })
@@ -2586,9 +2925,13 @@ pub async fn refresh_provider_balances(
                     available: false,
                     balance_usd: None,
                     currency: "USD".to_string(),
+                    raw: None,
+                    converted: None,
+                    routable: false,
                     period_spend: None,
                     burn_rate: None,
                     days_remaining: None,
+                    warnings: Vec::new(),
                     error: Some(error.to_string()),
                     fetched_at: catalog::now_ts(),
                 });
@@ -3322,16 +3665,217 @@ mod tests {
     }
 
     #[test]
-    fn sail_balance_fixture_resolves() {
+    fn sail_balance_fixture_resolves_with_the_cents_multiplier() {
         let document: Value = serde_json::from_str(SAIL_USAGE).expect("fixture parses");
         let config = sail_balance_template().balance.expect("balance section");
         let balance = extract_balance(&document, &config).expect("balance resolves");
-        assert_eq!(balance.balance_usd, Some(12.34));
+        // D52: the usage payload is quoted in cents like the prices, so the
+        // same 0.01 multiplier turns every money field into USD.
+        assert_eq!(balance.raw, Some(12.34));
+        assert_eq!(balance.converted, Some(0.1234));
+        assert_eq!(balance.balance_usd, Some(0.1234));
+        assert!(balance.routable);
         assert!(balance.available);
         assert_eq!(balance.currency, "USD");
-        assert_eq!(balance.period_spend, Some(5.14));
-        assert_eq!(balance.burn_rate, Some(0.42));
+        assert!((balance.period_spend.expect("spend") - 0.0514).abs() < 1e-12);
+        assert!((balance.burn_rate.expect("burn") - 0.0042).abs() < 1e-12);
+        // Days are a count, never scaled.
         assert_eq!(balance.days_remaining, Some(29.4));
+        assert!(balance.warnings.is_empty(), "{:?}", balance.warnings);
+    }
+
+    #[test]
+    fn balance_subtract_applies_before_the_multiplier() {
+        // OpenRouter: remaining = total_credits − total_usage, in USD.
+        let document = serde_json::json!({
+            "data": { "total_credits": 100.0, "total_usage": 42.5 }
+        });
+        let config = BalanceConfig {
+            balance: "/data/total_credits".to_string(),
+            subtract: Some("/data/total_usage".to_string()),
+            available: None,
+            currency: Some("USD".to_string()),
+            period_spend: Some("/data/total_usage".to_string()),
+            burn_rate: None,
+            days_remaining: None,
+            unit: BalanceUnit::default(),
+            refresh_seconds: None,
+        };
+        let balance = extract_balance(&document, &config).expect("extract");
+        assert_eq!(balance.raw, Some(57.5), "subtracted before any scaling");
+        assert_eq!(balance.converted, Some(57.5));
+        assert_eq!(balance.balance_usd, Some(57.5));
+        assert_eq!(balance.period_spend, Some(42.5));
+        assert!(balance.routable);
+        assert!(balance.warnings.is_empty());
+
+        // The same difference with a cents multiplier: the subtraction happens
+        // on the raw numbers, then ×0.01.
+        let mut cents = config.clone();
+        cents.unit.multiplier = 0.01;
+        let balance = extract_balance(&document, &cents).expect("extract");
+        assert_eq!(balance.raw, Some(57.5));
+        assert!((balance.converted.expect("converted") - 0.575).abs() < 1e-12);
+
+        // A configured subtract pointer that does not resolve is an error, not
+        // a silent zero.
+        let broken = BalanceConfig {
+            subtract: Some("/data/missing".to_string()),
+            ..config
+        };
+        assert!(extract_balance(&document, &broken).is_err());
+    }
+
+    #[test]
+    fn balance_multiplier_warns_and_never_stores_a_non_positive_scale() {
+        let document = serde_json::json!({ "balance": 136275, "currency": "USD" });
+        for multiplier in [0.0, -1.0] {
+            let config = BalanceConfig {
+                balance: "/balance".to_string(),
+                subtract: None,
+                available: None,
+                currency: None,
+                period_spend: None,
+                burn_rate: None,
+                days_remaining: None,
+                unit: BalanceUnit {
+                    multiplier,
+                    ..BalanceUnit::default()
+                },
+                refresh_seconds: None,
+            };
+            let balance = extract_balance(&document, &config).expect("extract");
+            assert_eq!(balance.raw, Some(136_275.0));
+            assert_eq!(balance.converted, None);
+            assert_eq!(balance.balance_usd, None, "no amount without a unit");
+            assert!(
+                balance
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("not a positive number")),
+                "{:?}",
+                balance.warnings
+            );
+        }
+
+        // 136275 cents is the intended SailResearch-shaped example.
+        let config = BalanceConfig {
+            balance: "/balance".to_string(),
+            subtract: None,
+            available: None,
+            currency: None,
+            period_spend: None,
+            burn_rate: None,
+            days_remaining: None,
+            unit: BalanceUnit {
+                multiplier: 0.01,
+                ..BalanceUnit::default()
+            },
+            refresh_seconds: None,
+        };
+        let balance = extract_balance(&document, &config).expect("extract");
+        assert!((balance.balance_usd.expect("usd") - 1362.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn balance_outside_the_plausible_band_warns_but_is_stored() {
+        let config = BalanceConfig {
+            balance: "/balance".to_string(),
+            subtract: None,
+            available: None,
+            currency: None,
+            period_spend: None,
+            burn_rate: None,
+            days_remaining: None,
+            unit: BalanceUnit::default(),
+            refresh_seconds: None,
+        };
+        let huge = extract_balance(
+            &serde_json::json!({ "balance": 999_999_999_999.0 }),
+            &config,
+        )
+        .expect("extract");
+        assert!(
+            huge.warnings
+                .iter()
+                .any(|warning| warning.contains("check the unit multiplier")),
+            "{:?}",
+            huge.warnings
+        );
+
+        let negative = extract_balance(
+            &serde_json::json!({ "balance": 10.0 }),
+            &BalanceConfig {
+                subtract: Some("/unused".to_string()),
+                ..config.clone()
+            },
+        );
+        // A missing subtract pointer is an error; use a real difference next.
+        assert!(negative.is_err());
+        let config = BalanceConfig {
+            balance: "/balance".to_string(),
+            subtract: Some("/spent".to_string()),
+            ..config
+        };
+        let over = extract_balance(
+            &serde_json::json!({ "balance": 10.0, "spent": 42.0 }),
+            &config,
+        )
+        .expect("extract");
+        assert!(over.balance_usd.is_some_and(|value| value < 0.0));
+        assert!(
+            over.warnings
+                .iter()
+                .any(|warning| warning.contains("converted balance is")),
+            "{:?}",
+            over.warnings
+        );
+    }
+
+    #[test]
+    fn non_usd_balance_without_fx_is_stored_but_not_routable() {
+        let config = BalanceConfig {
+            balance: "/balance".to_string(),
+            subtract: None,
+            available: None,
+            currency: None,
+            period_spend: None,
+            burn_rate: None,
+            days_remaining: None,
+            unit: BalanceUnit {
+                currency: "EUR".to_string(),
+                ..BalanceUnit::default()
+            },
+            refresh_seconds: None,
+        };
+        let balance =
+            extract_balance(&serde_json::json!({ "balance": 10.0 }), &config).expect("extract");
+        assert!(!balance.routable);
+        assert_eq!(balance.currency, "EUR", "the source currency is kept");
+        assert_eq!(balance.balance_usd, Some(10.0), "the value is stored");
+        assert!(
+            balance
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("excluded from routing")),
+            "{:?}",
+            balance.warnings
+        );
+
+        // With a static rate the stored amount becomes USD.
+        let config = BalanceConfig {
+            unit: BalanceUnit {
+                currency: "EUR".to_string(),
+                fx_to_usd: Some(1.1),
+                ..BalanceUnit::default()
+            },
+            ..config
+        };
+        let balance =
+            extract_balance(&serde_json::json!({ "balance": 10.0 }), &config).expect("extract");
+        assert!(balance.routable);
+        assert_eq!(balance.currency, "USD");
+        assert!((balance.balance_usd.expect("usd") - 11.0).abs() < 1e-12);
     }
 
     #[test]
@@ -3343,11 +3887,13 @@ mod tests {
         });
         let config = BalanceConfig {
             balance: "/balance".to_string(),
+            subtract: None,
             available: Some("/available".to_string()),
             currency: Some("/currency".to_string()),
             period_spend: None,
             burn_rate: None,
             days_remaining: None,
+            unit: BalanceUnit::default(),
             refresh_seconds: None,
         };
         let balance = extract_balance(&document, &config).expect("extract");
@@ -3359,11 +3905,13 @@ mod tests {
     fn balance_requires_a_non_negative_number() {
         let config = BalanceConfig {
             balance: "/balance".to_string(),
+            subtract: None,
             available: None,
             currency: None,
             period_spend: None,
             burn_rate: None,
             days_remaining: None,
+            unit: BalanceUnit::default(),
             refresh_seconds: None,
         };
         for document in [

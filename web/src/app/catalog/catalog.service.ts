@@ -2,6 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { ApiError, requestJson, requestNoContent } from '../api';
 import { AuthService } from '../auth/auth.service';
 import type {
+  ApplyPresetResult,
   Credential,
   CredentialInput,
   CredentialPatch,
@@ -18,6 +19,7 @@ import type {
   Provider,
   ProviderInput,
   ProviderPatch,
+  ProviderPreset,
   SyncOutcome,
   SyncStatus,
 } from './catalog.types';
@@ -47,6 +49,7 @@ function toProvider(raw: Provider): Provider {
     kind: raw.kind,
     base_url: raw.base_url,
     enabled: raw.enabled,
+    preset: raw.preset ?? null,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
     last_discovery_at: raw.last_discovery_at ?? null,
@@ -133,6 +136,26 @@ export class CatalogService {
         csrfToken: this.auth.csrfToken(),
       }),
     );
+  }
+
+  /** The shipped provider presets (D52). */
+  providerPresets(): Promise<ProviderPreset[]> {
+    return requestJson<ProviderPreset[]>('/api/provider-presets');
+  }
+
+  /**
+   * Re-applies a preset's connector defaults to an existing provider. Without
+   * `force`, connectors the operator edited are kept.
+   */
+  applyPreset(
+    id: string,
+    body: { preset?: string; force?: boolean } = {},
+  ): Promise<ApplyPresetResult> {
+    return requestJson<ApplyPresetResult>(`/api/providers/${id}/apply-preset`, {
+      method: 'POST',
+      body,
+      csrfToken: this.auth.csrfToken(),
+    });
   }
 
   /** Applies a partial provider update and returns the updated row. */

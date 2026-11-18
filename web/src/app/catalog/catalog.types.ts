@@ -10,10 +10,56 @@
  * spec was silent, the wire behaviour is noted on the field.
  */
 
-import type { ConnectorSummary } from './connectors.types';
+import type { ConnectorConfig, ConnectorKind, ConnectorSummary } from './connectors.types';
 
 /** Provider flavours; the schema only allows `openai_compatible` today. */
 export type ProviderKind = 'openai_compatible';
+
+/** The shipped preset ids (D52). */
+export type ProviderPresetId = 'openrouter' | 'sailresearch' | 'generic';
+
+/** One shipped provider preset: `GET /api/provider-presets`. */
+export interface ProviderPreset {
+  id: ProviderPresetId;
+  label: string;
+  description: string;
+  /** Prefilled base URL; the operator may override it. */
+  base_url: string;
+  auth: 'bearer';
+  flags: {
+    skip_batch_variants: boolean;
+    variable_price_sentinel: boolean;
+    apply_on_discovery: boolean;
+  };
+  /** The connectors a create with this preset seeds. */
+  configs?: {
+    catalog?: ConnectorConfig;
+    balance?: ConnectorConfig;
+    health?: ConnectorConfig;
+  };
+}
+
+/** One connector's outcome in `POST /api/providers/{id}/apply-preset`. */
+export interface PresetChange {
+  kind: ConnectorKind;
+  action: 'created' | 'updated' | 'overwritten' | 'unchanged' | 'skipped';
+}
+
+/** `POST /api/providers/{id}/apply-preset`. */
+export interface ApplyPresetResult {
+  provider_id: string;
+  preset: ProviderPresetId;
+  force: boolean;
+  applied: number;
+  changes: PresetChange[];
+}
+
+/** Per-kind connector documents accepted by `POST /api/providers`. */
+export interface ProviderConnectorInputs {
+  catalog?: ConnectorConfig;
+  balance?: ConnectorConfig;
+  health?: ConnectorConfig;
+}
 
 /** One registered upstream provider. */
 export interface Provider {
@@ -23,6 +69,8 @@ export interface Provider {
   base_url: string;
   /** DB stores 0/1; travels as a JSON boolean. */
   enabled: boolean;
+  /** The preset this provider was created with, when any (D52). */
+  preset: ProviderPresetId | null;
   created_at: string;
   updated_at: string;
   /**
@@ -42,9 +90,15 @@ export interface Provider {
 /** `POST /api/providers`. */
 export interface ProviderInput {
   name: string;
-  base_url: string;
+  /** Required unless `preset` supplies a default; an explicit value wins. */
+  base_url?: string;
   /** Defaults to `openai_compatible` server-side when omitted. */
   kind?: ProviderKind;
+  /** A preset seeds the base URL and its connectors (D52). */
+  preset?: ProviderPresetId;
+  /** Explicit connector documents; each wins over the preset's default. */
+  connectors?: ProviderConnectorInputs;
+  enabled?: boolean;
 }
 
 /**

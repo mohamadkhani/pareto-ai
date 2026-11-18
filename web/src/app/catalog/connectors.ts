@@ -3,6 +3,7 @@ import {
   Component,
   OnInit,
   computed,
+  effect,
   inject,
   input,
   output,
@@ -18,17 +19,21 @@ import {
   type PointerAssignment,
   type TierInfo,
   PRICE_POINTER_FIELDS,
+  BALANCE_EXAMPLE_RAW,
+  balanceExample,
   convertPrice,
   detectTemplateId,
   detectTier,
   entryRelativePointer,
   formatConverted,
+  resolvePointer,
   rewriteTier,
   sampleValueLabel,
   unitExample,
 } from './connector-form';
 import {
   type BalanceConfig,
+  type BalanceUnit,
   type CatalogConfig,
   type ConnectorConfig,
   type ConnectorKind,
@@ -85,12 +90,19 @@ interface CatalogForm {
 
 interface BalanceForm {
   balance: string;
+  subtract: string;
   available: string;
   currency: string;
   period_spend: string;
   burn_rate: string;
   days_remaining: string;
   refresh_seconds: string;
+  unit_multiplier: string;
+  unit_currency: string;
+  unit_fx: string;
+  unit_symbol: string;
+  unit_decimals: string;
+  unit_note: string;
   active: BalancePointerField | null;
 }
 
@@ -174,12 +186,19 @@ function emptyCatalogForm(): CatalogForm {
 function emptyBalanceForm(): BalanceForm {
   return {
     balance: '/balance',
+    subtract: '',
     available: '',
     currency: 'USD',
     period_spend: '',
     burn_rate: '',
     days_remaining: '',
     refresh_seconds: '900',
+    unit_multiplier: '1',
+    unit_currency: 'USD',
+    unit_fx: '',
+    unit_symbol: '$',
+    unit_decimals: '2',
+    unit_note: '',
     active: null,
   };
 }
@@ -216,6 +235,11 @@ function kindOfTab(tab: string): ConnectorKind {
   return tab === 'balance' ? 'balance' : tab === 'health' ? 'health' : 'catalog';
 }
 
+/** Accepts both the URL spelling (`prices`) and the tab id (`catalog`). */
+function normalizeTab(tab: string): string {
+  return tab === 'balance' || tab === 'health' ? tab : 'catalog';
+}
+
 /**
  * Provider connectors dialog (D42): prices, balance, and health documents,
  * each configured by pointing at the provider's own payload. Fetching a sample
@@ -247,6 +271,11 @@ export class Connectors implements OnInit {
   private readonly balanceCache = inject(BalanceCache);
 
   readonly provider = input.required<Provider>();
+  /**
+   * The tab the deep link asked for (`catalog` for Prices). Following it is
+   * only on open; a later user tab click stays put until the URL changes.
+   */
+  readonly initialTab = input<string>('catalog');
   readonly closed = output<void>();
   /** Raised after a save or refresh so the provider list can reload. */
   readonly changed = output<void>();
@@ -267,12 +296,13 @@ export class Connectors implements OnInit {
   ];
   protected readonly balanceFields: readonly { key: BalancePointerField; label: string }[] = [
     { key: 'balance', label: 'Balance (required)' },
+    { key: 'subtract', label: 'Subtract (optional)' },
     { key: 'available', label: 'Available flag' },
     { key: 'period_spend', label: 'Period spend' },
     { key: 'burn_rate', label: 'Burn rate' },
     { key: 'days_remaining', label: 'Days remaining' },
   ];
-  protected readonly tab = signal<string>('catalog');
+  protected readonly tab = signal<string>(normalizeTab(this.initialTab()));
   protected readonly kind = computed<ConnectorKind>(() => kindOfTab(this.tab()));
 
   protected readonly forms = signal<Forms>(emptyForms());
@@ -348,6 +378,54 @@ export class Connectors implements OnInit {
     return 'Published numbers are already USD per 1M tokens.';
   });
 
+  protected readonly balanceUnit = computed<BalanceUnit>(() => {
+    const form = this.forms().balance.balance;
+    return {
+      multiplier: numberOr(form.unit_multiplier, 1),
+      currency: form.unit_currency.trim().toUpperCase() || 'USD',
+      fx_to_usd: form.unit_fx.trim() === '' ? null : numberOr(form.unit_fx, 0),
+      display: {
+        symbol: form.unit_symbol || '$',
+        decimals: clampDecimals(numberOr(form.unit_decimals, 2)),
+      },
+      note: form.unit_note.trim() === '' ? null : form.unit_note,
+    };
+  });
+
+  /**
+   * The live balance example. When a sample is loaded and the balance pointer
+   * resolves to a number, that raw value is used; otherwise the
+   * SailResearch-shaped 136275 cents.
+   */
+  protected readonly balanceExampleText = computed(() => {
+    const form = this.forms().balance.balance;
+    const sample = this.samples().balance?.document;
+    const raw = sample === undefined ? undefined : resolvePointer(sample, form.balance.trim());
+    return balanceExample(
+      this.balanceUnit(),
+      typeof raw === 'number' && Number.isFinite(raw) ? raw : BALANCE_EXAMPLE_RAW,
+    );
+  });
+
+  protected readonly balanceUnitWarnings = computed<readonly string[]>(() => {
+    const unit = this.balanceUnit();
+    const warnings: string[] = [];
+    if (!Number.isFinite(unit.multiplier) || unit.multiplier <= 0) {
+      warnings.push(
+        'A multiplier of zero or less makes the balance unavailable; prices and spend are not stored.',
+      );
+    }
+    if (unit.currency !== 'USD' && unit.fx_to_usd === null) {
+      warnings.push(
+        `${unit.currency} balances are stored in ${unit.currency} and ignored by routing and the balance gate until a static FX rate is set.`,
+      );
+    }
+    if (unit.fx_to_usd !== null && unit.fx_to_usd <= 0) {
+      warnings.push('An FX rate of zero or less is invalid; the balance stays non-routable.');
+    }
+    return warnings;
+  });
+
   protected readonly tier = computed<TierInfo | null>(() => {
     const form = this.forms().catalog.catalog;
     const pointers = priceAssignments(form)
@@ -393,6 +471,14 @@ export class Connectors implements OnInit {
     }
     return test.health?.ok === true ? 'Healthy' : 'Unhealthy';
   });
+
+  constructor() {
+    // A back/forward navigation can change the requested tab while the dialog
+    // stays open; mirror it.
+    effect(() => {
+      this.tab.set(normalizeTab(this.initialTab()));
+    });
+  }
 
   ngOnInit(): void {
     void this.load();
@@ -1071,12 +1157,19 @@ function catalogFormFromConfig(config: CatalogConfig): CatalogForm {
 function balanceFormFromConfig(config: BalanceConfig): BalanceForm {
   return {
     balance: config.balance,
+    subtract: config.subtract ?? '',
     available: config.available ?? '',
     currency: config.currency ?? '',
     period_spend: config.period_spend ?? '',
     burn_rate: config.burn_rate ?? '',
     days_remaining: config.days_remaining ?? '',
     refresh_seconds: config.refresh_seconds === null ? '' : String(config.refresh_seconds),
+    unit_multiplier: String(config.unit.multiplier),
+    unit_currency: config.unit.currency,
+    unit_fx: config.unit.fx_to_usd === null ? '' : String(config.unit.fx_to_usd),
+    unit_symbol: config.unit.display.symbol,
+    unit_decimals: String(config.unit.display.decimals),
+    unit_note: config.unit.note ?? '',
     active: null,
   };
 }
@@ -1114,11 +1207,22 @@ function catalogConfigFromForm(form: CatalogForm): CatalogConfig {
 function balanceConfigFromForm(form: BalanceForm): BalanceConfig {
   return {
     balance: form.balance.trim(),
+    subtract: pointerOrNull(form.subtract),
     available: pointerOrNull(form.available),
     currency: form.currency.trim() === '' ? null : form.currency.trim(),
     period_spend: pointerOrNull(form.period_spend),
     burn_rate: pointerOrNull(form.burn_rate),
     days_remaining: pointerOrNull(form.days_remaining),
+    unit: {
+      multiplier: numberOr(form.unit_multiplier, 1),
+      currency: form.unit_currency.trim().toUpperCase() || 'USD',
+      fx_to_usd: form.unit_fx.trim() === '' ? null : numberOr(form.unit_fx, 0),
+      display: {
+        symbol: form.unit_symbol || '$',
+        decimals: clampDecimals(numberOr(form.unit_decimals, 2)),
+      },
+      note: form.unit_note.trim() === '' ? null : form.unit_note,
+    },
     refresh_seconds:
       form.refresh_seconds.trim() === '' ? null : Math.trunc(numberOr(form.refresh_seconds, 900)),
   };

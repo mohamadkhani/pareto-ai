@@ -44,6 +44,9 @@ pub struct ProviderRow {
     pub enabled: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// The preset id this provider was created (or later configured) with
+    /// (`openrouter`, `sailresearch`, `generic`), or `None` (D52).
+    pub preset: Option<String>,
     /// When the last **applied** discovery finished; `None` before the first.
     pub last_discovery_at: Option<String>,
     /// `models` rows the last applied discovery inserted.
@@ -200,6 +203,9 @@ pub struct ProviderView {
     pub kind: String,
     pub base_url: String,
     pub enabled: bool,
+    /// The preset this provider was created with, when any (D52). Additive:
+    /// older providers and hand-configured ones carry `null`.
+    pub preset: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// The last applied model discovery, or `null` before the first one
@@ -229,6 +235,7 @@ impl From<&ProviderRow> for ProviderView {
             kind: row.kind.clone(),
             base_url: row.base_url.clone(),
             enabled: row.enabled != 0,
+            preset: row.preset.clone(),
             created_at: row.created_at.clone(),
             updated_at: row.updated_at.clone(),
             last_discovery_at: row.last_discovery_at.clone(),
@@ -466,12 +473,28 @@ pub struct V1ModelList {
 pub struct ProviderInput {
     /// Unique provider name (e.g. `openrouter`).
     pub name: String,
-    /// OpenAI-compatible base URL (e.g. `https://api.example.com/v1`).
+    /// OpenAI-compatible base URL (e.g. `https://api.example.com/v1`). May be
+    /// omitted when `preset` supplies a default; an explicit value always wins.
+    #[serde(default)]
     pub base_url: String,
     /// Omit; only `openai_compatible` exists today.
     pub kind: Option<String>,
     /// Defaults to enabled.
     pub enabled: Option<bool>,
+    /// `openrouter`, `sailresearch`, or `generic` (D52). The preset prefills
+    /// the base URL and seeds its connectors unless they are supplied here.
+    pub preset: Option<String>,
+    /// Explicit connector documents; each one wins over the preset's default
+    /// for that kind.
+    pub connectors: Option<ProviderConnectorInputs>,
+}
+
+/// Per-kind connector documents accepted by `POST /api/providers`.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct ProviderConnectorInputs {
+    pub catalog: Option<crate::connectors::ConnectorConfig>,
+    pub balance: Option<crate::connectors::ConnectorConfig>,
+    pub health: Option<crate::connectors::ConnectorConfig>,
 }
 
 #[derive(Debug, Default, Deserialize, ToSchema)]

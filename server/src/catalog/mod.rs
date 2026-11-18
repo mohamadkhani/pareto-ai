@@ -101,7 +101,7 @@ pub enum SyncPriceOutcome {
     SkippedManual,
 }
 
-const SELECT_PROVIDER_COLUMNS: &str = "id, name, kind, base_url, enabled, created_at, updated_at, \
+const SELECT_PROVIDER_COLUMNS: &str = "id, name, kind, base_url, enabled, preset, created_at, updated_at, \
      last_discovery_at, last_discovery_created, last_discovery_unchanged";
 const SELECT_CREDENTIAL_COLUMNS: &str = "id, provider_id, label, secret_cipher, headers_json, \
      max_concurrency, balance_usd, balance_source, balance_updated_at, balance_updated_by, \
@@ -337,15 +337,43 @@ pub async fn get_provider(
 
 /// Creates a provider and audits it as `provider.create`.
 ///
-/// Fails with [`CatalogError::Conflict`] when the name is taken and with
-/// [`CatalogError::Invalid`] for a malformed name or base URL.
+/// With a `preset` (D52) the base URL falls back to the preset's default and
+/// the preset's connectors are seeded in the same transaction; an explicit
+/// base URL or connector document always wins. Fails with
+/// [`CatalogError::Conflict`] when the name is taken and with
+/// [`CatalogError::Invalid`] for a malformed name, base URL, preset, or
+/// connector config.
 pub async fn create_provider(
     pool: &sqlx::SqlitePool,
     actor: &Actor<'_>,
     input: &ProviderInput,
 ) -> Result<ProviderRow, CatalogError> {
     let name = require_name(&input.name, "name")?;
-    let base_url = validate_base_url(&input.base_url)?;
+    let preset = match input
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(crate::presets::get(id).ok_or_else(|| {
+            CatalogError::Invalid(format!(
+                "unknown provider preset {id:?}; expected one of {}",
+                crate::presets::PRESET_IDS.join(", ")
+            ))
+        })?),
+        None => None,
+    };
+    let base_url = match input.base_url.trim() {
+        "" => match preset.as_ref() {
+            Some(preset) => validate_base_url(preset.base_url)?,
+            None => {
+                return Err(CatalogError::Invalid(
+                    "base_url is required when no preset supplies one".to_string(),
+                ));
+            }
+        },
+        explicit => validate_base_url(explicit)?,
+    };
     match input.kind.as_deref() {
         None | Some("openai_compatible") => {}
         Some(other) => {
@@ -355,22 +383,71 @@ pub async fn create_provider(
         }
     }
 
+    // Per-kind merge: an explicitly supplied connector wins, everything else
+    // comes from the preset. Validated before anything is written.
+    let mut scoped: Vec<(
+        crate::connectors::ConnectorKind,
+        crate::connectors::ConnectorConfig,
+    )> = preset
+        .as_ref()
+        .map(crate::presets::connector_configs)
+        .unwrap_or_default();
+    if let Some(explicit) = input.connectors.as_ref() {
+        let supplied = [
+            (
+                crate::connectors::ConnectorKind::Catalog,
+                explicit.catalog.clone(),
+            ),
+            (
+                crate::connectors::ConnectorKind::Balance,
+                explicit.balance.clone(),
+            ),
+            (
+                crate::connectors::ConnectorKind::Health,
+                explicit.health.clone(),
+            ),
+        ];
+        for (kind, config) in supplied {
+            let Some(config) = config else {
+                continue;
+            };
+            config
+                .validate(kind)
+                .map_err(|e| CatalogError::Invalid(e.to_string()))?;
+            scoped.retain(|(existing, _)| *existing != kind);
+            scoped.push((kind, config));
+        }
+    }
+    for (kind, config) in &scoped {
+        config
+            .validate(*kind)
+            .map_err(|e| CatalogError::Invalid(e.to_string()))?;
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_ts();
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO providers (id, name, kind, base_url, enabled, created_at, updated_at) \
-         VALUES (?, ?, 'openai_compatible', ?, ?, ?, ?)",
+        "INSERT INTO providers (id, name, kind, base_url, enabled, preset, created_at, updated_at) \
+         VALUES (?, ?, 'openai_compatible', ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
     .bind(&base_url)
     .bind(i64::from(input.enabled.unwrap_or(true)))
+    .bind(preset.as_ref().map(|preset| preset.id))
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write(e, "a provider with this name already exists"))?;
+
+    let seeded = crate::presets::seed_connectors(&mut tx, &id, &scoped, &now)
+        .await
+        .map_err(|error| match error {
+            crate::connectors::ConnectorError::Db(error) => CatalogError::Db(error),
+            other => CatalogError::Invalid(other.to_string()),
+        })?;
 
     audit(
         &mut tx,
@@ -382,6 +459,8 @@ pub async fn create_provider(
             "name": name,
             "base_url": base_url,
             "enabled": input.enabled.unwrap_or(true),
+            "preset": preset.as_ref().map(|preset| preset.id),
+            "connectors": seeded,
         }),
     )
     .await?;

@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
 import { BalanceCache } from './balance-cache';
 import { BreakerPanel } from './breaker-panel';
@@ -10,6 +10,7 @@ import { Credentials, type CredentialChange } from './credentials';
 import { describeError, isForbidden } from './errors';
 import { formatAge } from './format';
 import type {
+  ApplyPresetResult,
   Credential,
   DiscoverySummary,
   Offering,
@@ -17,6 +18,8 @@ import type {
   ProviderInput,
   ProviderKind,
   ProviderPatch,
+  ProviderPreset,
+  ProviderPresetId,
 } from './catalog.types';
 import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
@@ -29,9 +32,13 @@ import { UiSelect } from '../ui/select';
 import { UiSwitch } from '../ui/switch';
 import type { BadgeTone } from '../ui/badge';
 
-/** One provider-row connector badge. */
+/** A connector tab: the Prices tab is the `catalog` connector. */
+type SetupTab = 'catalog' | 'balance' | 'health';
+
+/** One provider-row connector badge; clicking it opens that setup tab. */
 interface ConnectorBadge {
   kind: ConnectorKind;
+  tab: SetupTab;
   label: string;
   tone: BadgeTone;
   title: string;
@@ -52,6 +59,8 @@ interface ProviderDraft {
   base_url: string;
   kind: ProviderKind;
   enabled: boolean;
+  /** Empty means no preset (the pre-D52 behaviour). */
+  preset: ProviderPresetId | '';
 }
 
 /** One run of the Load models dialog. */
@@ -70,7 +79,26 @@ interface DiscoveryState {
 type FormState = { mode: 'create' } | { mode: 'edit'; provider: Provider };
 
 function emptyDraft(): ProviderDraft {
-  return { name: '', base_url: '', kind: 'openai_compatible', enabled: true };
+  return {
+    name: '',
+    base_url: '',
+    kind: 'openai_compatible',
+    enabled: true,
+    preset: '',
+  };
+}
+
+/** The URL tab names accepted by `/providers?setup=<id>&tab=...`. */
+function setupTabFromParam(raw: string | null): SetupTab {
+  if (raw === 'balance' || raw === 'health') {
+    return raw;
+  }
+  return 'catalog';
+}
+
+/** The query-string name for a setup tab (`prices` is the user-facing one). */
+function setupTabParam(tab: SetupTab): string {
+  return tab === 'catalog' ? 'prices' : tab;
 }
 
 /**
@@ -104,6 +132,8 @@ export class Providers {
   private readonly auth = inject(AuthService);
   private readonly catalog = inject(CatalogService);
   private readonly balanceCache = inject(BalanceCache);
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
 
   protected readonly providers = signal<Provider[]>([]);
   /** Full catalog lists shared with the breaker panel (D50). */
@@ -130,7 +160,17 @@ export class Providers {
   protected readonly deletePending = signal(false);
 
   protected readonly discovery = signal<DiscoveryState | null>(null);
+  /** The open Provider setup dialog and the tab it should show. */
   protected readonly connectorProvider = signal<Provider | null>(null);
+  protected readonly connectorTab = signal<SetupTab>('catalog');
+  /** The provider id from `?setup=` waiting for the list to load. */
+  private pendingSetupId: string | null = null;
+
+  protected readonly presets = signal<ProviderPreset[]>([]);
+  protected readonly applyingPreset = signal<Provider | null>(null);
+  protected readonly presetForce = signal(false);
+  protected readonly presetPending = signal(false);
+  protected readonly presetResult = signal<ApplyPresetResult | null>(null);
 
   private readonly displays = signal<ReadonlyMap<string, PriceDisplay>>(new Map());
 
@@ -152,9 +192,41 @@ export class Providers {
     // Non-admins never call the API: it would answer 403 and the read is audited.
     if (this.auth.isAdmin()) {
       void this.reload();
+      this.route.queryParamMap.subscribe((params) => {
+        this.syncSetupFromQuery(params.get('setup'), params.get('tab'));
+      });
     } else {
       this.forbidden.set(true);
     }
+  }
+
+  private async loadPresets(): Promise<void> {
+    try {
+      this.presets.set(await this.catalog.providerPresets());
+    } catch {
+      // The create dialog still works without presets (free-form base URL).
+    }
+  }
+
+  /**
+   * Opens or closes the setup dialog from `?setup=`/`?tab=` so a link and the
+   * browser back/forward buttons both work. An unknown provider id is ignored.
+   */
+  private syncSetupFromQuery(setupId: string | null, tab: string | null): void {
+    if (setupId === null || setupId === '') {
+      this.connectorProvider.set(null);
+      this.pendingSetupId = null;
+      return;
+    }
+    const provider = this.providers().find((candidate) => candidate.id === setupId);
+    if (provider === undefined) {
+      // The list may still be loading; reload() applies it once known.
+      this.pendingSetupId = setupId;
+      return;
+    }
+    this.pendingSetupId = null;
+    this.connectorTab.set(setupTabFromParam(tab));
+    this.connectorProvider.set(provider);
   }
 
   protected async reload(): Promise<void> {
@@ -198,6 +270,11 @@ export class Providers {
       if (openId !== undefined) {
         this.credentialsProvider.set(providers.find((provider) => provider.id === openId) ?? null);
       }
+      if (this.pendingSetupId !== null) {
+        const pending = this.pendingSetupId;
+        this.pendingSetupId = null;
+        this.syncSetupFromQuery(pending, this.route.snapshot.queryParamMap.get('tab'));
+      }
     } catch (err) {
       this.handleError(err);
     } finally {
@@ -213,22 +290,40 @@ export class Providers {
     return this.offeringCounts().get(providerId) ?? 0;
   }
 
+  /**
+   * The balance column's symbol and decimals: the balance unit's display when
+   * a balance connector exists (D52), otherwise the catalog unit's. Providers
+   * with neither connector are skipped, so the list stays cheap.
+   */
   private async loadDisplays(providers: readonly Provider[]): Promise<void> {
-    const withCatalog = providers.filter((provider) =>
-      provider.connectors.some((connector) => connector.kind === 'catalog'),
+    const relevant = providers.filter((provider) =>
+      provider.connectors.some(
+        (connector) => connector.kind === 'balance' || connector.kind === 'catalog',
+      ),
     );
-    if (withCatalog.length === 0) {
+    if (relevant.length === 0) {
       this.displays.set(new Map());
       return;
     }
     const views = await Promise.all(
-      withCatalog.map((provider) =>
-        this.catalog.getConnector(provider.id, 'catalog').catch(() => null),
-      ),
+      relevant.map(async (provider) => {
+        const kinds = provider.connectors.map((connector) => connector.kind);
+        if (kinds.includes('balance')) {
+          const view = await this.catalog.getConnector(provider.id, 'balance').catch(() => null);
+          if (view?.config?.balance?.unit.display !== undefined) {
+            return view.config.balance.unit.display;
+          }
+        }
+        if (kinds.includes('catalog')) {
+          const view = await this.catalog.getConnector(provider.id, 'catalog').catch(() => null);
+          return view?.config?.catalog?.unit.display;
+        }
+        return undefined;
+      }),
     );
     const displays = new Map<string, PriceDisplay>();
-    withCatalog.forEach((provider, index) => {
-      const display = views[index]?.config?.catalog?.unit.display;
+    relevant.forEach((provider, index) => {
+      const display = views[index];
       if (display !== undefined) {
         displays.set(provider.id, display);
       }
@@ -245,13 +340,15 @@ export class Providers {
       if (connector === undefined) {
         return {
           kind,
+          tab: kind,
           label,
           tone: 'neutral',
-          title: `No ${label} connector configured.`,
+          title: `No ${label} settings configured. Click to open the ${tabLabel(kind)} tab.`,
         };
       }
       return {
         kind,
+        tab: kind,
         label,
         tone: connector.enabled ? 'success' : 'warning',
         title: `${label} connector · ${connector.enabled ? 'enabled' : 'disabled'} · updated ${formatAge(
@@ -265,12 +362,36 @@ export class Providers {
     return badge.tone;
   }
 
-  protected openConnectors(provider: Provider): void {
+  protected openConnectors(provider: Provider, tab: SetupTab = 'catalog'): void {
+    this.connectorTab.set(tab);
     this.connectorProvider.set(provider);
+    void this.router.navigate(['/providers'], {
+      queryParams: { setup: provider.id, tab: setupTabParam(tab) },
+    });
   }
 
   protected closeConnectors(): void {
     this.connectorProvider.set(null);
+    void this.router.navigate(['/providers'], {});
+  }
+
+  /** The setup tab from a badge click. */
+  protected openSetupTab(provider: Provider, badge: ConnectorBadge): void {
+    this.openConnectors(provider, badge.tab);
+  }
+
+  /** True when the provider has a balance connector that needs attention. */
+  protected needsBalanceSetup(provider: Provider): boolean {
+    const hasConnector = provider.connectors.some(
+      (connector) => connector.kind === 'balance' && connector.enabled,
+    );
+    if (!hasConnector) {
+      return false;
+    }
+    const credentials = this.credentialsByProvider().get(provider.id) ?? [];
+    return credentials.some(
+      (credential) => credential.balance_error !== null || credential.balance_available === false,
+    );
   }
 
   protected async onConnectorsChanged(): Promise<void> {
@@ -362,6 +483,9 @@ export class Providers {
   // --- provider form -------------------------------------------------------
 
   protected openCreate(): void {
+    if (this.presets().length === 0) {
+      void this.loadPresets();
+    }
     this.draft.set(emptyDraft());
     this.attempted.set(false);
     this.formError.set(null);
@@ -374,6 +498,7 @@ export class Providers {
       base_url: provider.base_url,
       kind: provider.kind,
       enabled: provider.enabled,
+      preset: provider.preset ?? '',
     });
     this.attempted.set(false);
     this.formError.set(null);
@@ -392,14 +517,77 @@ export class Providers {
     this.draft.update((draft) => ({ ...draft, base_url: value }));
   }
 
-  protected setKind(value: string): void {
-    if (value === 'openai_compatible') {
-      this.draft.update((draft) => ({ ...draft, kind: value }));
-    }
-  }
-
   protected setEnabled(value: boolean): void {
     this.draft.update((draft) => ({ ...draft, enabled: value }));
+  }
+
+  /** Picking a preset prefills its base URL; everything stays editable. */
+  protected setPreset(id: string): void {
+    const preset = this.presets().find((candidate) => candidate.id === id);
+    this.draft.update((draft) =>
+      preset === undefined
+        ? { ...draft, preset: '' }
+        : { ...draft, preset: preset.id, base_url: preset.base_url },
+    );
+  }
+
+  protected presetDescription(): string | null {
+    const id = this.draft().preset;
+    if (id === '') {
+      return null;
+    }
+    const preset = this.presets().find((candidate) => candidate.id === id);
+    return preset?.description ?? null;
+  }
+
+  /** The preset's user-facing label, or null for a hand-configured provider. */
+  protected presetLabel(provider: Provider): string | null {
+    if (provider.preset === null) {
+      return null;
+    }
+    return this.presets().find((preset) => preset.id === provider.preset)?.label ?? provider.preset;
+  }
+
+  /** The automatic-configuration note shown under the create form. */
+  protected presetSeedsConnectors(): boolean {
+    const preset = this.presets().find((candidate) => candidate.id === this.draft().preset);
+    return preset?.configs !== undefined;
+  }
+
+  protected askApplyPreset(provider: Provider): void {
+    this.presetForce.set(false);
+    this.presetResult.set(null);
+    this.applyingPreset.set(provider);
+  }
+
+  protected closeApplyPreset(): void {
+    this.applyingPreset.set(null);
+  }
+
+  protected setPresetForce(value: boolean): void {
+    this.presetForce.set(value);
+  }
+
+  protected async confirmApplyPreset(): Promise<void> {
+    const provider = this.applyingPreset();
+    if (provider === null) {
+      return;
+    }
+    this.presetPending.set(true);
+    this.actionError.set(null);
+    try {
+      const result = await this.catalog.applyPreset(provider.id, {
+        force: this.presetForce(),
+      });
+      this.presetResult.set(result);
+      this.applyingPreset.set(null);
+      this.notice.set(describePresetResult(result));
+      await this.reload();
+    } catch (err) {
+      this.actionError.set(describeError(err, 'Applying the preset failed.'));
+    } finally {
+      this.presetPending.set(false);
+    }
   }
 
   protected async save(): Promise<void> {
@@ -413,13 +601,19 @@ export class Providers {
     this.saving.set(true);
     try {
       if (state.mode === 'create') {
+        const baseUrl = draft.base_url.trim();
         const input: ProviderInput = {
           name: draft.name.trim(),
-          base_url: draft.base_url.trim(),
           kind: draft.kind,
+          ...(baseUrl === '' ? {} : { base_url: baseUrl }),
+          ...(draft.preset === '' ? {} : { preset: draft.preset }),
         };
         await this.catalog.createProvider(input);
-        this.notice.set('Provider created.');
+        this.notice.set(
+          draft.preset === ''
+            ? 'Provider created.'
+            : 'Provider created with its preset; prices and balance are ready to test.',
+        );
       } else {
         const patch = buildPatch(state.provider, draft);
         if (Object.keys(patch).length > 0) {
@@ -631,6 +825,19 @@ function formatDays(days: number): string {
     return `${whole} ${whole === 1 ? 'day' : 'days'}`;
   }
   return `${Math.max(0, Math.round(days * 24))} h`;
+}
+
+/** The user-facing name of a setup tab. */
+function tabLabel(tab: ConnectorKind): string {
+  return tab === 'catalog' ? 'Prices' : tab === 'balance' ? 'Balance' : 'Health';
+}
+
+/** "Preset applied: catalog created, balance unchanged." */
+function describePresetResult(result: ApplyPresetResult): string {
+  const parts = result.changes.map((change) => `${change.kind} ${change.action}`);
+  return parts.length === 0
+    ? 'Preset applied; it defines no settings.'
+    : `Preset applied: ${parts.join(', ')}.`;
 }
 
 /** Only the fields the admin changed; `kind` cannot change over the wire. */

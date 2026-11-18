@@ -84,8 +84,87 @@ pub async fn create(
     };
     let row = catalog::create_provider(&state.pool, &actor, &input)
         .await
-        .map_err(|e| e.into_api_error(rid))?;
-    Ok((StatusCode::CREATED, Json(ProviderView::from(&row))))
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    let connectors = crate::connectors::summaries_by_provider(&state.pool)
+        .await
+        .map_err(|e| e.into_api_error(rid))?
+        .remove(&row.id)
+        .unwrap_or_default();
+    Ok((
+        StatusCode::CREATED,
+        Json(ProviderView::from(&row).with_connectors(connectors)),
+    ))
+}
+
+/// The provider-preset registry: id, label, description, and default base URL.
+#[utoipa::path(
+    get,
+    path = "/api/provider-presets",
+    tag = "admin",
+    responses(
+        (status = 200, description = "shipped provider presets", body = [crate::presets::ProviderPreset]),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "not an admin", body = ErrorBody)
+    )
+)]
+pub async fn provider_presets(
+    RequireAdmin(_admin): RequireAdmin,
+) -> Json<Vec<crate::presets::ProviderPreset>> {
+    Json(crate::presets::all())
+}
+
+/// Body of `POST /api/providers/{id}/apply-preset`.
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct ApplyPresetInput {
+    /// Preset to apply; defaults to the provider's stored preset.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Also replace connectors the operator edited.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Re-applies a preset's connector defaults to an existing provider (D52).
+/// Unmodified connectors are updated; operator-edited ones are kept unless
+/// `force` is set. Audited as `provider.apply_preset`.
+#[utoipa::path(
+    post,
+    path = "/api/providers/{id}/apply-preset",
+    tag = "admin",
+    params(("id" = String, Path, description = "provider id")),
+    request_body = ApplyPresetInput,
+    responses(
+        (status = 200, description = "what changed", body = crate::presets::ApplyPresetView),
+        (status = 400, description = "unknown or missing preset", body = ErrorBody),
+        (status = 401, description = "not authenticated", body = ErrorBody),
+        (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
+        (status = 404, description = "no such provider", body = ErrorBody)
+    )
+)]
+pub async fn apply_preset(
+    State(state): State<AppState>,
+    RequireAdmin(admin): RequireAdmin,
+    ip: ClientIp,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Option<Json<ApplyPresetInput>>,
+) -> Result<Json<crate::presets::ApplyPresetView>, ApiError> {
+    let rid = error::request_id(&headers);
+    let input = body.map(|Json(input)| input).unwrap_or_default();
+    let actor = Actor {
+        user_id: &admin.user_id,
+        ip: &ip.0,
+    };
+    let view = crate::presets::apply_preset(
+        &state.pool,
+        &actor,
+        &id,
+        input.preset.as_deref(),
+        input.force,
+    )
+    .await
+    .map_err(|e| e.into_api_error(rid))?;
+    Ok(Json(view))
 }
 
 /// Fetches one provider. Admin only.
@@ -1424,5 +1503,331 @@ mod tests {
             assert_eq!(response.status, StatusCode::NOT_FOUND, "{uri}");
             assert_eq!(response.body["error"]["code"], "not_found", "{uri}");
         }
+    }
+
+    async fn admin_router() -> (TestApp, axum::Router, String, String) {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        (app, router, cookie, csrf)
+    }
+
+    #[tokio::test]
+    async fn provider_presets_endpoint_lists_the_registry() {
+        let (_app, router, cookie, _csrf) = admin_router().await;
+        let response = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/provider-presets",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+        let presets = response.body.as_array().expect("presets");
+        let ids: Vec<&str> = presets
+            .iter()
+            .map(|preset| preset["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, ["openrouter", "sailresearch", "generic"]);
+        assert_eq!(presets[0]["base_url"], "https://openrouter.ai/api/v1");
+        assert_eq!(presets[1]["base_url"], "https://api.sailresearch.com/v1");
+        assert!(presets[2]["configs"].is_null(), "generic seeds nothing");
+    }
+
+    #[tokio::test]
+    async fn create_with_a_preset_seeds_its_connectors_in_one_transaction() {
+        let (app, router, cookie, csrf) = admin_router().await;
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "sail", "preset": "sailresearch" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        assert_eq!(created.body["preset"], "sailresearch");
+        assert_eq!(
+            created.body["base_url"], "https://api.sailresearch.com/v1",
+            "the preset's default base URL is applied"
+        );
+        assert_eq!(created.body["kind"], "openai_compatible");
+        let kinds: Vec<&str> = created.body["connectors"]
+            .as_array()
+            .expect("connectors")
+            .iter()
+            .map(|connector| connector["kind"].as_str().expect("kind"))
+            .collect();
+        assert_eq!(kinds, ["balance", "catalog", "health"]);
+        assert!(
+            created.body["connectors"]
+                .as_array()
+                .expect("connectors")
+                .iter()
+                .all(|connector| connector["enabled"] == true)
+        );
+
+        let provider_id = created.body["id"].as_str().expect("id");
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_connectors WHERE provider_id = ?")
+                .bind(provider_id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("connectors");
+        assert_eq!(stored, 3);
+        let audit: String = sqlx::query_scalar(
+            "SELECT detail_json FROM audit_log WHERE action = 'provider.create'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("audit");
+        assert!(audit.contains("sailresearch"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn explicit_base_url_and_connectors_win_over_the_preset() {
+        let (app, router, cookie, csrf) = admin_router().await;
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({
+                    "name": "mock",
+                    "preset": "sailresearch",
+                    "base_url": "http://127.0.0.1:9/v1",
+                    "connectors": {
+                        "catalog": {
+                            "url": "/models",
+                            "allow_private": true,
+                            "catalog": {
+                                "entries": "/data",
+                                "model_id": "/id",
+                                "input": "/price/input",
+                                "output": "/price/output"
+                            }
+                        }
+                    }
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        assert_eq!(created.body["preset"], "sailresearch");
+        assert_eq!(
+            created.body["base_url"], "http://127.0.0.1:9/v1",
+            "the explicit override wins"
+        );
+        let provider_id = created.body["id"].as_str().expect("id");
+        let catalog: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'catalog'",
+        )
+        .bind(provider_id)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("catalog");
+        assert!(catalog.contains("/price/input"), "{catalog}");
+        assert!(
+            !catalog.contains("pricing_usd_per_million_tokens"),
+            "{catalog}"
+        );
+        // The other kinds still come from the preset.
+        let balance: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'balance'",
+        )
+        .bind(provider_id)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("balance");
+        assert!(balance.contains("/v2/usage/summary?range=30d"), "{balance}");
+    }
+
+    #[tokio::test]
+    async fn apply_preset_keeps_operator_edits_unless_forced() {
+        let (app, router, cookie, csrf) = admin_router().await;
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "sail", "preset": "sailresearch" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        let provider_id = created.body["id"].as_str().expect("id").to_string();
+
+        // The operator edits the catalog connector.
+        let edited = send(
+            router.clone(),
+            api_request(
+                Method::PUT,
+                &format!("/api/providers/{provider_id}/connectors/catalog"),
+                Some(json!({
+                    "config": {
+                        "url": "/models",
+                        "catalog": {
+                            "entries": "/data",
+                            "model_id": "/id",
+                            "input": "/price/input",
+                            "output": "/price/output"
+                        }
+                    },
+                    "enabled": true
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
+        // Without force: the edited catalog is skipped, untouched kinds are
+        // unchanged (they already equal the preset).
+        let applied = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{provider_id}/apply-preset"),
+                Some(json!({})),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(applied.status, StatusCode::OK, "{}", applied.body);
+        assert_eq!(applied.body["preset"], "sailresearch");
+        let changes = applied.body["changes"].as_array().expect("changes");
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["kind"] == "catalog" && change["action"] == "skipped"),
+            "{}",
+            applied.body
+        );
+        let catalog: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'catalog'",
+        )
+        .bind(&provider_id)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("catalog");
+        assert!(catalog.contains("/price/input"), "edit kept: {catalog}");
+
+        // With force: the preset replaces the edit.
+        let forced = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{provider_id}/apply-preset"),
+                Some(json!({ "force": true })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(forced.status, StatusCode::OK, "{}", forced.body);
+        assert!(
+            forced.body["changes"]
+                .as_array()
+                .expect("changes")
+                .iter()
+                .any(|change| change["kind"] == "catalog" && change["action"] == "overwritten"),
+            "{}",
+            forced.body
+        );
+        let catalog: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'catalog'",
+        )
+        .bind(&provider_id)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("catalog");
+        assert!(
+            catalog.contains("pricing_usd_per_million_tokens"),
+            "preset restored: {catalog}"
+        );
+
+        // A provider created without a preset can adopt one explicitly.
+        let plain = create_provider_over_http(
+            &router,
+            &cookie,
+            &csrf,
+            "plain",
+            "https://api.example.com/v1",
+        )
+        .await;
+        let plain_id = plain["id"].as_str().expect("id");
+        let adopted = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{plain_id}/apply-preset"),
+                Some(json!({ "preset": "openrouter" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(adopted.status, StatusCode::OK, "{}", adopted.body);
+        let preset: Option<String> =
+            sqlx::query_scalar("SELECT preset FROM providers WHERE id = ?")
+                .bind(plain_id)
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("preset");
+        assert_eq!(preset.as_deref(), Some("openrouter"));
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'provider.apply_preset'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("audit");
+        assert_eq!(
+            audits, 3,
+            "skip-only run + forced run + adoption are all audited"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_preset_is_refused() {
+        let (_app, router, cookie, csrf) = admin_router().await;
+        let response = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "x", "preset": "nope" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            response.body
+        );
+        assert!(
+            response.body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("unknown provider preset"),
+            "{}",
+            response.body
+        );
     }
 }

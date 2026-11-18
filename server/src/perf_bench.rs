@@ -249,6 +249,8 @@ async fn seed(app: &TestApp, base_url: &str) -> Bench {
             base_url: base_url.to_string(),
             kind: None,
             enabled: None,
+            preset: None,
+            connectors: None,
         },
     )
     .await

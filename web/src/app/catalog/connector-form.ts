@@ -6,6 +6,7 @@
  */
 import type {
   BalanceConfig,
+  BalanceUnit,
   CatalogConfig,
   ConnectorConfig,
   ConnectorKind,
@@ -161,6 +162,48 @@ export function formatConverted(perMillion: number, display: PriceDisplay): stri
 export function unitExample(unit: PriceUnit, raw = 0.07): string {
   const converted = convertPrice(raw, unit);
   return `raw ${raw} → ${formatConverted(converted, unit.display)}/M`;
+}
+
+/** The balance example's raw value: the SailResearch-shaped cents amount. */
+export const BALANCE_EXAMPLE_RAW = 136_275;
+
+/**
+ * The factor that turns a published balance into USD: the unit multiplier,
+ * then a static FX rate for a non-USD currency that supplies one (D52).
+ */
+export function balanceFactor(
+  unit: Pick<BalanceUnit, 'multiplier' | 'currency' | 'fx_to_usd'>,
+): number {
+  const multiplier = Number.isFinite(unit.multiplier) ? unit.multiplier : 0;
+  const currency = unit.currency.trim().toUpperCase() || 'USD';
+  const fx =
+    currency === 'USD'
+      ? 1
+      : unit.fx_to_usd !== null && Number.isFinite(unit.fx_to_usd) && unit.fx_to_usd > 0
+        ? unit.fx_to_usd
+        : 1;
+  return multiplier * fx;
+}
+
+/** Converts one published balance amount into the stored (USD) amount. */
+export function convertBalance(
+  raw: number,
+  unit: Pick<BalanceUnit, 'multiplier' | 'currency' | 'fx_to_usd'>,
+): number {
+  return raw * balanceFactor(unit);
+}
+
+/** Formats a balance with the connector's symbol and decimals. */
+export function formatBalanceAmount(amount: number, display: PriceDisplay): string {
+  const decimals = Number.isInteger(display.decimals)
+    ? Math.min(8, Math.max(0, display.decimals))
+    : 2;
+  return `${display.symbol}${amount.toFixed(decimals)}`;
+}
+
+/** The live example under the balance unit fields, e.g. `raw 136275 → $1362.75`. */
+export function balanceExample(unit: BalanceUnit, raw = BALANCE_EXAMPLE_RAW): string {
+  return `raw ${raw} → ${formatBalanceAmount(convertBalance(raw, unit), unit.display)}`;
 }
 
 /**
@@ -344,4 +387,4 @@ export type CatalogPointerField =
   | 'max_output';
 
 export type BalancePointerField =
-  'balance' | 'available' | 'period_spend' | 'burn_rate' | 'days_remaining';
+  'balance' | 'subtract' | 'available' | 'period_spend' | 'burn_rate' | 'days_remaining';

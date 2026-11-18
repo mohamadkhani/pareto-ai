@@ -419,6 +419,8 @@ mod tests {
                 base_url: "http://127.0.0.1:1".to_string(),
                 kind: None,
                 enabled: None,
+                preset: None,
+                connectors: None,
             },
         )
         .await

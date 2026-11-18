@@ -684,6 +684,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sample_accepts_an_empty_mapping_and_test_reports_missing_pointers() {
+        let (addr, _) = spawn_static_server("200 OK", SAIL_MODELS).await;
+        let base = format!("http://{addr}/v1");
+        let s = seeded(&base).await;
+
+        // Sampling only needs the URL: the draft mapping has no price
+        // pointers yet (the "Fetch sample" flow before picking anything).
+        let draft = json!({
+            "config": {
+                "url": "/models",
+                "allow_private": true,
+                "catalog": { "entries": "/data", "model_id": "/id" }
+            }
+        });
+        let sample = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/sample", s.provider_id),
+                Some(draft.clone()),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(sample.status, StatusCode::OK, "{}", sample.body);
+        assert!(
+            sample.body["body"]
+                .as_str()
+                .expect("body")
+                .contains("deepseek")
+        );
+
+        // Preview answers with a warning instead of a global error.
+        let tested = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/test", s.provider_id),
+                Some(draft),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(tested.status, StatusCode::OK, "{}", tested.body);
+        assert_eq!(tested.body["ok"], false);
+        assert!(
+            tested.body["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("set input or output")),
+            "{}",
+            tested.body
+        );
+
+        // A malformed URL is still refused before any fetch.
+        let bad = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/sample", s.provider_id),
+                Some(json!({ "config": { "url": "" } })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+        assert!(
+            bad.body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("url"),
+            "{}",
+            bad.body
+        );
+
+        // A blocked destination is an upstream error, never a fetch.
+        let blocked = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/sample", s.provider_id),
+                Some(json!({
+                    "config": { "url": "http://169.254.169.254/latest/meta-data" }
+                })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(blocked.status, StatusCode::BAD_GATEWAY, "{}", blocked.body);
+        assert!(
+            blocked.body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("metadata"),
+            "{}",
+            blocked.body
+        );
+    }
+
+    #[tokio::test]
     async fn discovery_fills_metadata_on_create_only_and_refresh_is_idempotent() {
         let (addr, _) = spawn_static_server("200 OK", SAIL_MODELS).await;
         let base = format!("http://{addr}/v1");

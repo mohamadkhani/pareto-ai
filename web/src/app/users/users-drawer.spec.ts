@@ -91,6 +91,7 @@ const provider = {
   id: 'p1',
   name: 'openrouter',
   kind: 'openai_compatible',
+  preset: null,
   base_url: 'https://openrouter.ai/api/v1',
   enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',

@@ -3,7 +3,8 @@
     <h1>Providers</h1>
     <p class="hint">
       Register OpenAI-compatible upstreams, attach credentials, and load each provider's models into
-      the catalogue. Loading is a preview first, then an idempotent apply.
+      the catalogue. A preset fills in its price and balance settings; everything stays editable.
+      Loading is a preview first, then an idempotent apply.
     </p>
   </header>
 
@@ -55,6 +56,11 @@
                   <ui-badge [tone]="provider.enabled ? 'success' : 'neutral'">
                     {{ provider.enabled ? 'enabled' : 'disabled' }}
                   </ui-badge>
+                  @if (presetLabel(provider); as preset) {
+                    <ui-badge tone="info" [title]="'Created with the ' + preset + ' preset'">
+                      {{ preset }}
+                    </ui-badge>
+                  }
                   <span class="provider-kind">{{ provider.kind }}</span>
                 </div>
                 <code class="provider-url">{{ provider.base_url }}</code>
@@ -73,8 +79,13 @@
                     Credentials
                   </ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="openConnectors(provider)">
-                    Connectors
+                    Provider setup
                   </ui-button>
+                  @if (provider.preset !== null) {
+                    <ui-button size="sm" variant="ghost" (clicked)="askApplyPreset(provider)">
+                      Apply preset defaults
+                    </ui-button>
+                  }
                   <ui-button size="sm" variant="ghost" (clicked)="openEdit(provider)">
                     Edit
                   </ui-button>
@@ -116,6 +127,15 @@
                     @if (balance.days !== null) {
                       <span class="metric-note">{{ balance.days }}</span>
                     }
+                    @if (needsBalanceSetup(provider)) {
+                      <ui-button
+                        size="sm"
+                        variant="ghost"
+                        (clicked)="openConnectors(provider, 'balance')"
+                      >
+                        Set up balance
+                      </ui-button>
+                    }
                   }
                 </dd>
               </div>
@@ -148,9 +168,15 @@
                 <dd>
                   <span class="connector-badges">
                     @for (badge of connectorBadges(provider); track badge.kind) {
-                      <ui-badge [tone]="badge.tone" [title]="badge.title">
-                        {{ badge.label }}
-                      </ui-badge>
+                      <button
+                        type="button"
+                        class="connector-badge-button"
+                        [title]="badge.title"
+                        [attr.aria-label]="'Open ' + badge.label + ' setup'"
+                        (click)="openSetupTab(provider, badge)"
+                      >
+                        <ui-badge [tone]="badge.tone">{{ badge.label }}</ui-badge>
+                      </button>
                     }
                   </span>
                 </dd>
@@ -182,6 +208,26 @@
         (valueChange)="setName($event)"
       />
     </ui-field>
+    @if (formState()?.mode === 'create') {
+      <ui-field
+        label="Preset"
+        hint="Pick the upstream; its price and balance settings are filled in automatically."
+      >
+        <ui-select
+          [id]="'provider-preset'"
+          [value]="draft().preset"
+          (valueChange)="setPreset($event)"
+        >
+          <option value="">No preset (configure by hand)</option>
+          @for (preset of presets(); track preset.id) {
+            <option [value]="preset.id">{{ preset.label }}</option>
+          }
+        </ui-select>
+      </ui-field>
+      @if (presetDescription(); as description) {
+        <p class="note">{{ description }}</p>
+      }
+    }
     <ui-field
       label="Base URL"
       [error]="errors().base_url ?? ''"
@@ -195,11 +241,12 @@
         (valueChange)="setBaseUrl($event)"
       />
     </ui-field>
-    <ui-field label="Kind" hint="Only OpenAI-compatible upstreams are supported today.">
-      <ui-select [id]="'provider-kind'" [value]="draft().kind" (valueChange)="setKind($event)">
-        <option value="openai_compatible">openai_compatible</option>
-      </ui-select>
-    </ui-field>
+    @if (formState()?.mode === 'create' && presetSeedsConnectors()) {
+      <p class="note">
+        Prices and balance will be configured automatically for this preset (editable later under
+        Provider setup).
+      </p>
+    }
     @if (formState()?.mode === 'edit') {
       <ui-field label="Enabled" hint="Disabled providers are skipped by routing.">
         <ui-switch
@@ -348,9 +395,40 @@
   }
 </ui-dialog>
 
+<ui-dialog
+  [open]="applyingPreset() !== null"
+  title="Apply preset defaults"
+  (closed)="closeApplyPreset()"
+>
+  @if (applyingPreset(); as provider) {
+    <p>
+      Re-apply the <strong>{{ presetLabel(provider) ?? provider.preset }}</strong> defaults to
+      <strong>{{ provider.name }}</strong>? Settings you edited are kept unless you ask to replace
+      them.
+    </p>
+    <ui-field label="Replace edited settings">
+      <ui-switch
+        label="Replace edited settings"
+        [checked]="presetForce()"
+        (checkedChange)="setPresetForce($event)"
+      />
+    </ui-field>
+    <p class="note">
+      The provider's base URL is never changed, so a mock or proxy override survives.
+    </p>
+  }
+  <div ui-dialog-actions>
+    <ui-button variant="primary" [loading]="presetPending()" (clicked)="confirmApplyPreset()">
+      Apply defaults
+    </ui-button>
+    <ui-button variant="ghost" (clicked)="closeApplyPreset()">Cancel</ui-button>
+  </div>
+</ui-dialog>
+
 @if (connectorProvider(); as provider) {
   <app-connectors
     [provider]="provider"
+    [initialTab]="connectorTab()"
     (closed)="closeConnectors()"
     (changed)="onConnectorsChanged()"
   />

@@ -1,6 +1,6 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { Router, provideRouter } from '@angular/router';
 import {
   FetchMock,
   errorResponse,
@@ -10,7 +10,13 @@ import {
 import { waitFor, waitForButton, waitForText } from '../../testing/wait-for';
 import { AuthService, type User } from '../auth/auth.service';
 import { BalanceCache } from './balance-cache';
-import type { Credential, DiscoverySummary, Offering, Provider } from './catalog.types';
+import type {
+  Credential,
+  DiscoverySummary,
+  Offering,
+  Provider,
+  ProviderPreset,
+} from './catalog.types';
 import { Providers } from './providers';
 
 function authStub(role: 'admin' | 'user'): object {
@@ -32,6 +38,7 @@ function providerFixture(overrides: Partial<Provider> = {}): Provider {
     id: 'p1',
     name: 'openrouter',
     kind: 'openai_compatible',
+    preset: null,
     base_url: 'https://openrouter.ai/api/v1',
     enabled: true,
     created_at: '2026-01-01T00:00:00.000Z',
@@ -101,6 +108,25 @@ function discoveryFixture(overrides: Partial<DiscoverySummary> = {}): DiscoveryS
   };
 }
 
+function selectValue(root: HTMLElement, selector: string, value: string): void {
+  const select = root.querySelector(selector);
+  if (!(select instanceof HTMLSelectElement)) {
+    throw new Error(`no select matching ${selector}`);
+  }
+  select.value = value;
+  select.dispatchEvent(new Event('change'));
+}
+
+function tabByLabel(root: HTMLElement, text: string): HTMLButtonElement {
+  const tab = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find(
+    (candidate) => candidate.textContent?.trim() === text,
+  );
+  if (tab === undefined) {
+    throw new Error(`no tab labelled ${text}`);
+  }
+  return tab;
+}
+
 function typeInto(root: HTMLElement, selector: string, value: string): void {
   const input = root.querySelector(selector);
   if (!(input instanceof HTMLInputElement)) {
@@ -117,10 +143,13 @@ function isBusy(root: ParentNode): boolean {
 
 describe('Providers', () => {
   let fetchMock: FetchMock;
+  let presetResponse: ProviderPreset[] = [];
 
   beforeEach(() => {
     fetchMock = new FetchMock();
+    presetResponse = [];
     fetchMock.respondTo('/api/breaker', () => jsonResponse(200, { entries: [] }));
+    fetchMock.respondTo('/api/provider-presets', () => jsonResponse(200, presetResponse));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 
@@ -287,7 +316,7 @@ describe('Providers', () => {
     fetchMock.respond(jsonResponse(200, providerFixture({ enabled: false })));
     queueLoad([providerFixture({ enabled: false })]);
     (await waitForButton(fixture, root, 'Disable')).click();
-    await waitForRequests(fixture, root, 7);
+    await waitForRequests(fixture, root, 6);
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('PATCH');
@@ -315,7 +344,7 @@ describe('Providers', () => {
     toggle.click();
     fixture.detectChanges();
     (await waitForButton(fixture, root, 'Save')).click();
-    await waitForRequests(fixture, root, 7);
+    await waitForRequests(fixture, root, 6);
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('PATCH');
@@ -500,6 +529,38 @@ describe('Providers', () => {
     fetchMock.respond(
       jsonResponse(200, {
         provider_id: 'p1',
+        kind: 'balance',
+        configured: true,
+        enabled: true,
+        config: {
+          url: '/v2/usage',
+          headers: {},
+          allow_private: false,
+          balance: {
+            balance: '/balance',
+            subtract: null,
+            available: null,
+            currency: 'USD',
+            period_spend: null,
+            burn_rate: null,
+            days_remaining: null,
+            unit: {
+              multiplier: 1,
+              currency: 'USD',
+              fx_to_usd: null,
+              display: { symbol: '€', decimals: 2 },
+              note: null,
+            },
+            refresh_seconds: 900,
+          },
+        },
+        updated_at: '2026-01-01T00:00:00.000Z',
+        updated_by: 'u1',
+      }),
+    );
+    fetchMock.respond(
+      jsonResponse(200, {
+        provider_id: 'p1',
         kind: 'catalog',
         configured: true,
         enabled: true,
@@ -556,8 +617,8 @@ describe('Providers', () => {
     expect(balance?.textContent?.trim()).toBe('€3.50');
     expect(balance?.classList.contains('is-low')).toBe(true);
     expect(root.querySelector('.balance-cell')?.textContent).toContain('low');
-    // The display came from the catalog connector read.
-    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/catalog');
+    // The balance column prefers the balance unit's own display (D52).
+    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/balance');
   });
 
   it('shows how many days a balance lasts when a refresh knows it', async () => {
@@ -577,9 +638,13 @@ describe('Providers', () => {
         available: true,
         balance_usd: 1.5,
         currency: 'USD',
+        raw: 150,
+        converted: 1.5,
+        routable: true,
         period_spend: 3,
         burn_rate: 0.5,
         days_remaining: 2.4,
+        warnings: [],
         error: null,
         fetched_at: '2026-01-01T00:00:00.000Z',
       }),
@@ -637,11 +702,11 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    (await waitForButton(fixture, root, 'Connectors')).click();
-    await waitForText(fixture, root, 'Connectors — openrouter');
+    (await waitForButton(fixture, root, 'Provider setup')).click();
+    await waitForText(fixture, root, 'Provider setup — openrouter');
     await waitForRequests(fixture, root, 4);
 
-    expect(root.textContent).toContain('Connectors — openrouter');
+    expect(root.textContent).toContain('Provider setup — openrouter');
     expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/templates');
   });
 
@@ -692,5 +757,119 @@ describe('Providers', () => {
     await waitForText(fixture, root, 'Reading providers failed.');
 
     expect(root.textContent).toContain('Reading providers failed.');
+  });
+
+  it('shows the preset badge for a provider created with a preset', async () => {
+    queueLoad([providerFixture({ preset: 'sailresearch' })]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('sailresearch');
+    expect(root.querySelector('ui-badge[title*="sailresearch preset"]')).not.toBeNull();
+    expect(root.textContent).toContain('Apply preset defaults');
+  });
+
+  it('creates a provider with a preset and a prefilled base URL', async () => {
+    presetResponse = [
+      {
+        id: 'openrouter',
+        label: 'OpenRouter',
+        description: 'One key, many models.',
+        base_url: 'https://openrouter.ai/api/v1',
+        auth: 'bearer',
+        flags: {
+          skip_batch_variants: true,
+          variable_price_sentinel: true,
+          apply_on_discovery: false,
+        },
+        configs: {},
+      },
+    ];
+    queueLoad([]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    (await waitForButton(fixture, root, 'New provider')).click();
+    fixture.detectChanges();
+    await waitForText(fixture, root, 'OpenRouter');
+    selectValue(root, '#provider-preset', 'openrouter');
+    fixture.detectChanges();
+
+    const baseUrl = root.querySelector('#provider-base-url');
+    expect(baseUrl instanceof HTMLInputElement ? baseUrl.value : null).toBe(
+      'https://openrouter.ai/api/v1',
+    );
+    expect(root.textContent).toContain('configured automatically');
+
+    typeInto(root, '#provider-name', 'openrouter');
+    fetchMock.respond(jsonResponse(201, providerFixture({ id: 'p2', preset: 'openrouter' })));
+    queueLoad([providerFixture({ id: 'p2', preset: 'openrouter' })]);
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 6);
+
+    const post = fetchMock.requests.find((call) => call.method === 'POST');
+    expect(post?.body).toEqual({
+      name: 'openrouter',
+      base_url: 'https://openrouter.ai/api/v1',
+      kind: 'openai_compatible',
+      preset: 'openrouter',
+    });
+  });
+
+  it('opens provider setup from a badge and follows URL changes both ways', async () => {
+    queueLoad([providerFixture({ preset: 'openrouter' })]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const router = TestBed.inject(Router);
+
+    const badge = root.querySelector('[aria-label="Open balance setup"]');
+    expect(badge).not.toBeNull();
+    (badge as HTMLElement).click();
+    await waitForText(fixture, root, 'Provider setup — openrouter');
+    await waitFor(
+      fixture,
+      () => router.url.includes('setup=p1'),
+      'the URL to carry the setup link',
+    );
+    expect(router.url).toContain('tab=balance');
+    expect(tabByLabel(root, 'Balance').getAttribute('aria-selected')).toBe('true');
+
+    await router.navigate([], { queryParams: { setup: null, tab: null } });
+    await waitFor(
+      fixture,
+      () => !root.textContent?.includes('Provider setup — openrouter'),
+      'close',
+    );
+
+    await router.navigate([], { queryParams: { setup: 'p1', tab: 'health' } });
+    await waitForText(fixture, root, 'Provider setup — openrouter');
+    expect(tabByLabel(root, 'Health').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('offers Set up balance when a provider balance is unavailable', async () => {
+    queueLoad(
+      [
+        providerFixture({
+          connectors: [{ kind: 'balance', enabled: true, updated_at: '2026-01-01T00:00:00.000Z' }],
+        }),
+      ],
+      {
+        p1: [
+          credentialFixture({
+            balance_available: false,
+            balance_error: 'connect: unreachable',
+            balance_currency: 'USD',
+          }),
+        ],
+      },
+    );
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    await waitForText(fixture, root, 'unavailable');
+
+    const cta = await waitForButton(fixture, root, 'Set up balance');
+    cta.click();
+    await waitForText(fixture, root, 'Provider setup — openrouter');
+    expect(tabByLabel(root, 'Balance').getAttribute('aria-selected')).toBe('true');
   });
 });

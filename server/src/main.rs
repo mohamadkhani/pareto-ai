@@ -24,6 +24,7 @@ mod openapi;
 mod password;
 #[cfg(test)]
 mod perf_bench;
+mod presets;
 mod pricing;
 mod probe;
 mod reports;

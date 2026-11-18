@@ -125,6 +125,12 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .route("/breaker/reset", axum::routing::post(breaker::reset))
         // Providers and credentials.
         .route("/providers", get(providers::list).post(providers::create))
+        // The preset registry (D52) and re-applying one to an existing row.
+        .route("/provider-presets", get(providers::provider_presets))
+        .route(
+            "/providers/{id}/apply-preset",
+            axum::routing::post(providers::apply_preset),
+        )
         .route(
             "/providers/{id}",
             get(providers::get)

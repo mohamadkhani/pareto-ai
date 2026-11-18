@@ -2,9 +2,9 @@
   variant="drawer"
   size="lg"
   [open]="true"
-  [title]="'Connectors — ' + provider().name"
+  [title]="'Provider setup — ' + provider().name"
   (closed)="close()"
-  ariaLabel="Provider connectors"
+  ariaLabel="Provider setup"
 >
   @if (loadError()) {
     <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="loadError.set(null)">
@@ -23,11 +23,16 @@
   }
 
   <p class="intro">
-    Connectors map this provider's own payloads to our prices, balance, and health answers. Nothing
-    is written until you save; sample and preview only read the provider.
+    These settings map this provider's own payloads to our prices, balance, and health answers.
+    Nothing is written until you save; sample and preview only read the provider.
   </p>
 
-  <ui-tabs [tabs]="tabs" [selected]="tab()" (selectedChange)="setTab($event)" label="Connector">
+  <ui-tabs
+    [tabs]="tabs"
+    [selected]="tab()"
+    (selectedChange)="setTab($event)"
+    label="Provider setup"
+  >
     @if (tab() === 'catalog') {
       @let form = forms().catalog;
       @let catalog = form.catalog;
@@ -377,6 +382,80 @@
           </div>
         </div>
 
+        <h3 class="section-title">Balance unit</h3>
+        <p class="note">
+          The multiplier applies to the balance, period spend, and burn rate — the provider may
+          quote them in cents like its prices. Days remaining are never scaled.
+        </p>
+        <div class="unit-grid">
+          <ui-field
+            label="Multiplier"
+            hint="Applied to balance, period spend, and burn rate; for example 0.01 for cents."
+          >
+            <ui-input
+              [id]="'connector-balance-unit-multiplier'"
+              type="number"
+              step="any"
+              [value]="balance.unit_multiplier"
+              [ariaLabel]="'Balance unit multiplier'"
+              (valueChange)="setBalance('unit_multiplier', $event)"
+            />
+          </ui-field>
+          <ui-field label="Currency" hint="ISO code of the published amounts, for example USD.">
+            <ui-input
+              [id]="'connector-balance-unit-currency'"
+              [value]="balance.unit_currency"
+              [ariaLabel]="'Balance unit currency'"
+              (valueChange)="setBalance('unit_currency', $event)"
+            />
+          </ui-field>
+          <ui-field
+            label="FX to USD"
+            hint="Optional static rate. Non-USD balances are ignored by routing and the gate without one."
+          >
+            <ui-input
+              [id]="'connector-balance-unit-fx'"
+              type="number"
+              step="any"
+              [value]="balance.unit_fx"
+              placeholder="none"
+              [ariaLabel]="'Balance FX rate to USD'"
+              (valueChange)="setBalance('unit_fx', $event)"
+            />
+          </ui-field>
+          <ui-field label="Display symbol" hint="Used by the balance column, for example $.">
+            <ui-input
+              [id]="'connector-balance-unit-symbol'"
+              [value]="balance.unit_symbol"
+              [ariaLabel]="'Balance display symbol'"
+              (valueChange)="setBalance('unit_symbol', $event)"
+            />
+          </ui-field>
+          <ui-field label="Decimals" hint="How many decimals the balance column shows (0–8).">
+            <ui-input
+              [id]="'connector-balance-unit-decimals'"
+              type="number"
+              min="0"
+              max="8"
+              [value]="balance.unit_decimals"
+              [ariaLabel]="'Balance display decimals'"
+              (valueChange)="setBalance('unit_decimals', $event)"
+            />
+          </ui-field>
+        </div>
+        <ui-field label="Note" hint="A reminder shown in this dialog.">
+          <ui-input
+            [id]="'connector-balance-unit-note'"
+            placeholder="quoted in cents — verify against an invoice"
+            [value]="balance.unit_note"
+            (valueChange)="setBalance('unit_note', $event)"
+          />
+        </ui-field>
+        <p class="note unit-example">Example: {{ balanceExampleText() }}</p>
+        @for (warning of balanceUnitWarnings(); track warning) {
+          <ui-banner tone="warning">{{ warning }}</ui-banner>
+        }
+
         <h3 class="section-title">Balance policy</h3>
         <p class="note">
           <strong>Warn</strong> (default) shows the balance and a low-balance warning but never
@@ -447,8 +526,20 @@
                 <dd>{{ formattedBalance(result.balance.balance_usd, result.balance.currency) }}</dd>
               </div>
               <div>
+                <dt>Raw → converted</dt>
+                <dd>
+                  {{ formattedNumber(result.balance.raw) }} →
+                  {{ formattedBalance(result.balance.converted, result.balance.currency) }}
+                </dd>
+              </div>
+              <div>
                 <dt>Currency</dt>
-                <dd>{{ result.balance.currency }}</dd>
+                <dd>
+                  {{ result.balance.currency }}
+                  @if (!result.balance.routable) {
+                    <ui-badge tone="warning">not routable</ui-badge>
+                  }
+                </dd>
               </div>
               <div>
                 <dt>Period spend</dt>

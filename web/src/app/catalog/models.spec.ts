@@ -1,7 +1,7 @@
 import { signal } from '@angular/core';
 import { Location } from '@angular/common';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/router';
+import { ActivatedRoute, Router, convertToParamMap, provideRouter } from '@angular/router';
 import {
   FetchMock,
   errorResponse,
@@ -37,6 +37,7 @@ const provider: Provider = {
   id: 'p1',
   name: 'openrouter',
   kind: 'openai_compatible',
+  preset: null,
   base_url: 'https://openrouter.ai/api/v1',
   enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',
@@ -930,13 +931,18 @@ describe('Models', () => {
     expect(root.textContent).not.toContain('avg');
   });
 
-  it('hints that prices need a connector when the provider has none', async () => {
+  it('hints that prices need setup when the provider has none', async () => {
     queueReload(fetchMock, providerOverview);
     const fixture = await create('admin', 'p1');
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.textContent).toContain('Prices need a connector for this provider.');
-    expect(root.querySelector('.sync-status a[href="/providers"]')).not.toBeNull();
+    expect(root.textContent).toContain('Prices need setup for this provider.');
+    const button = root.querySelector('.sync-status button');
+    expect(button).not.toBeNull();
+    (button as HTMLElement).click();
+    const router = TestBed.inject(Router);
+    await vi.waitFor(() => expect(router.url).toContain('setup=p1'));
+    expect(router.url).toContain('tab=prices');
   });
 
   it('does not show the connector hint when a catalog connector exists', async () => {

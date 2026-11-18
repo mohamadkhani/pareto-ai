@@ -117,6 +117,9 @@
           }
           @if (run.error !== null) {
             <span class="sync-status__error">{{ run.error }}</span>
+            <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
+              Fix in provider setup
+            </ui-button>
           }
         </span>
       }
@@ -125,8 +128,10 @@
       }
       @if (missingCatalogConnector()) {
         <span class="sync-status__item sync-status__connector-hint">
-          Prices need a connector for this provider.
-          <a routerLink="/providers">Configure one on Providers</a>
+          Prices need setup for this provider.
+          <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
+            Set up prices
+          </ui-button>
         </span>
       }
     </div>

@@ -30,6 +30,7 @@ const provider: Provider = {
   id: 'p1',
   name: 'sail',
   kind: 'openai_compatible',
+  preset: null,
   base_url: 'https://api.sailresearch.com/v1',
   enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',
@@ -107,11 +108,19 @@ const sailTemplate: ConnectorTemplate = {
       allow_private: false,
       balance: {
         balance: '/balance',
+        subtract: null,
         available: '/available',
         currency: 'USD',
         period_spend: null,
         burn_rate: null,
         days_remaining: null,
+        unit: {
+          multiplier: 1,
+          currency: 'USD',
+          fx_to_usd: null,
+          display: { symbol: '$', decimals: 2 },
+          note: null,
+        },
         refresh_seconds: 900,
       },
     },
@@ -309,7 +318,7 @@ describe('Connectors', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.textContent).toContain('Connectors — sail');
+    expect(root.textContent).toContain('Provider setup — sail');
     expect(root.textContent).toContain('SailResearch');
     expect(tabByText(root, 'Prices').getAttribute('aria-selected')).toBe('true');
     expect(fetchMock.requests.map((call) => call.url)).toEqual([
@@ -319,6 +328,68 @@ describe('Connectors', () => {
       '/api/providers/p1/connectors/health',
       '/api/providers/p1/credentials',
     ]);
+  });
+
+  it('opens on the Balance tab from the deep link and shows the live unit example', async () => {
+    queueLoad();
+    await TestBed.compileComponents();
+    const fixture = TestBed.createComponent(Connectors);
+    fixture.componentRef.setInput('provider', provider);
+    fixture.componentRef.setInput('initialTab', 'balance');
+    await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(tabByText(root, 'Balance').getAttribute('aria-selected')).toBe('true');
+    expect(root.textContent).toContain('Balance unit');
+
+    typeInto(root, '#connector-balance-unit-multiplier', '0.01');
+    fixture.detectChanges();
+    expect(root.textContent).toContain('Example: raw 136275 → $1362.75');
+
+    typeInto(root, '#connector-balance-unit-multiplier', '0');
+    fixture.detectChanges();
+    expect(root.textContent).toContain('A multiplier of zero or less');
+
+    typeInto(root, '#connector-balance-unit-currency', 'EUR');
+    fixture.detectChanges();
+    expect(root.textContent).toContain('EUR balances are stored in EUR');
+  });
+
+  it('shows the converted balance alongside the raw value in preview', async () => {
+    queueLoad();
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    tabByText(root, 'Balance').click();
+    fixture.detectChanges();
+    fetchMock.respondTo(
+      '/api/providers/p1/connectors/balance/test',
+      () =>
+        jsonResponse(
+          200,
+          testView({
+            kind: 'balance',
+            balance: {
+              available: true,
+              balance_usd: 1362.75,
+              currency: 'USD',
+              raw: 136275,
+              converted: 1362.75,
+              routable: true,
+              period_spend: 12.5,
+              burn_rate: null,
+              days_remaining: 30,
+              warnings: [],
+            },
+          }),
+        ),
+      true,
+    );
+    buttonByText(root, 'Test balance').click();
+    await settle(fixture);
+
+    expect(root.textContent).toContain('136275');
+    expect(root.textContent).toContain('$1362.75');
   });
 
   it('fetches a sample, then a picked tree value fills the active pointer', async () => {

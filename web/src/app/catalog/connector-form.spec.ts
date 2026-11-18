@@ -1,4 +1,8 @@
 import {
+  BALANCE_EXAMPLE_RAW,
+  balanceExample,
+  balanceFactor,
+  convertBalance,
   convertPrice,
   detectTemplateId,
   detectTier,
@@ -10,7 +14,7 @@ import {
   splitPointer,
   unitExample,
 } from './connector-form';
-import type { ConnectorTemplate, PriceUnit } from './connectors.types';
+import type { BalanceUnit, ConnectorTemplate, PriceUnit } from './connectors.types';
 
 function unit(overrides: Partial<PriceUnit> = {}): PriceUnit {
   return {
@@ -173,5 +177,33 @@ describe('template detection', () => {
     };
     expect(detectTemplateId([sail], 'catalog', sample)).toBe('sailresearch');
     expect(detectTemplateId([sail], 'catalog', { data: [] })).toBeNull();
+  });
+});
+
+describe('balance unit conversion (D52)', () => {
+  function balanceUnit(overrides: Partial<BalanceUnit> = {}): BalanceUnit {
+    return {
+      multiplier: 1,
+      currency: 'USD',
+      fx_to_usd: null,
+      display: { symbol: '$', decimals: 2 },
+      note: null,
+      ...overrides,
+    };
+  }
+
+  it('applies the multiplier before any FX rate', () => {
+    const unit = balanceUnit({ multiplier: 0.01 });
+    expect(convertBalance(136_275, unit)).toBeCloseTo(1362.75, 9);
+    expect(balanceExample(unit)).toBe('raw 136275 → $1362.75');
+    expect(balanceExample(balanceUnit())).toBe('raw 136275 → $136275.00');
+  });
+
+  it('uses FX only for a non-USD currency and ignores a non-positive rate', () => {
+    expect(balanceFactor(balanceUnit({ currency: 'EUR', fx_to_usd: 1.1 }))).toBeCloseTo(1.1, 9);
+    expect(balanceFactor(balanceUnit({ currency: 'EUR', fx_to_usd: 0 }))).toBe(1);
+    expect(balanceFactor(balanceUnit({ currency: 'eur', fx_to_usd: -2 }))).toBe(1);
+    expect(balanceFactor(balanceUnit({ multiplier: 0 }))).toBe(0);
+    expect(BALANCE_EXAMPLE_RAW).toBe(136_275);
   });
 });

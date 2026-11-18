@@ -870,6 +870,54 @@ shown on `/styleguide` (D28). Unpriced spend is never drawn as zero. The
 initial bundle warning budget rises to 850 kB for the richer dashboard; the
 page stays a lazy chunk.
 
+### D52. Balance units and provider presets
+
+**Decision (user, 2026-11-19):** the connector unit rule (D44) applies to the
+**balance** too, and providers are created from a **preset** instead of a
+free-form "OpenAI-compatible" entry.
+
+- `BalanceConfig.unit` mirrors the catalog unit without a token base:
+  `multiplier` (default 1), `currency`, `fx_to_usd`, `display`, `note`. The
+  multiplier applies to `balance`, `period_spend`, and `burn_rate`;
+  `days_remaining` is a count and is never scaled.
+- `BalanceConfig.subtract` (optional pointer) makes
+  `balance = balance_pointer − subtract_pointer` **before** the multiplier.
+  OpenRouter needs it: `/api/v1/credits` publishes total credits and lifetime
+  usage, so remaining = `total_credits − total_usage`.
+- Preview and refresh return `raw` (after subtract), `converted` (after the
+  multiplier), and warnings for a non-positive multiplier, a negative or
+  absurdly large converted balance, and a non-USD currency without FX.
+- A non-USD balance without `fx_to_usd` is stored with its currency and is
+  **ignored by routing and the balance gate**, exactly like a non-USD price.
+- `providers.preset` is an additive nullable column (`openrouter`,
+  `sailresearch`, `generic`); `kind` stays the wire protocol. The registry is
+  code, and it reuses the connector templates so pointers and units have one
+  source of truth.
+- Creating with a preset seeds its catalog/balance/health connectors in the
+  same transaction, enabled, with `updated_by = NULL`. An explicit
+  base URL or connector document wins over the preset.
+- `POST /api/providers/{id}/apply-preset` (admin, CSRF, audited) re-applies the
+  defaults. A connector the operator saved (`updated_by` set) is kept unless
+  `force: true`; the provider's base URL is never changed, so a mock/proxy
+  override survives. The view reports one action per kind
+  (`created`, `updated`, `overwritten`, `unchanged`, `skipped`).
+
+SailResearch's balance template uses multiplier `0.01` with the note "quoted
+in cents — verify against an invoice", matching its catalog prices.
+OpenRouter's uses multiplier 1 and the subtract pointer.
+
+**Why:** a balance quoted in cents was being read as dollars (100× too small),
+while the same provider's prices were converted correctly; and configuring a
+known provider by hand was error-prone. Presets are code so they stay in sync
+with the templates and need no migration to tune a pointer.
+
+**Consequences:** `providers` gains one indexed nullable column; connector
+rows seeded by a preset carry `updated_by = NULL` as the "unmodified" marker,
+so operator edits are never silently replaced. The UI calls the surface
+**Provider setup** (tabs Prices / Balance / Health) and links to it with
+`/providers?setup=<id>&tab=prices|balance|health`; API and DB names stay
+`connectors/*`.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

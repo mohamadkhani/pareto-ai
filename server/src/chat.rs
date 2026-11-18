@@ -301,6 +301,8 @@ struct Credential {
     /// penalty on the weighted path, never a hard gate.
     balance_usd: Option<f64>,
     balance_low_threshold: Option<f64>,
+    /// Stored currency of `balance_usd`; non-USD values are advisory only.
+    balance_currency: Option<String>,
 }
 
 /// One offering with everything needed to serve a request from it.
@@ -424,7 +426,7 @@ async fn load_credentials(
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
         "SELECT id, provider_id, secret_cipher, headers_json, cooldown_until, balance_usd, \
-                balance_low_threshold, balance_gate \
+                balance_low_threshold, balance_gate, balance_currency \
          FROM provider_credentials WHERE provider_id IN ({placeholders}) \
          ORDER BY provider_id, id"
     );
@@ -634,6 +636,9 @@ struct CredentialRow {
     balance_usd: Option<f64>,
     balance_low_threshold: Option<f64>,
     balance_gate: String,
+    /// Stored currency of `balance_usd` (D52): a non-USD balance is never
+    /// gated on or used as a routing signal.
+    balance_currency: Option<String>,
 }
 
 /// The provider's credentials for one offering in attempt order: not cooled
@@ -666,6 +671,7 @@ fn ordered_credentials(
                 cooled: cooled(row),
                 balance_usd: row.balance_usd,
                 balance_low_threshold: row.balance_low_threshold,
+                balance_currency: row.balance_currency.clone(),
             }
         })
         .collect()
@@ -674,9 +680,19 @@ fn ordered_credentials(
 /// D42 balance gate: only a credential explicitly set to `block` whose stored
 /// balance is at or below zero is skipped. The default `warn` gate never
 /// changes routing, and an unavailable balance (`NULL`, `balance_available =
-/// 0`) is unknown rather than zero, so it never blocks either.
+/// 0`) is unknown rather than zero, so it never blocks either. A balance stored
+/// in another currency is not comparable to USD zero and is ignored (D52).
 fn balance_blocks(row: &CredentialRow) -> bool {
-    row.balance_gate == "block" && row.balance_usd.is_some_and(|balance| balance <= 0.0)
+    row.balance_gate == "block"
+        && balance_is_usd(row)
+        && row.balance_usd.is_some_and(|balance| balance <= 0.0)
+}
+
+/// A stored balance without a currency predates D52 and is USD.
+fn balance_is_usd(row: &CredentialRow) -> bool {
+    row.balance_currency
+        .as_deref()
+        .is_none_or(|currency| currency.eq_ignore_ascii_case("USD"))
 }
 
 /// The provider credential to use for one offering: the first entry of
@@ -698,6 +714,9 @@ fn pick_credential(
 /// balance below its low threshold is warned about here, in the logs, and
 /// never gates a request. A real balance sync later turns this into a gate.
 fn warn_low_balance(row: &CredentialRow) {
+    if !balance_is_usd(row) {
+        return;
+    }
     if let (Some(balance), Some(threshold)) = (row.balance_usd, row.balance_low_threshold)
         && balance < threshold
     {
@@ -1197,7 +1216,17 @@ fn signal_for(
         credential.and_then(|credential| credential.balance_usd),
         credential.and_then(|credential| credential.balance_low_threshold),
     ) {
-        (Some(balance), Some(threshold)) if threshold > 0.0 => {
+        // A non-USD balance is not comparable to a USD threshold, so it never
+        // feeds the low-quota penalty (D52).
+        (Some(balance), Some(threshold))
+            if threshold > 0.0
+                && credential.is_some_and(|credential| {
+                    credential
+                        .balance_currency
+                        .as_deref()
+                        .is_none_or(|currency| currency.eq_ignore_ascii_case("USD"))
+                }) =>
+        {
             Some((balance / threshold).clamp(0.0, 1.0))
         }
         _ => None,
@@ -4046,6 +4075,8 @@ mod tests {
                 base_url: base_url.to_string(),
                 kind: None,
                 enabled: None,
+                preset: None,
+                connectors: None,
             },
         )
         .await
@@ -7682,6 +7713,7 @@ mod tests {
             balance_usd: None,
             balance_low_threshold: None,
             balance_gate: "warn".to_string(),
+            balance_currency: None,
         };
         let now = "2026-01-01T00:00:00Z";
 
@@ -7732,6 +7764,7 @@ mod tests {
             balance_usd: balance,
             balance_low_threshold: None,
             balance_gate: gate.to_string(),
+            balance_currency: None,
         };
         let now = "2026-01-01T00:00:00Z";
 
@@ -7764,6 +7797,18 @@ mod tests {
         assert_eq!(
             pick_credential(&rows, "offering", now, &breaker)
                 .expect("unknown balance is not zero")
+                .id,
+            "a"
+        );
+
+        // A non-USD balance is not comparable to USD zero and is ignored by
+        // both the gate and the low-quota warning (D52).
+        let mut euro = row("a", Some(0.0), "block");
+        euro.balance_currency = Some("EUR".to_string());
+        let rows = vec![euro];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("a non-USD balance is ignored")
                 .id,
             "a"
         );
