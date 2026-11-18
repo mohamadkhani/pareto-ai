@@ -172,10 +172,45 @@
             <option value="sailresearch">sailresearch</option>
           </ui-select>
         </ui-field>
+        <ui-field
+          label="Amount"
+          hint="Number spinners are hidden; the arrow keys still step the value."
+        >
+          <ui-input type="number" min="0" step="1" [(value)]="numberValue" placeholder="0" />
+        </ui-field>
+        <ui-field label="Starts on">
+          <ui-input type="date" [(value)]="dateValue" />
+        </ui-field>
+        <ui-field label="Runs at">
+          <ui-input type="time" [(value)]="timeValue" />
+        </ui-field>
+        <ui-field label="Expires at">
+          <ui-input type="datetime-local" [(value)]="dateTimeValue" />
+        </ui-field>
+        <ui-field label="Invalid amount" [error]="'Use a number of 0 or more.'">
+          <ui-input type="number" value="-1" />
+        </ui-field>
+        <ui-field label="Disabled number" hint="Locked while a save is in flight.">
+          <ui-input type="number" value="10" [disabled]="true" />
+        </ui-field>
+        <ui-field label="Disabled provider">
+          <ui-select value="azure" [disabled]="true">
+            <option value="azure">azure</option>
+          </ui-select>
+        </ui-field>
+        <ui-field label="Provider (error)" [error]="'Choose a provider before saving.'">
+          <ui-select value="">
+            <option value="">Choose…</option>
+            <option value="openrouter">openrouter</option>
+          </ui-select>
+        </ui-field>
         <ui-field label="Disabled input" hint="Read-only values use the disabled state.">
           <ui-input value="locked" [disabled]="true" />
         </ui-field>
       </div>
+      <p class="note">
+        Focus state: tab to any control; every type uses the same accent border and focus ring.
+      </p>
       <div class="row">
         <ui-switch [(checked)]="switchOn" label="Offering enabled" />
         <ui-switch [(checked)]="switchDisabled" label="Disabled switch" [disabled]="true" />

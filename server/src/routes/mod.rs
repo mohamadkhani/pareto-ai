@@ -25,6 +25,7 @@ pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod catalog;
 pub(crate) mod chat;
+pub(crate) mod connectors;
 pub(crate) mod grants;
 pub(crate) mod health;
 pub(crate) mod mix;
@@ -131,6 +132,36 @@ fn api_surface(state: AppState) -> Router<AppState> {
         .route(
             "/providers/{id}/discover-models",
             axum::routing::post(providers::discover_models),
+        )
+        // Provider connectors (D42): catalog prices, balance, and health.
+        // The static `templates` segment wins over `{kind}`.
+        .route(
+            "/providers/{id}/connectors/templates",
+            get(connectors::templates),
+        )
+        .route(
+            "/providers/{id}/connectors/{kind}",
+            get(connectors::get).put(connectors::put),
+        )
+        .route(
+            "/providers/{id}/connectors/{kind}/sample",
+            axum::routing::post(connectors::sample),
+        )
+        .route(
+            "/providers/{id}/connectors/{kind}/test",
+            axum::routing::post(connectors::test),
+        )
+        .route(
+            "/providers/{id}/prices/refresh",
+            axum::routing::post(connectors::refresh_prices),
+        )
+        .route(
+            "/providers/{id}/balances/refresh",
+            axum::routing::post(connectors::refresh_balances),
+        )
+        .route(
+            "/providers/{id}/credentials/{cid}/balance/refresh",
+            axum::routing::post(connectors::refresh_balance),
         )
         .route(
             "/credentials/{id}",

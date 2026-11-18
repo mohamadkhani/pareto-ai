@@ -53,6 +53,8 @@
               <th scope="col">Base URL</th>
               <th scope="col">Kind</th>
               <th scope="col">Status</th>
+              <th scope="col">Connectors</th>
+              <th scope="col">Balance</th>
               <th scope="col" class="num">Credentials</th>
               <th scope="col" class="num">Offerings</th>
               <th scope="col">Last load</th>
@@ -76,11 +78,40 @@
                     {{ provider.enabled ? 'enabled' : 'disabled' }}
                   </ui-badge>
                 </td>
+                <td>
+                  <span class="connector-badges">
+                    @for (badge of connectorBadges(provider); track badge.kind) {
+                      <ui-badge [tone]="badge.tone" [title]="badge.title">
+                        {{ badge.label }}
+                      </ui-badge>
+                    }
+                  </span>
+                </td>
+                <td class="balance-cell">
+                  @if (providerBalance(provider); as balance) {
+                    <span
+                      class="provider-balance"
+                      [class.is-low]="balance.low"
+                      [class.is-unavailable]="balance.available === false"
+                    >
+                      {{ balance.text }}
+                    </span>
+                    @if (balance.low) {
+                      <ui-badge tone="warning">low</ui-badge>
+                    }
+                    @if (balance.days !== null) {
+                      <span class="balance-days">{{ balance.days }}</span>
+                    }
+                  }
+                </td>
                 <td class="num">{{ credentialCount(provider.id) }}</td>
                 <td class="num">{{ offeringCount(provider.id) }}</td>
                 <td class="last-load">{{ discoveryLabel(provider) }}</td>
                 <td class="actions">
                   <ui-button size="sm" (clicked)="openDiscovery(provider)">Load models</ui-button>
+                  <ui-button size="sm" variant="ghost" (clicked)="openConnectors(provider)">
+                    Connectors
+                  </ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="toggleSelected(provider)">
                     {{ selectedId() === provider.id ? 'Hide credentials' : 'Credentials' }}
                   </ui-button>
@@ -102,7 +133,7 @@
               </tr>
               @if (selectedId() === provider.id) {
                 <tr class="credentials-row">
-                  <td colspan="8">
+                  <td colspan="10">
                     <section
                       class="credentials-panel"
                       [attr.aria-label]="'Credentials — ' + provider.name"
@@ -110,7 +141,7 @@
                       <div class="credentials-head">
                         <h2>Credentials — {{ provider.name }}</h2>
                       </div>
-                      <app-credentials [provider]="provider" />
+                      <app-credentials [provider]="provider" (changed)="reload()" />
                     </section>
                   </td>
                 </tr>
@@ -284,3 +315,11 @@
     <ui-button variant="ghost" (clicked)="closeDiscovery()">Close</ui-button>
   </div>
 </ui-dialog>
+
+@if (connectorProvider(); as provider) {
+  <app-connectors
+    [provider]="provider"
+    (closed)="closeConnectors()"
+    (changed)="onConnectorsChanged()"
+  />
+}

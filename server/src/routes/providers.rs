@@ -41,8 +41,18 @@ pub async fn list(
     let rid = error::request_id(&headers);
     let rows = catalog::list_providers(&state.pool)
         .await
+        .map_err(|e| e.into_api_error(rid.clone()))?;
+    let mut connectors = crate::connectors::summaries_by_provider(&state.pool)
+        .await
         .map_err(|e| e.into_api_error(rid))?;
-    Ok(Json(rows.iter().map(ProviderView::from).collect()))
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                ProviderView::from(row)
+                    .with_connectors(connectors.remove(&row.id).unwrap_or_default())
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a provider. Admin only, audited as `provider.create`.
@@ -101,8 +111,13 @@ pub async fn get(
     let row = catalog::get_provider(&state.pool, &id)
         .await
         .map_err(|e| e.into_api_error(rid.clone()))?
-        .ok_or_else(|| ApiError::not_found("provider").with_request_id(rid))?;
-    Ok(Json(ProviderView::from(&row)))
+        .ok_or_else(|| ApiError::not_found("provider").with_request_id(rid.clone()))?;
+    let connectors = crate::connectors::summaries_by_provider(&state.pool)
+        .await
+        .map_err(|e| e.into_api_error(rid.clone()))?
+        .remove(&row.id)
+        .unwrap_or_default();
+    Ok(Json(ProviderView::from(&row).with_connectors(connectors)))
 }
 
 /// Updates a provider. Admin only, audited as `provider.update`.
@@ -388,8 +403,20 @@ pub async fn test_credential(
             |e| ApiError::internal("decrypting credential secret", e).with_request_id(rid.clone()),
         )?);
 
-    let result =
-        probe::probe_models(&provider.base_url, &merged_headers, Some(secret.as_str())).await;
+    let result = match crate::connectors::health_probe(
+        &state.pool,
+        &state.secrets,
+        &row.provider_id,
+        &row.id,
+    )
+    .await
+    .map_err(|e| e.into_api_error(rid.clone()))?
+    {
+        Some(result) => result,
+        None => {
+            probe::probe_models(&provider.base_url, &merged_headers, Some(secret.as_str())).await
+        }
+    };
     let row = catalog::record_credential_test(
         &state.pool,
         &Actor {

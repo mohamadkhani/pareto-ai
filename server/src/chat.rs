@@ -415,7 +415,7 @@ async fn load_credentials(
     let placeholders = vec!["?"; provider_ids.len()].join(", ");
     let sql = format!(
         "SELECT id, provider_id, secret_cipher, headers_json, cooldown_until, balance_usd, \
-                balance_low_threshold \
+                balance_low_threshold, balance_gate \
          FROM provider_credentials WHERE provider_id IN ({placeholders}) \
          ORDER BY provider_id, id"
     );
@@ -624,6 +624,7 @@ struct CredentialRow {
     cooldown_until: Option<String>,
     balance_usd: Option<f64>,
     balance_low_threshold: Option<f64>,
+    balance_gate: String,
 }
 
 /// The provider's credentials for one offering in attempt order: not cooled
@@ -643,7 +644,7 @@ fn ordered_credentials(
             .is_some_and(|until| until > now)
     };
     let open = |row: &CredentialRow| breaker.is_open(&row.id, offering_id, Instant::now());
-    let mut ordered: Vec<&CredentialRow> = rows.iter().collect();
+    let mut ordered: Vec<&CredentialRow> = rows.iter().filter(|row| !balance_blocks(row)).collect();
     ordered.sort_by_key(|row| (open(row), cooled(row)));
     ordered
         .into_iter()
@@ -659,6 +660,14 @@ fn ordered_credentials(
             }
         })
         .collect()
+}
+
+/// D42 balance gate: only a credential explicitly set to `block` whose stored
+/// balance is at or below zero is skipped. The default `warn` gate never
+/// changes routing, and an unavailable balance (`NULL`, `balance_available =
+/// 0`) is unknown rather than zero, so it never blocks either.
+fn balance_blocks(row: &CredentialRow) -> bool {
+    row.balance_gate == "block" && row.balance_usd.is_some_and(|balance| balance <= 0.0)
 }
 
 /// The provider credential to use for one offering: the first entry of
@@ -3859,6 +3868,7 @@ mod tests {
                 balance_usd: None,
                 balance_source: None,
                 balance_low_threshold: None,
+                balance_gate: None,
             },
         )
         .await
@@ -3884,6 +3894,7 @@ mod tests {
                 balance_usd: None,
                 balance_source: None,
                 balance_low_threshold: None,
+                balance_gate: None,
             },
         )
         .await
@@ -7470,6 +7481,7 @@ mod tests {
             cooldown_until: cooled.then(|| "2999-01-01T00:00:00Z".to_string()),
             balance_usd: None,
             balance_low_threshold: None,
+            balance_gate: "warn".to_string(),
         };
         let now = "2026-01-01T00:00:00Z";
 
@@ -7500,10 +7512,66 @@ mod tests {
         );
     }
 
+    /// D42: `warn` is advisory even at a zero balance; `block` skips only a
+    /// credential whose stored balance is at or below zero. An unavailable
+    /// balance (NULL) is unknown and never blocks.
+    #[test]
+    fn balance_gate_warns_by_default_and_blocks_only_when_opted_in() {
+        use crate::breaker::{BreakerConfig, BreakerRegistry};
+
+        let breaker = BreakerRegistry::new(BreakerConfig {
+            threshold: 1,
+            cooldown: Duration::from_secs(60),
+        });
+        let row = |id: &str, balance: Option<f64>, gate: &str| CredentialRow {
+            id: id.to_string(),
+            provider_id: "provider".to_string(),
+            secret_cipher: "cipher".to_string(),
+            headers_json: None,
+            cooldown_until: None,
+            balance_usd: balance,
+            balance_low_threshold: None,
+            balance_gate: gate.to_string(),
+        };
+        let now = "2026-01-01T00:00:00Z";
+
+        // Warn (the default) keeps an exhausted credential in rotation.
+        let rows = vec![row("a", Some(0.0), "warn")];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("warn never blocks")
+                .id,
+            "a"
+        );
+
+        // Block skips the exhausted credential and falls through to a healthy
+        // one, even when the blocked id sorts first.
+        let rows = vec![row("a", Some(-0.5), "block"), row("b", Some(4.0), "warn")];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("the healthy credential serves")
+                .id,
+            "b"
+        );
+
+        // All credentials blocked at zero: nothing is left to attempt.
+        let rows = vec![row("a", Some(0.0), "block"), row("b", Some(0.0), "block")];
+        assert!(pick_credential(&rows, "offering", now, &breaker).is_none());
+
+        // An unavailable balance stores NULL; `block` must not read that as
+        // zero and refuse traffic (D42).
+        let rows = vec![row("a", None, "block")];
+        assert_eq!(
+            pick_credential(&rows, "offering", now, &breaker)
+                .expect("unknown balance is not zero")
+                .id,
+            "a"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // M5: combo models and the circuit breaker
     // -----------------------------------------------------------------------
-
     /// Creates a combo and returns its id.
     async fn combo(
         s: &Seeded,

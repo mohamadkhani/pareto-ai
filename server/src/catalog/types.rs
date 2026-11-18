@@ -68,6 +68,15 @@ pub struct CredentialRow {
     pub balance_updated_at: Option<String>,
     pub balance_updated_by: Option<String>,
     pub balance_low_threshold: Option<f64>,
+    /// 1 when the provider said the balance is usable, 0 when it said
+    /// unavailable (or the last fetch failed). Never means "balance is zero".
+    pub balance_available: Option<i64>,
+    pub balance_currency: Option<String>,
+    pub balance_error: Option<String>,
+    pub balance_fetched_at: Option<String>,
+    /// `warn` (advisory, never affects routing) or `block` (skip this
+    /// credential once its balance is at or below zero).
+    pub balance_gate: String,
     pub status: String,
     pub cooldown_until: Option<String>,
     pub last_tested_at: Option<String>,
@@ -93,6 +102,11 @@ impl std::fmt::Debug for CredentialRow {
             .field("balance_updated_at", &self.balance_updated_at)
             .field("balance_updated_by", &self.balance_updated_by)
             .field("balance_low_threshold", &self.balance_low_threshold)
+            .field("balance_available", &self.balance_available)
+            .field("balance_currency", &self.balance_currency)
+            .field("balance_error", &self.balance_error)
+            .field("balance_fetched_at", &self.balance_fetched_at)
+            .field("balance_gate", &self.balance_gate)
             .field("status", &self.status)
             .field("cooldown_until", &self.cooldown_until)
             .field("last_tested_at", &self.last_tested_at)
@@ -193,6 +207,18 @@ pub struct ProviderView {
     pub last_discovery_at: Option<String>,
     pub last_discovery_created: Option<i64>,
     pub last_discovery_unchanged: Option<i64>,
+    /// Configured connectors, newest kinds first (`catalog`, `balance`,
+    /// `health`). Empty when none is configured; additive field for D42.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connectors: Vec<crate::connectors::ConnectorSummary>,
+}
+
+impl ProviderView {
+    /// Attaches the provider's connector summaries to the view.
+    pub fn with_connectors(mut self, connectors: Vec<crate::connectors::ConnectorSummary>) -> Self {
+        self.connectors = connectors;
+        self
+    }
 }
 
 impl From<&ProviderRow> for ProviderView {
@@ -208,6 +234,7 @@ impl From<&ProviderRow> for ProviderView {
             last_discovery_at: row.last_discovery_at.clone(),
             last_discovery_created: row.last_discovery_created,
             last_discovery_unchanged: row.last_discovery_unchanged,
+            connectors: Vec::new(),
         }
     }
 }
@@ -230,6 +257,15 @@ pub struct CredentialView {
     pub balance_updated_at: Option<String>,
     pub balance_updated_by: Option<String>,
     pub balance_low_threshold: Option<f64>,
+    /// Last provider-reported availability: `true` usable, `false`
+    /// unavailable, `null` unknown. Unavailable is never a zero balance.
+    pub balance_available: Option<bool>,
+    pub balance_currency: Option<String>,
+    /// Why the last provider balance fetch failed; cleared on success.
+    pub balance_error: Option<String>,
+    pub balance_fetched_at: Option<String>,
+    /// `warn` (advisory) or `block` (routing skips an exhausted credential).
+    pub balance_gate: String,
     /// Last health-probe result: `unknown`, `ok`, or `error`.
     pub status: String,
     pub cooldown_until: Option<String>,
@@ -253,6 +289,11 @@ impl From<&CredentialRow> for CredentialView {
             balance_updated_at: row.balance_updated_at.clone(),
             balance_updated_by: row.balance_updated_by.clone(),
             balance_low_threshold: row.balance_low_threshold,
+            balance_available: row.balance_available.map(|value| value != 0),
+            balance_currency: row.balance_currency.clone(),
+            balance_error: row.balance_error.clone(),
+            balance_fetched_at: row.balance_fetched_at.clone(),
+            balance_gate: row.balance_gate.clone(),
             status: row.status.clone(),
             cooldown_until: row.cooldown_until.clone(),
             last_tested_at: row.last_tested_at.clone(),
@@ -456,6 +497,8 @@ pub struct CredentialInput {
     /// `manual` (default), `provider_api`, or `unknown`.
     pub balance_source: Option<String>,
     pub balance_low_threshold: Option<f64>,
+    /// `warn` (default) or `block`; see decision D42.
+    pub balance_gate: Option<String>,
 }
 
 /// Redacted: the secret is a mask and headers print names only.
@@ -469,6 +512,7 @@ impl std::fmt::Debug for CredentialInput {
             .field("balance_usd", &self.balance_usd)
             .field("balance_source", &self.balance_source)
             .field("balance_low_threshold", &self.balance_low_threshold)
+            .field("balance_gate", &self.balance_gate)
             .finish()
     }
 }
@@ -484,6 +528,8 @@ pub struct CredentialPatch {
     pub balance_usd: Option<f64>,
     pub balance_source: Option<String>,
     pub balance_low_threshold: Option<f64>,
+    /// `warn` (default) or `block`; see decision D42.
+    pub balance_gate: Option<String>,
 }
 
 /// Redacted: the secret is a mask and headers print names only.
@@ -497,6 +543,7 @@ impl std::fmt::Debug for CredentialPatch {
             .field("balance_usd", &self.balance_usd)
             .field("balance_source", &self.balance_source)
             .field("balance_low_threshold", &self.balance_low_threshold)
+            .field("balance_gate", &self.balance_gate)
             .finish()
     }
 }
@@ -708,6 +755,7 @@ mod tests {
             balance_usd: None,
             balance_source: None,
             balance_low_threshold: None,
+            balance_gate: None,
         };
         let printed = format!("{input:?}");
         assert!(!printed.contains(SECRET), "{printed}");
@@ -738,6 +786,11 @@ mod tests {
             balance_updated_at: None,
             balance_updated_by: None,
             balance_low_threshold: None,
+            balance_available: None,
+            balance_currency: None,
+            balance_error: None,
+            balance_fetched_at: None,
+            balance_gate: "warn".to_string(),
             status: "unknown".to_string(),
             cooldown_until: None,
             last_tested_at: None,

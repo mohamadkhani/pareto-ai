@@ -145,6 +145,7 @@ async fn seed(app: &TestApp, uid: &str, base_url: &str) {
             balance_usd: None,
             balance_source: None,
             balance_low_threshold: None,
+            balance_gate: None,
         },
     )
     .await

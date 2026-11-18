@@ -1,0 +1,665 @@
+<ui-dialog
+  [open]="true"
+  [title]="'Connectors — ' + provider().name"
+  (closed)="close()"
+  ariaLabel="Provider connectors"
+>
+  @if (loadError()) {
+    <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="loadError.set(null)">
+      {{ loadError() }}
+    </ui-banner>
+  }
+  @if (error()) {
+    <ui-banner tone="danger" actionLabel="Dismiss" (actioned)="error.set(null)">
+      {{ error() }}
+    </ui-banner>
+  }
+  @if (notice()) {
+    <ui-banner tone="success" actionLabel="Dismiss" (actioned)="notice.set(null)">
+      {{ notice() }}
+    </ui-banner>
+  }
+
+  <p class="intro">
+    Connectors map this provider's own payloads to our prices, balance, and health answers. Nothing
+    is written until you save; sample and preview only read the provider.
+  </p>
+
+  <ui-tabs [tabs]="tabs" [selected]="tab()" (selectedChange)="setTab($event)" label="Connector">
+    @if (tab() === 'catalog') {
+      @let form = forms().catalog;
+      @let catalog = form.catalog;
+
+      <div class="form-stack">
+        <div class="template-row">
+          <ui-field
+            label="Template"
+            hint="Selecting a template prefills the fields; everything stays editable."
+          >
+            <ui-select
+              [id]="'connector-catalog-template'"
+              [value]="form.templateId"
+              (valueChange)="selectTemplate('catalog', $event)"
+            >
+              <option value="">Custom</option>
+              @for (template of templatesFor('catalog'); track template.id) {
+                <option [value]="template.id">{{ template.label }}</option>
+              }
+            </ui-select>
+          </ui-field>
+          <ui-button size="sm" [disabled]="currentSample() === null" (clicked)="detectTemplate()">
+            Detect
+          </ui-button>
+        </div>
+        @if (templateDescription('catalog'); as description) {
+          <p class="note">{{ description }}</p>
+        }
+
+        <ng-container
+          *ngTemplateOutlet="connection; context: { $implicit: 'catalog', form: form }"
+        ></ng-container>
+
+        <h3 class="section-title">Price pointers</h3>
+        <p class="note">
+          Pick a field, then click a number or string in the sample below. Pointers are relative to
+          one model entry.
+        </p>
+
+        <div class="pointer-grid">
+          @for (field of catalogFields; track field.key) {
+            <div class="pointer-row" [class.is-active]="catalog.active === field.key">
+              <div class="pointer-head">
+                <span class="pointer-label">{{ field.label }}</span>
+                @if (catalog.active === field.key) {
+                  <span class="picking">pick from sample</span>
+                }
+                <ui-button size="sm" variant="ghost" (clicked)="focusCatalogField(field.key)">
+                  Pick
+                </ui-button>
+              </div>
+              <ui-input
+                [id]="'connector-catalog-' + field.key"
+                [value]="catalog[field.key]"
+                placeholder="/path/to/value"
+                [ariaLabel]="field.label + ' pointer'"
+                (valueChange)="setCatalog(field.key, $event)"
+              />
+              @if (sampleValue(catalog[field.key]); as value) {
+                <span class="sample-value">sample: {{ value }}</span>
+              }
+            </div>
+          }
+        </div>
+
+        @if (tier(); as tierInfo) {
+          <div class="tier-helper" role="group" aria-label="Tier helper">
+            <div>
+              <span class="pointer-label">Tier</span>
+              <p class="note">
+                The picked pointers share <code>{{ tierInfo.parentPointer }}</code>. Switching
+                rewrites that segment; the chosen tier becomes this provider's billed price.
+              </p>
+            </div>
+            <div class="tier-options">
+              @for (option of tierInfo.options; track option) {
+                <ui-button
+                  size="sm"
+                  [variant]="option === tierInfo.current ? 'primary' : 'ghost'"
+                  [ariaExpanded]="option === tierInfo.current"
+                  (clicked)="rewriteTier(option)"
+                >
+                  {{ option }}
+                </ui-button>
+              }
+            </div>
+          </div>
+        }
+
+        <h3 class="section-title">Unit and format</h3>
+        <div class="unit-grid">
+          <ui-field
+            label="Source unit"
+            hint="How the provider publishes each price. Choose custom for a quoted multiplier."
+          >
+            <ui-select
+              [id]="'connector-unit-source'"
+              [value]="catalog.unit_source"
+              (valueChange)="setUnitSource($event)"
+            >
+              <option value="per_million_tokens">USD per 1M tokens</option>
+              <option value="per_token">USD per token</option>
+              <option value="custom">Custom multiplier</option>
+            </ui-select>
+          </ui-field>
+          <ui-field
+            label="Multiplier"
+            hint="Applied only for a custom source; for example 0.01 for prices quoted in cents."
+          >
+            <ui-input
+              [id]="'connector-unit-multiplier'"
+              type="number"
+              step="any"
+              [value]="catalog.unit_multiplier"
+              [ariaLabel]="'Unit multiplier'"
+              (valueChange)="setCatalog('unit_multiplier', $event)"
+            />
+          </ui-field>
+          <ui-field label="Currency" hint="ISO code of the published numbers, for example USD.">
+            <ui-input
+              [id]="'connector-unit-currency'"
+              [value]="catalog.unit_currency"
+              [ariaLabel]="'Unit currency'"
+              (valueChange)="setCatalog('unit_currency', $event)"
+            />
+          </ui-field>
+          <ui-field
+            label="FX to USD"
+            hint="Optional static rate. Non-USD prices feed routing only when a rate is set."
+          >
+            <ui-input
+              [id]="'connector-unit-fx'"
+              type="number"
+              step="any"
+              [value]="catalog.unit_fx"
+              placeholder="none"
+              [ariaLabel]="'FX rate to USD'"
+              (valueChange)="setCatalog('unit_fx', $event)"
+            />
+          </ui-field>
+          <ui-field label="Display symbol" hint="Used by the price table, for example $ or ¢.">
+            <ui-input
+              [id]="'connector-unit-symbol'"
+              [value]="catalog.unit_symbol"
+              [ariaLabel]="'Display symbol'"
+              (valueChange)="setCatalog('unit_symbol', $event)"
+            />
+          </ui-field>
+          <ui-field label="Decimals" hint="How many decimals the table shows (0–8).">
+            <ui-input
+              [id]="'connector-unit-decimals'"
+              type="number"
+              min="0"
+              max="8"
+              [value]="catalog.unit_decimals"
+              [ariaLabel]="'Display decimals'"
+              (valueChange)="setCatalog('unit_decimals', $event)"
+            />
+          </ui-field>
+        </div>
+        <ui-field label="Note" hint="A reminder shown in the dialog and the price table.">
+          <ui-input
+            [id]="'connector-unit-note'"
+            placeholder="quoted in cents — verify against an invoice"
+            [value]="catalog.unit_note"
+            [ariaLabel]="'Unit note'"
+            (valueChange)="setCatalog('unit_note', $event)"
+          />
+        </ui-field>
+        <p class="example" aria-live="polite">{{ example() }}</p>
+        <p class="note">{{ unitFactorLabel() }}</p>
+        @if (multiplierWarning(); as warning) {
+          <ui-banner tone="warning">{{ warning }}</ui-banner>
+        }
+        @if (nonUsdHint(); as hint) {
+          <ui-banner tone="warning">{{ hint }}</ui-banner>
+        }
+
+        <ui-field
+          label="Refresh after model discovery"
+          hint="Runs the price refresh after an applied discovery, not after a dry run."
+        >
+          <ui-switch
+            label="Apply prices after discovery"
+            [checked]="catalog.apply_on_discovery"
+            (checkedChange)="setCatalogFlag('apply_on_discovery', $event)"
+          />
+        </ui-field>
+
+        <div class="preview-actions">
+          <ui-button [loading]="isBusy('test')" (clicked)="runTest()">Preview prices</ui-button>
+          @if (summary(); as summary) {
+            <span class="summary" aria-live="polite">{{ summary }}</span>
+          }
+        </div>
+
+        <ng-container
+          *ngTemplateOutlet="warnings; context: { $implicit: allWarnings() }"
+        ></ng-container>
+
+        @if (resultOf('catalog'); as result) {
+          @if (result.samples.length === 0) {
+            <ui-banner tone="warning">
+              No entries resolved. Check the entries and model id pointers, then preview again.
+            </ui-banner>
+          } @else {
+            <ui-table>
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Model id</th>
+                    <th scope="col" class="num">Raw input</th>
+                    <th scope="col" class="num">Converted input /M</th>
+                    <th scope="col" class="num">Raw output</th>
+                    <th scope="col" class="num">Converted output /M</th>
+                    <th scope="col">Warnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (sample of result.samples; track $index) {
+                    <tr [class.is-warning]="sample.warnings.length > 0 || sample.error !== null">
+                      <td>
+                        {{ sample.model_id ?? '—' }}
+                        @if (sample.variable_price) {
+                          <ui-badge tone="warning">variable</ui-badge>
+                        }
+                      </td>
+                      <td class="num">{{ sample.raw.input ?? '—' }}</td>
+                      <td class="num">
+                        {{ formattedSample(sample.converted_per_m.input) }}
+                      </td>
+                      <td class="num">{{ sample.raw.output ?? '—' }}</td>
+                      <td class="num">
+                        {{ formattedSample(sample.converted_per_m.output) }}
+                      </td>
+                      <td class="warnings-cell">
+                        @if (sample.error !== null) {
+                          <span class="warning-text">{{ sample.error }}</span>
+                        }
+                        @for (warning of sample.warnings; track $index) {
+                          <span class="warning-text">{{ warning }}</span>
+                        }
+                        @if (sample.error === null && sample.warnings.length === 0) {
+                          <span class="muted">—</span>
+                        }
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </ui-table>
+          }
+        }
+        @if (testError('catalog'); as message) {
+          <ui-banner tone="danger">{{ message }}</ui-banner>
+        }
+
+        @if (priceRefresh(); as refresh) {
+          <ui-banner [tone]="refresh.error === null && refresh.result?.ok ? 'success' : 'danger'">
+            {{ priceRefreshBanner(refresh) }}
+          </ui-banner>
+        }
+      </div>
+    }
+
+    @if (tab() === 'balance') {
+      @let form = forms().balance;
+      @let balance = form.balance;
+
+      <div class="form-stack">
+        <div class="template-row">
+          <ui-field label="Template" hint="A template prefills the URL and pointers.">
+            <ui-select
+              [id]="'connector-balance-template'"
+              [value]="form.templateId"
+              (valueChange)="selectTemplate('balance', $event)"
+            >
+              <option value="">Custom</option>
+              @for (template of templatesFor('balance'); track template.id) {
+                <option [value]="template.id">{{ template.label }}</option>
+              }
+            </ui-select>
+          </ui-field>
+          <ui-button size="sm" [disabled]="currentSample() === null" (clicked)="detectTemplate()">
+            Detect
+          </ui-button>
+        </div>
+        @if (templateDescription('balance'); as description) {
+          <p class="note">{{ description }}</p>
+        }
+
+        <ng-container
+          *ngTemplateOutlet="connection; context: { $implicit: 'balance', form: form }"
+        ></ng-container>
+
+        <h3 class="section-title">Balance pointers</h3>
+        <div class="pointer-grid">
+          @for (field of balanceFields; track field.key) {
+            <div class="pointer-row" [class.is-active]="balance.active === field.key">
+              <div class="pointer-head">
+                <span class="pointer-label">{{ field.label }}</span>
+                @if (balance.active === field.key) {
+                  <span class="picking">pick from sample</span>
+                }
+                <ui-button size="sm" variant="ghost" (clicked)="focusBalanceField(field.key)">
+                  Pick
+                </ui-button>
+              </div>
+              <ui-input
+                [id]="'connector-balance-' + field.key"
+                [value]="balance[field.key]"
+                placeholder="/path/to/value"
+                [ariaLabel]="field.label + ' pointer'"
+                (valueChange)="setBalance(field.key, $event)"
+              />
+              @if (sampleValue(balance[field.key]); as value) {
+                <span class="sample-value">sample: {{ value }}</span>
+              }
+            </div>
+          }
+          <div class="pointer-row">
+            <div class="pointer-head">
+              <span class="pointer-label">Currency</span>
+            </div>
+            <ui-input
+              [id]="'connector-balance-currency'"
+              [value]="balance.currency"
+              placeholder="USD or /currency"
+              [ariaLabel]="'Balance currency or pointer'"
+              (valueChange)="setBalance('currency', $event)"
+            />
+            <span class="sample-value">A literal code or a pointer to one.</span>
+          </div>
+          <div class="pointer-row">
+            <div class="pointer-head">
+              <span class="pointer-label">Refresh every (seconds)</span>
+            </div>
+            <ui-input
+              [id]="'connector-balance-refresh'"
+              type="number"
+              inputmode="numeric"
+              [value]="balance.refresh_seconds"
+              placeholder="900"
+              [ariaLabel]="'Balance refresh seconds'"
+              (valueChange)="setBalance('refresh_seconds', $event)"
+            />
+          </div>
+        </div>
+
+        <h3 class="section-title">Balance policy</h3>
+        <p class="note">
+          <strong>Warn</strong> (default) shows the balance and a low-balance warning but never
+          changes routing. <strong>Block</strong> makes routing skip this credential once the
+          provider reports no available balance — only use it when you trust this number.
+        </p>
+        @if (credentials().length === 0) {
+          <p class="empty-note">No credentials yet; add one on the provider page.</p>
+        } @else {
+          <div class="gate-list">
+            @for (credential of credentials(); track credential.id) {
+              <div class="gate-row">
+                <div class="gate-label">
+                  <span>{{ credential.label }}</span>
+                  <span class="gate-balance">{{ balanceLabel(credential) }}</span>
+                  @if (balanceDetail(credential); as detail) {
+                    <span class="gate-detail">{{ detail }}</span>
+                  }
+                  @if (credential.balance_fetched_at !== null) {
+                    <span class="gate-detail">
+                      fetched {{ formatAge(credential.balance_fetched_at) }}
+                    </span>
+                  }
+                </div>
+                <ui-field [label]="'Balance policy for ' + credential.label">
+                  <ui-select
+                    [id]="'balance-gate-' + credential.id"
+                    [value]="credential.balance_gate"
+                    [disabled]="gateSaving() !== null"
+                    (valueChange)="setGate(credential, $event)"
+                  >
+                    <option value="warn">warn</option>
+                    <option value="block">block</option>
+                  </ui-select>
+                </ui-field>
+                <ui-button
+                  size="sm"
+                  [loading]="balanceRefreshing() === credential.id"
+                  [disabled]="balanceRefreshing() !== null"
+                  (clicked)="refreshOneBalance(credential)"
+                >
+                  Refresh balance
+                </ui-button>
+              </div>
+            }
+          </div>
+          <div class="preview-actions">
+            <ui-button
+              [loading]="balanceRefreshing() === 'all'"
+              [disabled]="balanceRefreshing() !== null"
+              (clicked)="refreshBalances()"
+            >
+              Refresh all balances
+            </ui-button>
+            <ui-button [loading]="isBusy('test')" (clicked)="runTest()">Test balance</ui-button>
+          </div>
+        }
+
+        @if (resultOf('balance'); as result) {
+          @if (result.balance !== null) {
+            <dl class="balance-result">
+              <div>
+                <dt>Available</dt>
+                <dd>{{ result.balance.available ? 'yes' : 'no' }}</dd>
+              </div>
+              <div>
+                <dt>Balance</dt>
+                <dd>{{ formattedBalance(result.balance.balance_usd, result.balance.currency) }}</dd>
+              </div>
+              <div>
+                <dt>Currency</dt>
+                <dd>{{ result.balance.currency }}</dd>
+              </div>
+              <div>
+                <dt>Period spend</dt>
+                <dd>
+                  {{ formattedBalance(result.balance.period_spend, result.balance.currency) }}
+                </dd>
+              </div>
+              <div>
+                <dt>Burn rate</dt>
+                <dd>{{ formattedBalance(result.balance.burn_rate, result.balance.currency) }}</dd>
+              </div>
+              <div>
+                <dt>Days remaining</dt>
+                <dd>
+                  {{
+                    result.balance.days_remaining === null
+                      ? '—'
+                      : formattedNumber(result.balance.days_remaining)
+                  }}
+                </dd>
+              </div>
+            </dl>
+          }
+        }
+        @if (testError('balance'); as message) {
+          <ui-banner tone="danger">{{ message }}</ui-banner>
+        }
+      </div>
+    }
+
+    @if (tab() === 'health') {
+      @let form = forms().health;
+      @let health = form.health;
+
+      <div class="form-stack">
+        <ng-container
+          *ngTemplateOutlet="connection; context: { $implicit: 'health', form: form }"
+        ></ng-container>
+
+        <h3 class="section-title">Health check</h3>
+        <p class="note">
+          The credential Test action calls this endpoint. A 2xx response is healthy unless the
+          optional pointer says otherwise.
+        </p>
+        <div class="pointer-row" [class.is-active]="health.active === 'ok_pointer'">
+          <div class="pointer-head">
+            <span class="pointer-label">OK pointer (optional)</span>
+            @if (health.active === 'ok_pointer') {
+              <span class="picking">pick from sample</span>
+            }
+            <ui-button size="sm" variant="ghost" (clicked)="focusHealthField()">Pick</ui-button>
+          </div>
+          <ui-input
+            [id]="'connector-health-ok'"
+            [value]="health.ok_pointer"
+            placeholder="/status/ok"
+            [ariaLabel]="'Health OK pointer'"
+            (valueChange)="setHealth('ok_pointer', $event)"
+          />
+          @if (sampleValue(health.ok_pointer); as value) {
+            <span class="sample-value">sample: {{ value }}</span>
+          }
+        </div>
+
+        <div class="preview-actions">
+          <ui-button [loading]="isBusy('test')" (clicked)="runTest()">Test health</ui-button>
+        </div>
+
+        @if (resultOf('health'); as result) {
+          <ui-banner [tone]="result.health?.ok ? 'success' : 'danger'">
+            {{ result.health?.ok ? 'The health check passed.' : 'The health check failed.' }}
+            @if (result.health?.detail; as detail) {
+              {{ detail }}
+            }
+          </ui-banner>
+        }
+        @if (testError('health'); as message) {
+          <ui-banner tone="danger">{{ message }}</ui-banner>
+        }
+      </div>
+    }
+  </ui-tabs>
+
+  <div ui-dialog-actions>
+    <ui-button variant="ghost" (clicked)="close()">Close</ui-button>
+    @if (tab() === 'catalog') {
+      <ui-button
+        [loading]="isBusy('refresh')"
+        [disabled]="!forms().catalog.configured"
+        (clicked)="refreshPrices()"
+      >
+        Refresh prices
+      </ui-button>
+    }
+    <ui-button variant="primary" [loading]="isBusy('save')" (clicked)="save()">
+      Save {{ tab() === 'catalog' ? 'prices' : tab() }} connector
+    </ui-button>
+  </div>
+</ui-dialog>
+
+<ng-template #connection let-kind let-form="form">
+  <ui-field
+    label="URL"
+    hint="An absolute http(s) URL, or a path beginning with / resolved against the provider's base URL."
+  >
+    <ui-input
+      [id]="'connector-url-' + kind"
+      type="text"
+      [value]="formFor(kind).url"
+      placeholder="/models or https://api.example.com/v1/models"
+      [ariaLabel]="'Connector URL'"
+      (valueChange)="setUrl(kind, $event)"
+    />
+  </ui-field>
+
+  <div class="headers">
+    <span class="section-title">Headers</span>
+    <p class="note">
+      Extra request headers. Values are write-only here and may contain
+      <code>{{ '{{secret}}' }}</code>, replaced with the credential's secret at fetch time.
+    </p>
+    @for (row of form.headers; track $index; let i = $index) {
+      <div class="header-row">
+        <ui-input
+          [value]="row.name"
+          placeholder="Header name"
+          [ariaLabel]="'Header name ' + (i + 1)"
+          (valueChange)="setHeader(kind, i, 'name', $event)"
+        />
+        <ui-input
+          type="password"
+          autocomplete="off"
+          [value]="row.value"
+          [placeholder]="row.value === '' ? 'Value or {{secret}}' : 'stored (hidden)'"
+          [ariaLabel]="'Header value ' + (i + 1)"
+          (valueChange)="setHeader(kind, i, 'value', $event)"
+        />
+        <ui-button size="sm" (clicked)="removeHeader(kind, i)">Remove</ui-button>
+      </div>
+    }
+    <ui-button size="sm" (clicked)="addHeader(kind)">Add header</ui-button>
+  </div>
+
+  <ui-field
+    label="Allow private addresses"
+    hint="Required only for a local test provider on loopback or a private network."
+  >
+    <ui-switch
+      label="Allow private addresses"
+      [checked]="form.allowPrivate"
+      (checkedChange)="setAllowPrivate(kind, $event)"
+    />
+  </ui-field>
+  @if (form.allowPrivate) {
+    <ui-banner tone="warning">
+      Private and loopback destinations are allowed for this connector. Use it only with a provider
+      you control, never with a public endpoint.
+    </ui-banner>
+  }
+
+  <ui-field
+    label="Connector enabled"
+    hint="A disabled connector is kept but is not used for refresh or credential tests."
+  >
+    <ui-switch
+      label="Connector enabled"
+      [checked]="form.enabled"
+      (checkedChange)="setEnabled(kind, $event)"
+    />
+  </ui-field>
+
+  <div class="preview-actions">
+    <ui-button [loading]="isBusy('sample')" (clicked)="fetchSample()">Fetch sample</ui-button>
+    @if (form.configured) {
+      <span class="configured">
+        saved {{ formatAge(form.updatedAt) }}
+        @if (form.updatedBy !== null) {
+          by {{ form.updatedBy }}
+        }
+      </span>
+    }
+  </div>
+  @if (currentSample(); as sample) {
+    @if (sample.error !== null) {
+      <ui-banner tone="danger">{{ sample.error }}</ui-banner>
+    } @else {
+      <details class="sample" [open]="true">
+        <summary>
+          Sample · {{ sample.status }} · {{ sample.bytes }} bytes ·
+          {{ formatTime(sample.fetchedAt) }}
+          @if (sample.truncated) {
+            <ui-badge tone="warning">truncated</ui-badge>
+          }
+        </summary>
+        <app-json-tree
+          [value]="sample.document"
+          [pickable]="true"
+          [pickedPointer]="activePointer()"
+          (picked)="pick($event)"
+        />
+      </details>
+    }
+  }
+</ng-template>
+
+<ng-template #warnings let-warnings>
+  @if (warnings.length > 0) {
+    <ui-banner tone="warning">
+      <ul class="warning-list">
+        @for (warning of warnings; track $index) {
+          <li>{{ warning }}</li>
+        }
+      </ul>
+    </ui-banner>
+  }
+</ng-template>

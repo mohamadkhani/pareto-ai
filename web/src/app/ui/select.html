@@ -6,8 +6,9 @@
   [attr.name]="name() || null"
   [attr.aria-describedby]="describedBy()"
   [attr.aria-invalid]="invalid() ? 'true' : null"
-  [disabled]="disabled()"
-  (change)="onChange($event)"
+  [disabled]="isDisabled()"
+  (change)="onChangeEvent($event)"
+  (blur)="onBlur()"
 >
   <ng-content />
 </select>

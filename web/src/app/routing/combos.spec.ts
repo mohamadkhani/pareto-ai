@@ -38,6 +38,7 @@ const provider: Provider = {
   last_discovery_at: null,
   last_discovery_created: null,
   last_discovery_unchanged: null,
+  connectors: [],
 };
 
 function modelFixture(overrides: Partial<Model> = {}): Model {

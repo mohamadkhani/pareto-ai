@@ -8,6 +8,7 @@ import {
   noContentResponse,
 } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
+import { BalanceCache } from './balance-cache';
 import type { Credential, DiscoverySummary, Offering, Provider } from './catalog.types';
 import { Providers } from './providers';
 
@@ -37,6 +38,7 @@ function providerFixture(overrides: Partial<Provider> = {}): Provider {
     last_discovery_at: null,
     last_discovery_created: null,
     last_discovery_unchanged: null,
+    connectors: [],
     ...overrides,
   };
 }
@@ -55,6 +57,11 @@ function credentialFixture(overrides: Partial<Credential> = {}): Credential {
     balance_updated_at: null,
     balance_updated_by: null,
     balance_low_threshold: null,
+    balance_available: null,
+    balance_currency: null,
+    balance_error: null,
+    balance_fetched_at: null,
+    balance_gate: 'warn',
     status: 'ok',
     last_tested_at: null,
     cooldown_until: null,
@@ -137,7 +144,10 @@ describe('Providers', () => {
     fetchMock.respond(jsonResponse(200, offerings));
   }
 
-  async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Providers>> {
+  async function create(
+    role: 'admin' | 'user' = 'admin',
+    prepare?: (cache: BalanceCache) => void,
+  ): Promise<ComponentFixture<Providers>> {
     TestBed.configureTestingModule({
       imports: [Providers],
       providers: [
@@ -148,6 +158,7 @@ describe('Providers', () => {
         ]),
       ],
     });
+    prepare?.(TestBed.inject(BalanceCache));
     await TestBed.compileComponents();
     const fixture = TestBed.createComponent(Providers);
     await fixture.whenStable();
@@ -384,6 +395,167 @@ describe('Providers', () => {
     expect(lastLoad?.textContent).toContain('+2 models');
     expect(lastLoad?.textContent).toContain('3 unchanged');
     expect(lastLoad?.textContent).not.toContain('never');
+  });
+
+  it('shows connector badges and a balance from the connector display', async () => {
+    const providerWithConnectors = providerFixture({
+      connectors: [
+        { kind: 'catalog', enabled: true, updated_at: '2026-01-01T00:00:00.000Z' },
+        { kind: 'balance', enabled: true, updated_at: '2026-01-01T00:00:00.000Z' },
+        { kind: 'health', enabled: false, updated_at: '2026-01-01T00:00:00.000Z' },
+      ],
+    });
+    fetchMock.respond(jsonResponse(200, [providerWithConnectors]));
+    fetchMock.respond(
+      jsonResponse(200, [
+        credentialFixture({
+          balance_usd: 3.5,
+          balance_available: true,
+          balance_currency: 'USD',
+          balance_low_threshold: 5,
+          balance_source: 'provider_api',
+        }),
+      ]),
+    );
+    fetchMock.respond(jsonResponse(200, []));
+    fetchMock.respond(
+      jsonResponse(200, {
+        provider_id: 'p1',
+        kind: 'catalog',
+        configured: true,
+        enabled: true,
+        config: {
+          url: '/models',
+          headers: {},
+          allow_private: false,
+          catalog: {
+            entries: '/data',
+            model_id: '/id',
+            input: '/price/input',
+            output: null,
+            cache_read: null,
+            cache_write: null,
+            reasoning: null,
+            unit: {
+              source: 'per_million_tokens',
+              multiplier: 1,
+              currency: 'USD',
+              fx_to_usd: null,
+              display: { symbol: '€', decimals: 2 },
+              note: null,
+            },
+            modalities_input: null,
+            modalities_output: null,
+            context_length: null,
+            max_output: null,
+            apply_on_discovery: false,
+            refresh_seconds: null,
+          },
+        },
+        updated_at: '2026-01-01T00:00:00.000Z',
+        updated_by: 'u1',
+      }),
+    );
+    const fixture = await create();
+    await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+
+    const badges = Array.from(root.querySelectorAll('.connector-badges .ui-badge'));
+    expect(badges.map((badge) => badge.textContent?.trim())).toEqual([
+      'prices',
+      'balance',
+      'health',
+    ]);
+    expect(badges[0].classList.contains('tone-success')).toBe(true);
+    expect(badges[2].classList.contains('tone-warning')).toBe(true);
+
+    const balance = root.querySelector('.provider-balance');
+    expect(balance?.textContent?.trim()).toBe('€3.50');
+    expect(balance?.classList.contains('is-low')).toBe(true);
+    expect(root.querySelector('.balance-cell')?.textContent).toContain('low');
+    // The display came from the catalog connector read.
+    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/catalog');
+  });
+
+  it('shows how many days a balance lasts when a refresh knows it', async () => {
+    queueLoad([providerFixture()], {
+      p1: [
+        credentialFixture({
+          balance_usd: 1.5,
+          balance_available: true,
+          balance_source: 'provider_api',
+        }),
+      ],
+    });
+    const fixture = await create('admin', (cache) =>
+      cache.set({
+        ok: true,
+        credential_id: 'c1',
+        available: true,
+        balance_usd: 1.5,
+        currency: 'USD',
+        period_spend: 3,
+        burn_rate: 0.5,
+        days_remaining: 2.4,
+        error: null,
+        fetched_at: '2026-01-01T00:00:00.000Z',
+      }),
+    );
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.querySelector('.balance-days')?.textContent?.trim()).toBe('runs out in 2 days');
+  });
+
+  it('renders an unavailable provider balance as unavailable, never zero', async () => {
+    fetchMock.respond(
+      jsonResponse(200, [
+        providerFixture({
+          connectors: [{ kind: 'catalog', enabled: true, updated_at: '2026-01-01T00:00:00.000Z' }],
+        }),
+      ]),
+    );
+    fetchMock.respond(
+      jsonResponse(200, [
+        credentialFixture({
+          balance_usd: null,
+          balance_available: false,
+          balance_source: 'provider_api',
+        }),
+      ]),
+    );
+    fetchMock.respond(jsonResponse(200, []));
+    fetchMock.respond(
+      jsonResponse(200, {
+        provider_id: 'p1',
+        kind: 'catalog',
+        configured: true,
+        enabled: true,
+        config: null,
+        updated_at: null,
+        updated_by: null,
+      }),
+    );
+    const fixture = await create();
+    await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+
+    const balance = root.querySelector('.provider-balance');
+    expect(balance?.textContent?.trim()).toBe('unavailable');
+    expect(balance?.classList.contains('is-unavailable')).toBe(true);
+    expect(root.textContent).not.toContain('$0.00');
+  });
+
+  it('opens the connectors dialog from the provider row', async () => {
+    queueLoad([providerFixture()]);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Connectors').click();
+    fixture.detectChanges();
+    await settle(fixture);
+
+    expect(root.textContent).toContain('Connectors — openrouter');
+    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/templates');
   });
 
   it('shows the upstream error message verbatim from a failed preview', async () => {

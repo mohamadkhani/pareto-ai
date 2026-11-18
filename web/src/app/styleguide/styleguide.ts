@@ -106,6 +106,10 @@ export class Styleguide {
   ];
 
   protected readonly inputValue = signal('pareto-ai');
+  protected readonly numberValue = signal('1000');
+  protected readonly dateValue = signal('2026-11-18');
+  protected readonly timeValue = signal('09:30');
+  protected readonly dateTimeValue = signal('2026-11-18T09:30');
   protected readonly textareaValue = signal('One offering per provider/model pair.');
   protected readonly selectValue = signal('openrouter');
   protected readonly switchOn = signal(true);

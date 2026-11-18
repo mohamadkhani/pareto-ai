@@ -21,7 +21,39 @@ import type {
   SyncOutcome,
   SyncStatus,
 } from './catalog.types';
+import type {
+  BalanceRefreshView,
+  ConnectorConfig,
+  ConnectorDraft,
+  ConnectorKind,
+  ConnectorTemplate,
+  ConnectorView,
+  ConnectorTestView,
+  PriceRefreshView,
+  ProviderBalancesView,
+  SampleView,
+} from './connectors.types';
 import type { ModelsOverview } from './overview.types';
+
+/**
+ * Copies a provider response field by field; the backend omits an empty
+ * `connectors` array, so the UI always sees one.
+ */
+function toProvider(raw: Provider): Provider {
+  return {
+    id: raw.id,
+    name: raw.name,
+    kind: raw.kind,
+    base_url: raw.base_url,
+    enabled: raw.enabled,
+    created_at: raw.created_at,
+    updated_at: raw.updated_at,
+    last_discovery_at: raw.last_discovery_at ?? null,
+    last_discovery_created: raw.last_discovery_created ?? null,
+    last_discovery_unchanged: raw.last_discovery_unchanged ?? null,
+    connectors: raw.connectors ?? [],
+  };
+}
 
 /**
  * Copies a credential response field by field so a stray `secret` (or any
@@ -41,6 +73,11 @@ function toCredential(raw: Credential): Credential {
     balance_updated_at: raw.balance_updated_at,
     balance_updated_by: raw.balance_updated_by,
     balance_low_threshold: raw.balance_low_threshold,
+    balance_available: raw.balance_available ?? null,
+    balance_currency: raw.balance_currency ?? null,
+    balance_error: raw.balance_error ?? null,
+    balance_fetched_at: raw.balance_fetched_at ?? null,
+    balance_gate: raw.balance_gate ?? 'warn',
     status: raw.status,
     last_tested_at: raw.last_tested_at,
     cooldown_until: raw.cooldown_until,
@@ -81,26 +118,31 @@ export class CatalogService {
   // --- providers -----------------------------------------------------------
 
   /** Lists every provider. Throws `ApiError` on failure. */
-  listProviders(): Promise<Provider[]> {
-    return requestJson<Provider[]>('/api/providers');
+  async listProviders(): Promise<Provider[]> {
+    const response = await requestJson<Provider[]>('/api/providers');
+    return response.map(toProvider);
   }
 
   /** Registers a provider and returns the created row. */
-  createProvider(input: ProviderInput): Promise<Provider> {
-    return requestJson<Provider>('/api/providers', {
-      method: 'POST',
-      body: input,
-      csrfToken: this.auth.csrfToken(),
-    });
+  async createProvider(input: ProviderInput): Promise<Provider> {
+    return toProvider(
+      await requestJson<Provider>('/api/providers', {
+        method: 'POST',
+        body: input,
+        csrfToken: this.auth.csrfToken(),
+      }),
+    );
   }
 
   /** Applies a partial provider update and returns the updated row. */
-  updateProvider(id: string, patch: ProviderPatch): Promise<Provider> {
-    return requestJson<Provider>(`/api/providers/${id}`, {
-      method: 'PATCH',
-      body: patch,
-      csrfToken: this.auth.csrfToken(),
-    });
+  async updateProvider(id: string, patch: ProviderPatch): Promise<Provider> {
+    return toProvider(
+      await requestJson<Provider>(`/api/providers/${id}`, {
+        method: 'PATCH',
+        body: patch,
+        csrfToken: this.auth.csrfToken(),
+      }),
+    );
   }
 
   /** Deletes a provider; its credentials and offerings cascade. */
@@ -282,5 +324,85 @@ export class CatalogService {
   /** Reads the last sync run and the snapshot's freshness. */
   syncStatus(): Promise<SyncStatus> {
     return requestJson<SyncStatus>('/api/sync/openrouter/status');
+  }
+
+  // --- provider connectors (D42, D44) --------------------------------------
+
+  /** Lists the shipped connector templates; they are generic and editable. */
+  connectorTemplates(providerId: string): Promise<ConnectorTemplate[]> {
+    return requestJson<ConnectorTemplate[]>(`/api/providers/${providerId}/connectors/templates`);
+  }
+
+  /** Reads one connector; `config` is null until the operator saves it. */
+  getConnector(providerId: string, kind: ConnectorKind): Promise<ConnectorView> {
+    return requestJson<ConnectorView>(`/api/providers/${providerId}/connectors/${kind}`);
+  }
+
+  /** Validates and stores one connector document. */
+  putConnector(
+    providerId: string,
+    kind: ConnectorKind,
+    config: ConnectorConfig,
+    enabled: boolean,
+  ): Promise<ConnectorView> {
+    return requestJson<ConnectorView>(`/api/providers/${providerId}/connectors/${kind}`, {
+      method: 'PUT',
+      body: { config, enabled },
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
+  /**
+   * Fetches a raw sample for the draft config (≤200 KiB). The body is JSON
+   * text; parsing happens in the dialog. Writes nothing.
+   */
+  sampleConnector(
+    providerId: string,
+    kind: ConnectorKind,
+    draft: ConnectorDraft = {},
+  ): Promise<SampleView> {
+    return requestJson<SampleView>(`/api/providers/${providerId}/connectors/${kind}/sample`, {
+      method: 'POST',
+      body: draft,
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
+  /** Previews extraction for a draft config. Writes nothing. */
+  testConnector(
+    providerId: string,
+    kind: ConnectorKind,
+    draft: ConnectorDraft = {},
+  ): Promise<ConnectorTestView> {
+    return requestJson<ConnectorTestView>(`/api/providers/${providerId}/connectors/${kind}/test`, {
+      method: 'POST',
+      body: draft,
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
+  /** Applies the catalog connector to the provider's offerings. */
+  refreshPrices(providerId: string, credentialId?: string): Promise<PriceRefreshView> {
+    return requestJson<PriceRefreshView>(`/api/providers/${providerId}/prices/refresh`, {
+      method: 'POST',
+      body: credentialId === undefined ? {} : { credential_id: credentialId },
+      csrfToken: this.auth.csrfToken(),
+    });
+  }
+
+  /** Refreshes one credential's provider-reported balance. */
+  refreshCredentialBalance(providerId: string, credentialId: string): Promise<BalanceRefreshView> {
+    return requestJson<BalanceRefreshView>(
+      `/api/providers/${providerId}/credentials/${credentialId}/balance/refresh`,
+      { method: 'POST', csrfToken: this.auth.csrfToken() },
+    );
+  }
+
+  /** Refreshes every credential's balance, isolating per-credential failures. */
+  refreshProviderBalances(providerId: string): Promise<ProviderBalancesView> {
+    return requestJson<ProviderBalancesView>(`/api/providers/${providerId}/balances/refresh`, {
+      method: 'POST',
+      csrfToken: this.auth.csrfToken(),
+    });
   }
 }

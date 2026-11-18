@@ -68,6 +68,44 @@ ui-fmt:
 dev-ui:
     cd web && pnpm start
 
+# ── Desktop shell (Tauri v2, D43) ───────────────────────────────────────────
+#
+# desktop/ bundles the unchanged gateway as a Tauri sidecar. Only the host
+# platform can be built here (Linux); Windows and macOS installers come from
+# .github/workflows/desktop.yml. The desktop crate has its own Cargo.lock and
+# downloads its crates on the first run, so these recipes do not use --offline.
+
+# install the Tauri CLI used by the desktop recipes (pnpm)
+desktop-setup:
+    cd desktop && pnpm install
+
+# build the gateway and place it where Tauri expects the sidecar
+desktop-sidecar: ui-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd server
+    cargo build --release --offline
+    triple="$(rustc -vV | sed -n 's/^host: //p')"
+    ext=""
+    case "$triple" in *windows*) ext=".exe" ;; esac
+    mkdir -p ../desktop/binaries
+    cp "target/release/gateway${ext}" "../desktop/binaries/pareto-gateway-${triple}${ext}"
+    echo "sidecar: desktop/binaries/pareto-gateway-${triple}${ext}"
+
+# run the desktop shell against a locally built gateway
+desktop-dev: desktop-sidecar
+    cd desktop && pnpm tauri dev
+
+# build the desktop installers for this host (deb, rpm, AppImage on Linux)
+desktop-build: desktop-sidecar
+    cd desktop && pnpm tauri build
+
+# format, lint and test the desktop shell (no bundling, no webview build)
+desktop-check:
+    cd desktop && cargo fmt --check
+    cd desktop && cargo clippy --all-targets -- -D warnings
+    cd desktop && cargo test
+
 # ── Gates ───────────────────────────────────────────────────────────────────
 
 # everything a change must pass before it counts as done

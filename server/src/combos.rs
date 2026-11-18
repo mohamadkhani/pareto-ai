@@ -1504,6 +1504,7 @@ mod tests {
                 balance_usd: None,
                 balance_source: None,
                 balance_low_threshold: None,
+                balance_gate: None,
             },
         )
         .await

@@ -34,8 +34,8 @@
                 [controlId]="'user-email'"
                 [error]="showCreateError('email') ? createFieldError('email') : ''"
               >
-                <input
-                  id="user-email"
+                <ui-input
+                  [id]="'user-email'"
                   type="email"
                   formControlName="email"
                   placeholder="you@example.com"
@@ -46,13 +46,13 @@
                 [controlId]="'user-name'"
                 [error]="showCreateError('display_name') ? createFieldError('display_name') : ''"
               >
-                <input id="user-name" type="text" formControlName="display_name" />
+                <ui-input [id]="'user-name'" type="text" formControlName="display_name" />
               </ui-field>
               <ui-field label="Role" [controlId]="'user-role'">
-                <select id="user-role" formControlName="role">
+                <ui-select [id]="'user-role'" formControlName="role">
                   <option value="user">user</option>
                   <option value="admin">admin</option>
-                </select>
+                </ui-select>
               </ui-field>
               <ui-field
                 label="Initial password"
@@ -60,8 +60,8 @@
                 [hint]="'At least ' + minLength + ' characters.'"
                 [error]="showCreateError('password') ? createFieldError('password') : ''"
               >
-                <input
-                  id="user-password"
+                <ui-input
+                  [id]="'user-password'"
                   type="password"
                   formControlName="password"
                   autocomplete="new-password"
@@ -90,13 +90,13 @@
                 [controlId]="'edit-name'"
                 [error]="showEditError() ? editFieldError() : ''"
               >
-                <input id="edit-name" type="text" formControlName="display_name" />
+                <ui-input [id]="'edit-name'" type="text" formControlName="display_name" />
               </ui-field>
               <ui-field label="Role" [controlId]="'edit-role'">
-                <select id="edit-role" formControlName="role">
+                <ui-select [id]="'edit-role'" formControlName="role">
                   <option value="user">user</option>
                   <option value="admin">admin</option>
-                </select>
+                </ui-select>
               </ui-field>
             </div>
             <ui-switch
@@ -131,8 +131,8 @@
             [hint]="'At least ' + minLength + ' characters.'"
             [error]="showResetError() ? resetFieldError() : ''"
           >
-            <input
-              id="reset-password"
+            <ui-input
+              [id]="'reset-password'"
               type="password"
               [formControl]="resetForm.controls.password"
               autocomplete="new-password"

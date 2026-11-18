@@ -8,6 +8,7 @@ import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
 import { UiSelect } from '../ui/select';
 import { UiTable } from '../ui/table';
 import { type TabItem, UiTabs } from '../ui/tabs';
@@ -61,7 +62,18 @@ function groupKey(group: UsageGroup, groupBy: UsageGroupBy): string {
 /** Usage reports: what was spent, by day, user, or offering. */
 @Component({
   selector: 'app-usage',
-  imports: [UiBadge, UiBanner, UiButton, UiCard, UiEmpty, UiField, UiSelect, UiTable, UiTabs],
+  imports: [
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiCard,
+    UiEmpty,
+    UiField,
+    UiInput,
+    UiSelect,
+    UiTable,
+    UiTabs,
+  ],
   templateUrl: './usage.html',
   styleUrl: './usage.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -153,22 +165,6 @@ export class Usage {
   protected onGroupByChange(value: string): void {
     this.groupBy.set(value as UsageGroupBy);
     void this.reload();
-  }
-
-  protected onFromChange(event: Event): void {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement)) {
-      return;
-    }
-    this.from.set(input.value);
-  }
-
-  protected onToChange(event: Event): void {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement)) {
-      return;
-    }
-    this.to.set(input.value);
   }
 
   /** Token counts with grouping separators. */

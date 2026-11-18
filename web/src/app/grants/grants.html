@@ -32,27 +32,27 @@
         <form [formGroup]="form" (ngSubmit)="save()" novalidate>
           <div class="form-grid">
             <ui-field label="Subject kind" [controlId]="'grant-subject-type'">
-              <select
-                id="grant-subject-type"
+              <ui-select
+                [id]="'grant-subject-type'"
                 formControlName="subject_type"
-                (change)="onSubjectTypeChange()"
+                (valueChange)="onSubjectTypeChange()"
               >
                 <option value="user">user</option>
                 <option value="api_key">api key</option>
-              </select>
+              </ui-select>
             </ui-field>
             @if (form.controls.subject_type.value === 'api_key') {
               <ui-field label="Key owner" [controlId]="'grant-key-owner'">
-                <select
-                  id="grant-key-owner"
+                <ui-select
+                  [id]="'grant-key-owner'"
                   formControlName="key_owner_id"
-                  (change)="onKeyOwnerChange()"
+                  (valueChange)="onKeyOwnerChange()"
                 >
                   <option value="">Choose an account…</option>
                   @for (user of users(); track user.id) {
                     <option [value]="user.id">{{ user.email }}</option>
                   }
-                </select>
+                </ui-select>
               </ui-field>
             }
             <ui-field
@@ -60,7 +60,7 @@
               [controlId]="'grant-subject'"
               [error]="showError('subject_id') ? fieldError('subject_id') : ''"
             >
-              <select id="grant-subject" formControlName="subject_id">
+              <ui-select [id]="'grant-subject'" formControlName="subject_id">
                 <option value="">
                   {{
                     form.controls.subject_type.value === 'user'
@@ -71,36 +71,36 @@
                 @for (option of subjectOptions(); track option.id) {
                   <option [value]="option.id">{{ option.label }}</option>
                 }
-              </select>
+              </ui-select>
             </ui-field>
             <ui-field label="Resource kind" [controlId]="'grant-resource-type'">
-              <select
-                id="grant-resource-type"
+              <ui-select
+                [id]="'grant-resource-type'"
                 formControlName="resource_type"
-                (change)="onResourceTypeChange()"
+                (valueChange)="onResourceTypeChange()"
               >
                 <option value="model">model</option>
                 <option value="offering">offering</option>
                 <option value="credential">credential</option>
-              </select>
+              </ui-select>
             </ui-field>
             <ui-field
               label="Resource"
               [controlId]="'grant-resource'"
               [error]="showError('resource_id') ? fieldError('resource_id') : ''"
             >
-              <select id="grant-resource" formControlName="resource_id">
+              <ui-select [id]="'grant-resource'" formControlName="resource_id">
                 <option value="">Choose a resource…</option>
                 @for (option of resourceOptions(); track option.id) {
                   <option [value]="option.id">{{ option.label }}</option>
                 }
-              </select>
+              </ui-select>
             </ui-field>
             <ui-field label="Mode" [controlId]="'grant-mode'">
-              <select id="grant-mode" formControlName="mode">
+              <ui-select [id]="'grant-mode'" formControlName="mode">
                 <option value="allow">allow</option>
                 <option value="deny">deny</option>
-              </select>
+              </ui-select>
             </ui-field>
           </div>
         </form>

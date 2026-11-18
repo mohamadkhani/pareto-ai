@@ -77,6 +77,13 @@ pub struct SyncPrice {
     pub cache_read_per_m: Option<f64>,
     pub cache_write_per_m: Option<f64>,
     pub request_fee: Option<f64>,
+    /// Reasoning-token component, when the connector maps one. Unknown stays
+    /// `NULL`; the OpenRouter sync leaves it unset.
+    pub reasoning_per_m: Option<f64>,
+    /// ISO currency of the stored amounts. Connector prices are USD after
+    /// conversion; a non-USD connector without FX stores NULL components and
+    /// its source currency (D44).
+    pub currency: String,
     /// The source published a negative ("variable price") component; the UI
     /// shows "variable" instead of a number.
     pub variable_price: bool,
@@ -98,7 +105,8 @@ const SELECT_PROVIDER_COLUMNS: &str = "id, name, kind, base_url, enabled, create
      last_discovery_at, last_discovery_created, last_discovery_unchanged";
 const SELECT_CREDENTIAL_COLUMNS: &str = "id, provider_id, label, secret_cipher, headers_json, \
      max_concurrency, balance_usd, balance_source, balance_updated_at, balance_updated_by, \
-     balance_low_threshold, status, cooldown_until, last_tested_at, created_at, updated_at";
+     balance_low_threshold, balance_available, balance_currency, balance_error, \
+     balance_fetched_at, balance_gate, status, cooldown_until, last_tested_at, created_at, updated_at";
 const SELECT_MODEL_COLUMNS: &str = "id, canonical_name, family, modalities_input, \
      modalities_output, context_length, max_output_tokens, capabilities_json, created_at, updated_at";
 const SELECT_OFFERING_COLUMNS: &str = "id, provider_id, model_id, upstream_model_id, \
@@ -236,6 +244,18 @@ fn validate_balance_source(raw: Option<&str>) -> Result<Option<String>, CatalogE
         Some(value @ ("manual" | "provider_api" | "unknown")) => Ok(Some(value.to_string())),
         Some(other) => Err(CatalogError::Invalid(format!(
             "balance_source must be manual, provider_api, or unknown (got {other:?})"
+        ))),
+    }
+}
+
+/// Validates `balance_gate` (D42): `warn` is the advisory default and `block`
+/// makes routing skip a credential whose stored balance is at or below zero.
+fn validate_balance_gate(raw: Option<&str>) -> Result<Option<String>, CatalogError> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value @ ("warn" | "block")) => Ok(Some(value.to_string())),
+        Some(other) => Err(CatalogError::Invalid(format!(
+            "balance_gate must be warn or block (got {other:?})"
         ))),
     }
 }
@@ -549,6 +569,7 @@ pub async fn create_credential(
     let balance_low_threshold =
         validate_amount(input.balance_low_threshold, "balance_low_threshold")?;
     let balance_source = validate_balance_source(input.balance_source.as_deref())?;
+    let balance_gate = validate_balance_gate(input.balance_gate.as_deref())?;
 
     // The row id is the AEAD associated data, so generate it before sealing.
     let id = uuid::Uuid::new_v4().to_string();
@@ -573,8 +594,8 @@ pub async fn create_credential(
         "INSERT INTO provider_credentials \
            (id, provider_id, label, secret_cipher, headers_json, max_concurrency, \
             balance_usd, balance_source, balance_updated_at, balance_updated_by, \
-            balance_low_threshold, status, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)",
+            balance_low_threshold, balance_gate, status, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)",
     )
     .bind(&id)
     .bind(provider_id)
@@ -587,6 +608,7 @@ pub async fn create_credential(
     .bind(&balance_updated_at)
     .bind(&balance_updated_by)
     .bind(balance_low_threshold)
+    .bind(balance_gate.as_deref().unwrap_or("warn"))
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
@@ -647,6 +669,7 @@ pub async fn update_credential(
     let balance_low_threshold =
         validate_amount(patch.balance_low_threshold, "balance_low_threshold")?;
     let balance_source = validate_balance_source(patch.balance_source.as_deref())?;
+    let balance_gate = validate_balance_gate(patch.balance_gate.as_deref())?;
 
     if label.is_none()
         && secret_cipher.is_none()
@@ -655,6 +678,7 @@ pub async fn update_credential(
         && balance_usd.is_none()
         && balance_low_threshold.is_none()
         && balance_source.is_none()
+        && balance_gate.is_none()
     {
         return Err(CatalogError::Invalid(
             "no fields to update; send at least one credential field".to_string(),
@@ -675,6 +699,7 @@ pub async fn update_credential(
            balance_updated_at = COALESCE(?, balance_updated_at), \
            balance_updated_by = COALESCE(?, balance_updated_by), \
            balance_low_threshold = COALESCE(?, balance_low_threshold), \
+           balance_gate = COALESCE(?, balance_gate), \
            updated_at = ? \
          WHERE id = ?",
     )
@@ -687,6 +712,7 @@ pub async fn update_credential(
     .bind(&balance_updated_at)
     .bind(&balance_updated_by)
     .bind(balance_low_threshold)
+    .bind(&balance_gate)
     .bind(&now)
     .bind(id)
     .execute(&mut *tx)
@@ -712,6 +738,7 @@ pub async fn update_credential(
             "header_names": headers_json.as_deref().map(|raw| headers::names(Some(raw))),
             "balance_usd": balance_usd,
             "balance_source": balance_source,
+            "balance_gate": balance_gate,
         }),
     )
     .await?;
@@ -1523,9 +1550,10 @@ pub async fn apply_sync_price(
                 || row.output_per_m != price.output_per_m
                 || row.cache_read_per_m != price.cache_read_per_m
                 || row.cache_write_per_m != price.cache_write_per_m
+                || row.reasoning_per_m != price.reasoning_per_m
                 || row.request_fee != price.request_fee
                 || (row.variable_price != 0) != price.variable_price
-                || row.currency != "USD"
+                || row.currency != price.currency
                 || row.source != source
                 || row.source_url.as_deref() != Some(source_url)
         })
@@ -1536,16 +1564,16 @@ pub async fn apply_sync_price(
            (id, offering_id, input_per_m, output_per_m, cache_read_per_m, \
             cache_write_per_m, reasoning_per_m, request_fee, variable_price, currency, source, \
             source_url, fetched_at, updated_by, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'USD', ?, ?, ?, NULL, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) \
          ON CONFLICT (offering_id) DO UPDATE SET \
            input_per_m = excluded.input_per_m, \
            output_per_m = excluded.output_per_m, \
            cache_read_per_m = excluded.cache_read_per_m, \
            cache_write_per_m = excluded.cache_write_per_m, \
-           reasoning_per_m = NULL, \
+           reasoning_per_m = excluded.reasoning_per_m, \
            request_fee = excluded.request_fee, \
            variable_price = excluded.variable_price, \
-           currency = 'USD', \
+           currency = excluded.currency, \
            source = excluded.source, \
            source_url = excluded.source_url, \
            fetched_at = excluded.fetched_at, \
@@ -1559,8 +1587,10 @@ pub async fn apply_sync_price(
     .bind(price.output_per_m)
     .bind(price.cache_read_per_m)
     .bind(price.cache_write_per_m)
+    .bind(price.reasoning_per_m)
     .bind(price.request_fee)
     .bind(i64::from(price.variable_price))
+    .bind(&price.currency)
     .bind(source)
     .bind(source_url)
     .bind(at)

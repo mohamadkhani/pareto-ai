@@ -1,0 +1,119 @@
+# Continuous integration for the gateway and the console.
+#
+# The same gate as `just check`, split in two so the two toolchains do not wait
+# on each other:
+#
+#   just fmt-check  -> cargo fmt --check
+#   just lint       -> cargo clippy --all-targets -- -D warnings
+#   just test       -> cargo test
+#   just build-api  -> cargo build --release --no-default-features
+#   just ui-check   -> pnpm build + pnpm test + prettier --check
+#
+# Two differences from the Justfile:
+#
+# - no `--offline`: the Justfile relies on a warm local cargo cache, a fresh
+#   runner has none;
+# - the Rust job gets `web/dist` from the web job as an artifact instead of
+#   rebuilding Angular, because the server embeds it at compile time
+#   (`rust-embed`).
+#
+# No secrets are required. Desktop packaging lives in desktop.yml.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  web:
+    name: Web (build, tests, formatting)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # Output lands in web/dist/web/browser and is consumed by the Rust job.
+      - name: Build
+        working-directory: web
+        run: pnpm run build
+
+      - name: Test
+        working-directory: web
+        run: pnpm test
+
+      - name: Check formatting
+        working-directory: web
+        run: pnpm exec prettier --check src/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          if-no-files-found: error
+          path: web/dist/web/browser
+          retention-days: 1
+
+  rust:
+    name: Rust (format, clippy, tests, api-only build)
+    needs: web
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # The embedded-UI feature compiles web/dist into the binary; restores it
+      # instead of paying for a second Angular build.
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/web/browser
+
+      - name: Check formatting
+        working-directory: server
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: server
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: server
+        run: cargo test --locked
+
+      - name: API-only release build
+        working-directory: server
+        run: cargo build --locked --release --no-default-features

@@ -30,6 +30,7 @@ const provider: Provider = {
   last_discovery_at: null,
   last_discovery_created: null,
   last_discovery_unchanged: null,
+  connectors: [],
 };
 
 function credentialFixture(overrides: Partial<Credential> = {}): Credential {
@@ -46,6 +47,11 @@ function credentialFixture(overrides: Partial<Credential> = {}): Credential {
     balance_updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
     balance_updated_by: 'u1',
     balance_low_threshold: null,
+    balance_available: null,
+    balance_currency: null,
+    balance_error: null,
+    balance_fetched_at: null,
+    balance_gate: 'warn',
     status: 'ok',
     last_tested_at: null,
     cooldown_until: null,
@@ -127,6 +133,83 @@ describe('Credentials', () => {
     expect(text).toContain('x-region');
     // The secret itself must never appear anywhere on screen.
     expect(text).not.toContain('sk-');
+  });
+
+  it('shows an unavailable provider balance instead of zero', async () => {
+    const fixture = await create([
+      credentialFixture({
+        balance_usd: null,
+        balance_available: false,
+        balance_source: 'provider_api',
+        balance_error: 'expired key',
+      }),
+    ]);
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('unavailable');
+    expect(root.textContent).toContain('expired key');
+    expect(root.textContent).not.toContain('$0.00');
+  });
+
+  it('saves the balance gate per credential', async () => {
+    const fixture = await create([credentialFixture()]);
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, credentialFixture({ balance_gate: 'block' })));
+    const gate = root.querySelector<HTMLSelectElement>('#credential-gate-c1');
+    if (gate === null) {
+      throw new Error('no gate selector');
+    }
+    gate.value = 'block';
+    gate.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[1];
+    expect(call.method).toBe('PATCH');
+    expect(call.url).toBe('/api/credentials/c1');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(call.body).toEqual({ balance_gate: 'block' });
+    expect(root.textContent).toContain('set to block');
+  });
+
+  it('refreshes one credential balance and shows the result', async () => {
+    const fixture = await create([credentialFixture()]);
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(
+      jsonResponse(200, {
+        ok: true,
+        credential_id: 'c1',
+        available: true,
+        balance_usd: 12.34,
+        currency: 'USD',
+        period_spend: 3,
+        burn_rate: 0.5,
+        days_remaining: 24.6,
+        error: null,
+        fetched_at: new Date().toISOString(),
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [credentialFixture()]));
+    const rowRefresh = Array.from(root.querySelectorAll<HTMLButtonElement>('tbody button')).find(
+      (candidate) => candidate.textContent?.trim() === 'Refresh',
+    );
+    if (rowRefresh === undefined) {
+      throw new Error('no row refresh button');
+    }
+    rowRefresh.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[1];
+    expect(call.method).toBe('POST');
+    expect(call.url).toBe('/api/providers/p1/credentials/c1/balance/refresh');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(root.textContent).toContain('$12.34 available');
+    expect(root.textContent).toContain('runs out in 24 days');
   });
 
   it('creates a credential sending the write-only secret and header values once', async () => {

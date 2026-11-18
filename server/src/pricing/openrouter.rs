@@ -650,6 +650,8 @@ async fn apply_success(
                 cache_read_per_m: model.price.cache_read_per_m,
                 cache_write_per_m: model.price.cache_write_per_m,
                 request_fee: model.price.request_fee,
+                reasoning_per_m: None,
+                currency: "USD".to_string(),
                 variable_price: model.price.variable,
             },
             SOURCE,

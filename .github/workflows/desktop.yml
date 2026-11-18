@@ -1,0 +1,249 @@
+# Desktop installers for Linux, Windows and macOS (decision D43).
+#
+# Each runner builds the gateway sidecar for its own platform, then the Tauri
+# shell bundles it. Nothing here is cross-compiled: macOS and Windows artifacts
+# must come from their own runners.
+#
+# Runs on GitHub-hosted runners only. The repository is mirrored from Gitea to
+# GitHub; this workflow is written for the GitHub side.
+#
+# macOS ships one universal (arm64 + x86_64) build: it is produced on the arm64
+# runner by Tauri, with a lipo-merged gateway sidecar, which avoids depending on
+# an Intel runner image.
+#
+# Signing is optional and secret-gated: with no secrets the installers are
+# unsigned but complete. Add the secrets named in `docs/desktop.md` to sign.
+#
+# On a `v*` tag the installers are attached to a GitHub Release.
+
+name: Desktop
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # linuxdeploy is itself an AppImage and GitHub runners usually have no usable
+  # FUSE mount; extracting instead of mounting works everywhere.
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            toolchain_targets: x86_64-unknown-linux-gnu
+            bundles: deb,rpm,appimage
+            universal: false
+            ext: ""
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            toolchain_targets: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            universal: false
+            ext: ".exe"
+          - name: macos-universal
+            os: macos-14
+            target: universal-apple-darwin
+            toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: dmg,app
+            universal: true
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux prerequisites (WebKitGTK 4.1, tray/appindicator, SVG
+      # rendering) plus what the deb/rpm bundlers shell out to. `rpm` is needed
+      # on Ubuntu to produce the .rpm package.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            rpm
+
+      # WebView2 ships with windows-latest; the MSI/NSIS toolchains are
+      # downloaded by Tauri on first use (a few MB, cached afterwards).
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.toolchain_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            server -> target
+            desktop -> target
+
+      # The gateway serves its embedded console, so the Angular build must come
+      # first — desktop/ never ships its own web assets (D43).
+      - name: Build the web console
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      # Placed with Tauri's naming: binaries/pareto-gateway-<triple>[.exe].
+      # `desktop/build.rs` resolves the same file on its own; the explicit copy
+      # keeps the bundle step independent of build-script heuristics.
+      - name: Build the gateway sidecar
+        if: matrix.universal == false
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            --manifest-path server/Cargo.toml \
+            --target "${{ matrix.target }}"
+          mkdir -p desktop/binaries
+          cp "server/target/${{ matrix.target }}/release/gateway${{ matrix.ext }}" \
+             "desktop/binaries/pareto-gateway-${{ matrix.target }}${{ matrix.ext }}"
+
+      # Tauri looks for `pareto-gateway-universal-apple-darwin` and lipos it into
+      # each app slice, so the sidecar is merged here the same way.
+      - name: Build the universal gateway sidecar
+        if: matrix.universal
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release \
+              --manifest-path server/Cargo.toml \
+              --target "$target"
+          done
+          mkdir -p desktop/binaries
+          lipo -create \
+            server/target/aarch64-apple-darwin/release/gateway \
+            server/target/x86_64-apple-darwin/release/gateway \
+            -output desktop/binaries/pareto-gateway-universal-apple-darwin
+          lipo -info desktop/binaries/pareto-gateway-universal-apple-darwin
+
+      # Signing secrets are optional. When they are absent nothing is exported
+      # and Tauri produces unsigned installers; when present, Tauri's bundler
+      # reads them from the environment:
+      #   macOS   APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+      #           APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+      #           (notarization runs when the four APPLE_* identity/id values are
+      #           all set)
+      #   Windows WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD
+      # See docs/desktop.md for how to create them.
+      - name: Export signing secrets when present
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export_if_set() {
+            local name="$1"
+            if [[ -n "${!name:-}" ]]; then
+              echo "${name}=${!name}" >> "$GITHUB_ENV"
+              echo "signing: ${name} present"
+            fi
+          }
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                        APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              export_if_set "$name"
+            done
+          elif [[ "$RUNNER_OS" == "Windows" ]]; then
+            for name in WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD; do
+              export_if_set "$name"
+            done
+          fi
+          echo "Signing secrets are optional; continuing unsigned when absent."
+
+      - name: Build desktop bundles
+        working-directory: desktop
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      # A .app is a bundle with symlinks; uploading it as a zip keeps it intact.
+      - name: Archive the macOS app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "desktop/target/${{ matrix.target }}/release/bundle/macos"
+          ditto -c -k --sequesterRsrc --keepParent "Pareto AI.app" \
+            "${{ github.workspace }}/Pareto AI-${{ matrix.name }}.app.zip"
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: pareto-desktop-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            desktop/target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+            desktop/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            desktop/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            desktop/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            *.app.zip
+
+  release:
+    name: Attach installers to the GitHub Release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          fail_on_unmatched_files: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

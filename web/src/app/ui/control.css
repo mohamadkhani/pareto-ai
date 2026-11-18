@@ -43,3 +43,43 @@
 .control[aria-invalid='true'] {
   border-color: var(--danger);
 }
+
+/*
+ * Number inputs keep the native spinner behaviour for keyboard arrows but
+ * hide the browser-rendered steppers, whose chrome varies per platform.
+ */
+.control[type='number'] {
+  appearance: none;
+  -moz-appearance: textfield;
+}
+
+.control[type='number']::-webkit-outer-spin-button,
+.control[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/*
+ * Date and time inputs keep the native picker popup; only the field chrome is
+ * ours. The picker glyph inherits its colour from `color-scheme`, which the
+ * theme sets on the document (and the styleguide sets per frame).
+ */
+.control[type='date'],
+.control[type='time'],
+.control[type='datetime-local'] {
+  min-height: var(--control-height-md);
+}
+
+.control[type='date']::-webkit-calendar-picker-indicator,
+.control[type='time']::-webkit-calendar-picker-indicator,
+.control[type='datetime-local']::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.control[type='date']::-webkit-calendar-picker-indicator:hover,
+.control[type='time']::-webkit-calendar-picker-indicator:hover,
+.control[type='datetime-local']::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}

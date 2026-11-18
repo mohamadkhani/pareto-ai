@@ -100,13 +100,17 @@
 
 .preview-session {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
 }
 
 .preview-session ui-field {
   flex: 1;
+}
+
+.preview-session ui-button {
+  margin-top: 26px;
 }
 
 .field-error {

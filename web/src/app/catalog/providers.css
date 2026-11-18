@@ -30,6 +30,38 @@
   white-space: nowrap;
 }
 
+.connector-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.balance-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.provider-balance {
+  font-family: var(--font-mono);
+}
+
+.provider-balance.is-unavailable {
+  color: var(--text-muted);
+  font-family: inherit;
+}
+
+.provider-balance.is-low {
+  color: var(--warning);
+  font-weight: var(--weight-semibold);
+}
+
+.balance-days {
+  color: var(--text-muted);
+  font-size: var(--text-small);
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;

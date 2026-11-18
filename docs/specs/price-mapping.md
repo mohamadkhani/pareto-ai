@@ -40,9 +40,16 @@ from a click in the UI:
   "cache_read": "/pricing_usd_per_million_tokens/balanced/cached_input",
   "cache_write": null,
   "reasoning": null,
-  "currency": "USD",
-  "units": "per_million_tokens",            // or "per_token"
+  "unit": {
+    "source": "per_million_tokens",         // or "per_token" / "custom"
+    "multiplier": 1.0,                      // applied after the base unit
+    "currency": "USD",
+    "fx_to_usd": null,                      // static; no live FX feed
+    "display": { "symbol": "$", "decimals": 4 },
+    "note": null                            // shown by the UI
+  },
   "modalities_input": "/input_modalities",
+  "modalities_output": null,
   "context_length": null,
   "max_output": null,
   "apply_on_discovery": true
@@ -51,11 +58,23 @@ from a click in the UI:
 
 - Only `entries`, `model_id`, and one of `input`/`output` are required; everything
   else may be `null`.
-- `units: "per_token"` multiplies by 1e6 on ingestion; strings are accepted.
+- **Units (D44).** `source` sets the base: `per_token` × 1e6,
+  `per_million_tokens` × 1, `custom` × `multiplier`. The SailResearch feed is
+  per million but quoted in cents, so its template uses `source: "custom"`
+  with `multiplier: 0.01` — there is no provider-specific branch. A
+  non-positive `multiplier` makes the entry unpriced and raises a preview
+  warning; a multiplier on a non-`custom` source is ignored and warned about.
+- `currency` is the ISO code of the published numbers. Non-USD values are
+  stored with that currency and are **unpriced for routing/mix** unless
+  `fx_to_usd` is supplied; with a rate the result is converted to USD and the
+  row stores `currency = 'USD'`.
 - A negative or non-numeric resolved price marks the component **variable**
   (D37 rule) and the offering unpriced for that component.
 - Pointers are resolved relative to each entry; a missing pointer on one entry
   skips **that entry only** and is counted in the preview and run result.
+- Preview/test return both `raw` and `converted_per_m` per entry, with
+  warnings when the converted input is outside `0.001…1000` USD/M (the usual
+  sign of a wrong unit).
 
 ## Backend
 
@@ -64,8 +83,8 @@ from a click in the UI:
 - `GET/PUT /api/providers/{id}/price-mapping` (admin, CSRF, audited).
 - `POST /api/providers/{id}/price-mapping/preview` — fetch `/models`, apply the
   mapping, return `{entries_seen, matched, skipped, samples: [{model_id,
-  upstream_model_id, input, output, cache_read, error}], warnings}`; **writes
-  nothing**.
+  upstream_model_id, raw, converted_per_m, input, output, cache_read,
+  warnings, error}], warnings}`; **writes nothing**.
 - `POST /api/providers/{id}/prices/refresh` — apply to the catalog:
   upsert `prices` with `source='provider_api'`, `source_url` = the models URL,
   `fetched_at`; **never** overwrite a `manual` row; return
@@ -116,3 +135,7 @@ Load-models result: “Prices were not mapped — map them now”):
    untouched (test).
 5. Negative/`-1` values follow the D37 variable rule (test).
 6. Preview writes nothing (test) and UI shows the table + errors.
+7. Unit conversion follows D44: per-token ×1e6, per-million ×1, custom ×
+   `multiplier`, then `fx_to_usd` only for non-USD (test).
+8. Non-USD without FX stores its currency, leaves components NULL, and never
+   feeds routing (test).

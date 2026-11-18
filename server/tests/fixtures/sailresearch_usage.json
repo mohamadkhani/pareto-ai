@@ -1,0 +1,8 @@
+{
+  "balance": 12.34,
+  "available": true,
+  "currency": "USD",
+  "period_spend": 5.14,
+  "burn_rate": 0.42,
+  "days_remaining": 29.4
+}

@@ -118,6 +118,15 @@ dialog::backdrop {
   background: var(--backdrop);
 }
 
+/*
+ * Dialog actions are projected content, so the component-scoped footer cannot
+ * lay out the buttons itself. `display: contents` promotes the buttons into
+ * the footer flex row, which gives them the footer's gap and alignment.
+ */
+.dialog-actions > [ui-dialog-actions] {
+  display: contents;
+}
+
 /* Icons are projected into icon buttons, so their size lives globally. */
 .ui-icon-button svg {
   width: 1.15em;

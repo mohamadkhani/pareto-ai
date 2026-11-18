@@ -12,6 +12,7 @@ import { UiButton } from '../ui/button';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
 import { UiTable } from '../ui/table';
 import { KeysService } from './keys.service';
 import type { ApiKeyPatch, ApiKeyView, CreatedKey } from './keys.types';
@@ -76,7 +77,17 @@ function buildPatch(key: ApiKeyView, raw: { name: string; expires_at: string }):
 /** The API-key page: list, issue, edit limits, revoke. Self or admin. */
 @Component({
   selector: 'app-keys',
-  imports: [ReactiveFormsModule, UiBadge, UiBanner, UiButton, UiDialog, UiEmpty, UiField, UiTable],
+  imports: [
+    ReactiveFormsModule,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiDialog,
+    UiEmpty,
+    UiField,
+    UiInput,
+    UiTable,
+  ],
   templateUrl: './keys.html',
   styleUrl: './keys.css',
   changeDetection: ChangeDetectionStrategy.OnPush,

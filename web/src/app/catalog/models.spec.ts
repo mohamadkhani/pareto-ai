@@ -44,6 +44,7 @@ const provider: Provider = {
   last_discovery_at: null,
   last_discovery_created: null,
   last_discovery_unchanged: null,
+  connectors: [],
 };
 
 const modelFixture: Model = {
@@ -905,6 +906,30 @@ describe('Models', () => {
     expect(fetchMock.requests[3].url).toBe('/api/models/overview?provider=p1');
     expect(root.textContent).toContain('openrouter');
     expect(root.textContent).not.toContain('avg');
+  });
+
+  it('hints that prices need a connector when the provider has none', async () => {
+    queueReload(fetchMock, providerOverview);
+    const fixture = await create('admin', 'p1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Prices need a connector for this provider.');
+    expect(root.querySelector('.sync-status a[href="/providers"]')).not.toBeNull();
+  });
+
+  it('does not show the connector hint when a catalog connector exists', async () => {
+    queueReload(fetchMock, providerOverview, {
+      providers: [
+        {
+          ...provider,
+          connectors: [{ kind: 'catalog', enabled: true, updated_at: '2026-01-01T00:00:00.000Z' }],
+        },
+      ],
+    });
+    const fixture = await create('admin', 'p1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).not.toContain('Prices need a connector for this provider.');
   });
 
   it('shows the deep-linked provider name in the filter, not "All providers"', async () => {

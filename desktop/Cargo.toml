@@ -1,0 +1,24 @@
+[package]
+name = "pareto-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Pareto AI desktop shell: the gateway as a Tauri sidecar"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+# Generates the context (permissions, bundle metadata, sidecar paths).
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# One shell per user: a second launch focuses the existing window.
+tauri-plugin-single-instance = "2"
+# Native error dialog when the gateway does not come up.
+tauri-plugin-dialog = "2"
+
+# Desktop bundles are release-only; keep the artifact small.
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

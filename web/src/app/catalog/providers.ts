@@ -1,7 +1,10 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
+import { BalanceCache } from './balance-cache';
 import { CatalogService } from './catalog.service';
+import { Connectors } from './connectors';
+import type { ConnectorKind, PriceDisplay } from './connectors.types';
 import { Credentials } from './credentials';
 import { describeError, isForbidden } from './errors';
 import { formatAge } from './format';
@@ -23,6 +26,24 @@ import { UiInput } from '../ui/input';
 import { UiSelect } from '../ui/select';
 import { UiSwitch } from '../ui/switch';
 import { UiTable } from '../ui/table';
+import type { BadgeTone } from '../ui/badge';
+
+/** One provider-row connector badge. */
+interface ConnectorBadge {
+  kind: ConnectorKind;
+  label: string;
+  tone: BadgeTone;
+  title: string;
+}
+
+/** The aggregate balance rendered in the provider row. */
+interface ProviderBalance {
+  text: string;
+  available: boolean | null;
+  low: boolean;
+  days: string | null;
+  lowCredential: boolean;
+}
 
 /** The provider form's editable fields. */
 interface ProviderDraft {
@@ -61,6 +82,7 @@ function emptyDraft(): ProviderDraft {
   selector: 'app-providers',
   imports: [
     RouterLink,
+    Connectors,
     Credentials,
     UiBadge,
     UiBanner,
@@ -80,6 +102,7 @@ function emptyDraft(): ProviderDraft {
 export class Providers {
   private readonly auth = inject(AuthService);
   private readonly catalog = inject(CatalogService);
+  private readonly balanceCache = inject(BalanceCache);
 
   protected readonly providers = signal<Provider[]>([]);
   protected readonly loading = signal(false);
@@ -101,6 +124,9 @@ export class Providers {
   protected readonly deletePending = signal(false);
 
   protected readonly discovery = signal<DiscoveryState | null>(null);
+  protected readonly connectorProvider = signal<Provider | null>(null);
+
+  private readonly displays = signal<ReadonlyMap<string, PriceDisplay>>(new Map());
 
   private readonly credentialsByProvider = signal<ReadonlyMap<string, Credential[]>>(new Map());
   private readonly offeringCounts = signal<ReadonlyMap<string, number>>(new Map());
@@ -153,6 +179,11 @@ export class Providers {
       }
       this.offeringCounts.set(counts);
 
+      // Displays come from each provider's catalog connector so the balance
+      // column uses the operator's symbol and decimals. Providers without a
+      // catalog connector are skipped, so a plain provider list stays cheap.
+      void this.loadDisplays(providers);
+
       // Keep the expanded panel pointed at the fresh copy of its provider.
       const selectedId = this.selectedId();
       if (selectedId !== null && !providers.some((provider) => provider.id === selectedId)) {
@@ -171,6 +202,115 @@ export class Providers {
 
   protected offeringCount(providerId: string): number {
     return this.offeringCounts().get(providerId) ?? 0;
+  }
+
+  private async loadDisplays(providers: readonly Provider[]): Promise<void> {
+    const withCatalog = providers.filter((provider) =>
+      provider.connectors.some((connector) => connector.kind === 'catalog'),
+    );
+    if (withCatalog.length === 0) {
+      this.displays.set(new Map());
+      return;
+    }
+    const views = await Promise.all(
+      withCatalog.map((provider) =>
+        this.catalog.getConnector(provider.id, 'catalog').catch(() => null),
+      ),
+    );
+    const displays = new Map<string, PriceDisplay>();
+    withCatalog.forEach((provider, index) => {
+      const display = views[index]?.config?.catalog?.unit.display;
+      if (display !== undefined) {
+        displays.set(provider.id, display);
+      }
+    });
+    this.displays.set(displays);
+  }
+
+  /** One badge per connector kind; absent kinds stay visible but muted. */
+  protected connectorBadges(provider: Provider): ConnectorBadge[] {
+    const configured = new Map(provider.connectors.map((connector) => [connector.kind, connector]));
+    return (['catalog', 'balance', 'health'] as const).map((kind) => {
+      const connector = configured.get(kind);
+      const label = kind === 'catalog' ? 'prices' : kind;
+      if (connector === undefined) {
+        return {
+          kind,
+          label,
+          tone: 'neutral',
+          title: `No ${label} connector configured.`,
+        };
+      }
+      return {
+        kind,
+        label,
+        tone: connector.enabled ? 'success' : 'warning',
+        title: `${label} connector · ${connector.enabled ? 'enabled' : 'disabled'} · updated ${formatAge(
+          connector.updated_at,
+        )}`,
+      };
+    });
+  }
+
+  protected connectorTone(badge: ConnectorBadge): BadgeTone {
+    return badge.tone;
+  }
+
+  protected openConnectors(provider: Provider): void {
+    this.connectorProvider.set(provider);
+  }
+
+  protected closeConnectors(): void {
+    this.connectorProvider.set(null);
+  }
+
+  protected async onConnectorsChanged(): Promise<void> {
+    await this.reload();
+  }
+
+  /**
+   * Sums the credentials' known balances. An unavailable provider balance is
+   * never zero: with no usable number the row says "unavailable".
+   */
+  protected providerBalance(provider: Provider): ProviderBalance {
+    const credentials = this.credentialsByProvider().get(provider.id) ?? [];
+    if (credentials.length === 0) {
+      return { text: '—', available: null, low: false, days: null, lowCredential: false };
+    }
+    const known = credentials.filter(
+      (credential) => credential.balance_available === true && credential.balance_usd !== null,
+    );
+    if (known.length === 0) {
+      return {
+        text: 'unavailable',
+        available: false,
+        low: false,
+        days: null,
+        lowCredential: false,
+      };
+    }
+    const total = known.reduce((sum, credential) => sum + (credential.balance_usd ?? 0), 0);
+    const display = this.displays().get(provider.id) ?? { symbol: '$', decimals: 2 };
+    const lowCredential = known.some(
+      (credential) =>
+        credential.balance_low_threshold !== null &&
+        (credential.balance_usd ?? Number.POSITIVE_INFINITY) <= credential.balance_low_threshold,
+    );
+    let days: string | null = null;
+    for (const credential of known) {
+      const result = this.balanceCache.get(credential.id);
+      if (result?.days_remaining !== undefined && result?.days_remaining !== null) {
+        days = `runs out in ${formatDays(result.days_remaining)}`;
+        break;
+      }
+    }
+    return {
+      text: `${display.symbol}${total.toFixed(display.decimals)}`,
+      available: true,
+      low: total <= 0 || lowCredential,
+      days,
+      lowCredential,
+    };
   }
 
   /** "Last load" for the list: persisted on the provider, so it survives a reload. */
@@ -422,6 +562,15 @@ function validateDraft(
     errors.base_url = 'Enter an http(s) URL, for example https://api.example.com/v1.';
   }
   return errors;
+}
+
+/** "runs out in N days": whole days above one, hours below. */
+function formatDays(days: number): string {
+  if (days >= 1) {
+    const whole = Math.floor(days);
+    return `${whole} ${whole === 1 ? 'day' : 'days'}`;
+  }
+  return `${Math.max(0, Math.round(days * 24))} h`;
 }
 
 /** Only the fields the admin changed; `kind` cannot change over the wire. */

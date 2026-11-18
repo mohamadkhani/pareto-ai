@@ -30,10 +30,15 @@
         </ui-field>
       }
       <ui-field label="From" [controlId]="'usage-from'">
-        <input id="usage-from" type="date" [value]="from()" (input)="onFromChange($event)" />
+        <ui-input
+          [id]="'usage-from'"
+          type="date"
+          [value]="from()"
+          (valueChange)="from.set($event)"
+        />
       </ui-field>
       <ui-field label="To" [controlId]="'usage-to'">
-        <input id="usage-to" type="date" [value]="to()" (input)="onToChange($event)" />
+        <ui-input [id]="'usage-to'" type="date" [value]="to()" (valueChange)="to.set($event)" />
       </ui-field>
       <span class="spacer"></span>
       <ui-button [loading]="loading()" (clicked)="reload()">Apply</ui-button>

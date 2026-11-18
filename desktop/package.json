@@ -1,0 +1,16 @@
+{
+  "name": "pareto-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Tauri shell for the pareto-ai gateway",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "packageManager": "pnpm@10.27.0",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

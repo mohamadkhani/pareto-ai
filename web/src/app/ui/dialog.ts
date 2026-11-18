@@ -1,4 +1,5 @@
 import {
+  AfterViewInit,
   ChangeDetectionStrategy,
   Component,
   ElementRef,
@@ -23,7 +24,7 @@ let nextDialogId = 0;
   styleUrl: './dialog.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class UiDialog {
+export class UiDialog implements AfterViewInit {
   readonly open = model(false);
   readonly title = input<string>('');
   readonly closeOnBackdrop = input(true);
@@ -53,6 +54,18 @@ export class UiDialog {
 
   show(): void {
     this.open.set(true);
+  }
+
+  /**
+   * A dialog created already open (a caller that renders it behind `@if` with
+   * `[open]="true"`) can miss the effect's first run: the view child is not
+   * resolved yet. Opening here closes that gap once the view exists.
+   */
+  ngAfterViewInit(): void {
+    const el = this.dialogEl()?.nativeElement;
+    if (el !== undefined && this.open() && !el.open) {
+      this.showNative(el);
+    }
   }
 
   close(): void {

@@ -65,6 +65,7 @@ use utoipa::ToSchema;
 
 use super::headers;
 use super::{Actor, CatalogError, audit, get_provider, now_ts};
+use crate::connectors::{self, ConnectorKind, PriceRefreshView};
 use crate::probe::{DISCOVERY_TIMEOUT, ModelsFetchError, fetch_models_document_with_timeout};
 
 /// Request body of `POST /api/providers/{id}/discover-models`.
@@ -96,6 +97,10 @@ pub struct DiscoverySummary {
     pub updated_offerings: usize,
     /// Existing offerings that already matched the discovered model.
     pub unchanged: usize,
+    /// The price refresh merged into a successful apply when the provider's
+    /// catalog connector has `apply_on_discovery`. A dry run never has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prices: Option<PriceRefreshView>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -193,17 +198,62 @@ pub(crate) async fn discover_models_with_timeout(
     )
     .await
     .map_err(map_fetch_error)?;
-    let upstream_ids = parse_models_payload(&raw)?;
 
-    apply(
+    // A catalog connector, when present, supplies metadata on top of the ids.
+    // A broken connector must not break discovery: fall back to the plain id
+    // parser and log the reason (D42: connector failure never affects the
+    // catalog).
+    let mut entries =
+        match connectors::enabled_config(pool, provider_id, ConnectorKind::Catalog).await {
+            Ok(Some(config)) => match config.catalog.as_ref() {
+                Some(catalog_config) => match serde_json::from_str::<serde_json::Value>(&raw)
+                    .map_err(|error| error.to_string())
+                    .and_then(|document| {
+                        connectors::extract_discovery_entries(&document, catalog_config)
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(
+                            provider_id,
+                            error,
+                            "catalog connector metadata could not be read; discovering ids only"
+                        );
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            },
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(provider_id, error = %error, "catalog connector could not be read");
+                Vec::new()
+            }
+        };
+    if entries.is_empty() {
+        entries = parse_models_payload(&raw)?
+            .into_iter()
+            .map(|model_id| connectors::DiscoveryEntry {
+                model_id,
+                modalities_input: None,
+                modalities_output: None,
+                context_length: None,
+                max_output_tokens: None,
+            })
+            .collect();
+    }
+
+    let summary = apply(
         pool,
+        secrets,
         actor,
         provider_id,
         &credential.id,
-        &upstream_ids,
+        &entries,
         input.dry_run.unwrap_or(false),
     )
-    .await
+    .await?;
+    Ok(summary)
 }
 
 /// Resolves the credential discovery authenticates with. An explicit id must
@@ -328,14 +378,17 @@ fn map_fetch_error(error: ModelsFetchError) -> DiscoveryError {
     }
 }
 
-/// Materializes the discovered ids in one transaction and audits the run.
+/// Materializes the discovered entries in one transaction and audits the run.
 /// A dry run rolls the catalog changes back and records only the audit row.
+/// Metadata from a catalog connector fills a **new** model row only; an
+/// existing model keeps every non-NULL value the operator set.
 async fn apply(
     pool: &SqlitePool,
+    secrets: &crate::secrets::SecretBox,
     actor: &Actor<'_>,
     provider_id: &str,
     credential_id: &str,
-    upstream_ids: &[String],
+    entries: &[connectors::DiscoveryEntry],
     dry_run: bool,
 ) -> Result<DiscoverySummary, DiscoveryError> {
     let now = now_ts();
@@ -343,14 +396,16 @@ async fn apply(
     let mut summary = DiscoverySummary {
         dry_run,
         credential_id: credential_id.to_string(),
-        discovered: upstream_ids.len(),
+        discovered: entries.len(),
         created_models: 0,
         created_offerings: 0,
         updated_offerings: 0,
         unchanged: 0,
+        prices: None,
     };
 
-    for upstream_id in upstream_ids {
+    for entry in entries {
+        let upstream_id = &entry.model_id;
         let model_id: Option<String> =
             sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE")
                 .bind(upstream_id)
@@ -361,11 +416,17 @@ async fn apply(
             None => {
                 let id = uuid::Uuid::new_v4().to_string();
                 sqlx::query(
-                    "INSERT INTO models (id, canonical_name, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?)",
+                    "INSERT INTO models \
+                       (id, canonical_name, modalities_input, modalities_output, \
+                        context_length, max_output_tokens, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&id)
                 .bind(upstream_id)
+                .bind(modalities_json(entry.modalities_input.as_deref()))
+                .bind(modalities_json(entry.modalities_output.as_deref()))
+                .bind(entry.context_length)
+                .bind(entry.max_output_tokens)
                 .bind(&now)
                 .bind(&now)
                 .execute(&mut *tx)
@@ -470,8 +531,33 @@ async fn apply(
         )
         .await?;
         tx.commit().await?;
+
+        // D42: after a real apply, a catalog connector with
+        // `apply_on_discovery` refreshes prices. A failure is reported inside
+        // the merged object and never fails the discovery itself.
+        summary.prices = connectors::refresh_prices_for_discovery(
+            pool,
+            secrets,
+            actor,
+            provider_id,
+            credential_id,
+        )
+        .await;
     }
     Ok(summary)
+}
+
+/// Serializes a modality list for `models.modalities_*`; `None` stays NULL.
+fn modalities_json(modalities: Option<&[String]>) -> Option<String> {
+    modalities.map(|items| {
+        serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| serde_json::Value::String(item.clone()))
+                .collect(),
+        )
+        .to_string()
+    })
 }
 
 #[cfg(test)]

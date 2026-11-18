@@ -15,6 +15,7 @@ import { UiButton } from '../ui/button';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiSelect } from '../ui/select';
 import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
@@ -45,7 +46,17 @@ function describeGrantError(err: unknown): string {
 /** Access grants: who may use which models, offerings, and credentials. */
 @Component({
   selector: 'app-grants',
-  imports: [ReactiveFormsModule, UiBadge, UiBanner, UiButton, UiDialog, UiEmpty, UiField, UiTable],
+  imports: [
+    ReactiveFormsModule,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiDialog,
+    UiEmpty,
+    UiField,
+    UiSelect,
+    UiTable,
+  ],
   templateUrl: './grants.html',
   styleUrl: './grants.css',
   changeDetection: ChangeDetectionStrategy.OnPush,

@@ -679,6 +679,48 @@ requests for no good reason.
 **Why:** every provider differs in path, parameters, auth headers and payload
 shape; hard-coding them does not scale and silent fallbacks misprice.
 
+### D43. Desktop builds via Tauri v2, with the gateway as a sidecar
+
+**Decision (user, 2026-11-18):** ship Linux, Windows and macOS desktop builds as
+a Tauri v2 app (stable `2.x`, not the 3 alpha). The app is a thin shell: it
+picks a free loopback port, starts the **unchanged gateway binary as a
+sidecar** with a per-app data directory, waits for `/health`, then opens a
+window at `http://127.0.0.1:<port>`; it kills the sidecar on exit. No custom
+webview assets and no duplicated UI build — the gateway keeps serving its
+embedded console.
+
+**Consequences:**
+
+- Desktop data lives in the OS app-data dir; the gateway's zero-config start
+  (D40) generates the master key there, so the first run shows the setup
+  wizard. Tauri origins count as local, so no public-exposure banner.
+- macOS and Windows artifacts must be built on their own runners (signing and
+  notarization included); only Linux can be built on this host. CI provides the
+  three-way matrix and uploads artifacts.
+- Signing keys stay out of the repo: unsigned builds work, signed builds read
+  secrets from CI.
+
+### D44. Price units are part of the connector, with a live conversion preview
+
+**Decision (user, 2026-11-18):** the operator declares how a provider's numbers
+are expressed, instead of us assuming USD-per-million:
+
+- `unit`: `per_million_tokens` | `per_token` | `custom`
+- `multiplier`: applied to the extracted number (e.g. `0.01` for a provider that
+  quotes cents)
+- `currency`: ISO code; non-USD values are displayed as-is and only feed
+  routing when an optional static `fx_to_usd` is supplied
+- `display`: symbol/decimals for the table (e.g. `¢` with 4 decimals)
+
+The mapping **preview** must show both the raw extracted value and the converted
+USD-per-million value for the first entries, and **warn** when a converted input
+price is implausibly low (<$0.001/M) or high (>$1000/M) — that is how a wrong
+unit gets caught before saving.
+
+**Why:** providers quote prices in different units (USD/token strings, USD per
+million, cents), and guessing wrong misprices by 100x. Only the operator can
+confirm the invoice.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

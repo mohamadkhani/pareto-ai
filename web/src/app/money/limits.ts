@@ -17,6 +17,8 @@ import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
 import { UiDialog } from '../ui/dialog';
 import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
+import { UiSelect } from '../ui/select';
 import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
@@ -46,7 +48,17 @@ function progressPercent(used: number, limit: number): number {
 /** Budgets and token caps per user: hard spend and usage gates. */
 @Component({
   selector: 'app-limits',
-  imports: [ReactiveFormsModule, UiBanner, UiButton, UiCard, UiDialog, UiField, UiTable],
+  imports: [
+    ReactiveFormsModule,
+    UiBanner,
+    UiButton,
+    UiCard,
+    UiDialog,
+    UiField,
+    UiInput,
+    UiSelect,
+    UiTable,
+  ],
   templateUrl: './limits.html',
   styleUrl: './limits.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -120,12 +132,8 @@ export class Limits {
   }
 
   /** Admins may inspect another account; non-admins stay on their own. */
-  protected onUserChange(event: Event): void {
-    const select = event.target;
-    if (!(select instanceof HTMLSelectElement)) {
-      return;
-    }
-    this.selectedUserId.set(select.value);
+  protected onUserChange(userId: string): void {
+    this.selectedUserId.set(userId);
     void this.reload();
   }
 

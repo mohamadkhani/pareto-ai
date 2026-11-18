@@ -11,6 +11,7 @@ mod catalog;
 mod chat;
 mod combos;
 mod config;
+mod connectors;
 mod db;
 mod error;
 mod ip;
@@ -223,7 +224,7 @@ async fn main() -> Result<()> {
     let benchmark_fetcher =
         benchmark_sync::HttpFetcher::new().context("building the benchmark sync client")?;
 
-    let _background: [tokio::task::JoinHandle<()>; 5] = [
+    let _background: [tokio::task::JoinHandle<()>; 6] = [
         supervisor::supervise("reservation reconciler", {
             let pool = state.pool.clone();
             let timeout = state.config.timeout_total;
@@ -251,6 +252,14 @@ async fn main() -> Result<()> {
         supervisor::supervise("combo sticky prune", {
             let pool = state.pool.clone();
             move || combos::spawn_prune_job(pool.clone(), std::time::Duration::from_secs(60))
+        }),
+        // D42: provider balance connectors refresh each credential on their
+        // own cadence (default 15 min, min 60 s, max 24 h) with exponential
+        // backoff and jitter. Catalog refresh stays on demand.
+        supervisor::supervise("provider balance refresh", {
+            let pool = state.pool.clone();
+            let secrets = state.secrets.clone();
+            move || connectors::spawn_balance_job(pool.clone(), secrets.clone())
         }),
     ];
 

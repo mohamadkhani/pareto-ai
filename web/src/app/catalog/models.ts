@@ -249,6 +249,19 @@ export class Models {
     () => new Map(this.providers().map((provider) => [provider.id, provider])),
   );
 
+  /** The selected provider has no catalog connector, so prices cannot sync. */
+  protected readonly missingCatalogConnector = computed(() => {
+    const id = this.providerId();
+    if (id === 'all') {
+      return false;
+    }
+    const provider = this.providerById().get(id);
+    return (
+      provider !== undefined &&
+      !provider.connectors.some((connector) => connector.kind === 'catalog')
+    );
+  });
+
   protected readonly scope = computed(() => this.overview()?.scope ?? 'all');
   protected readonly rows = computed<OverviewRow[]>(() => {
     const rows = this.overview()?.rows ?? [];

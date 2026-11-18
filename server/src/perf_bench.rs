@@ -266,6 +266,7 @@ async fn seed(app: &TestApp, base_url: &str) -> Bench {
             balance_usd: None,
             balance_source: None,
             balance_low_threshold: None,
+            balance_gate: None,
         },
     )
     .await

@@ -10,6 +10,8 @@
  * spec was silent, the wire behaviour is noted on the field.
  */
 
+import type { ConnectorSummary } from './connectors.types';
+
 /** Provider flavours; the schema only allows `openai_compatible` today. */
 export type ProviderKind = 'openai_compatible';
 
@@ -33,6 +35,8 @@ export interface Provider {
   last_discovery_created: number | null;
   /** Offerings the last applied discovery found already matching. */
   last_discovery_unchanged: number | null;
+  /** Configured connectors, one entry per saved kind (D42). */
+  connectors: ConnectorSummary[];
 }
 
 /** `POST /api/providers`. */
@@ -55,6 +59,9 @@ export interface ProviderPatch {
 
 /** How the recorded balance was obtained. */
 export type BalanceSource = 'manual' | 'provider_api' | 'unknown';
+
+/** Whether an exhausted balance only warns or also blocks routing (D42). */
+export type BalanceGate = 'warn' | 'block';
 
 /**
  * Credential health. The backend records `ok` / `error` from the probe and
@@ -84,6 +91,15 @@ export interface Credential {
   balance_updated_at: string | null;
   balance_updated_by: string | null;
   balance_low_threshold: number | null;
+  /** Last provider-reported availability: false is "unavailable", never 0. */
+  balance_available: boolean | null;
+  /** Currency of the last provider-reported balance. */
+  balance_currency: string | null;
+  /** Why the last balance fetch failed; cleared on success. */
+  balance_error: string | null;
+  balance_fetched_at: string | null;
+  /** `warn` is advisory; `block` skips an exhausted credential (D42). */
+  balance_gate: BalanceGate;
   status: CredentialStatus;
   /** When `POST /api/credentials/{id}/test` last completed. */
   last_tested_at: string | null;
@@ -102,6 +118,8 @@ export interface CredentialInput {
   /** Manual balance; the server records `balance_source='manual'`. */
   balance_usd: number | null;
   balance_low_threshold: number | null;
+  /** `warn` (default) or `block`; see D42. */
+  balance_gate?: BalanceGate;
 }
 
 /**
@@ -119,6 +137,8 @@ export interface CredentialPatch {
   headers?: Record<string, string> | null;
   max_concurrency?: number;
   balance_usd?: number;
+  /** `warn` or `block`; changing it alone is a valid patch. */
+  balance_gate?: BalanceGate;
 }
 
 /**

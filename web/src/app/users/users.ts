@@ -15,6 +15,8 @@ import { UiButton } from '../ui/button';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiInput } from '../ui/input';
+import { UiSelect } from '../ui/select';
 import { UiSwitch } from '../ui/switch';
 import { UiTable } from '../ui/table';
 import { UsersService } from './users.service';
@@ -56,6 +58,8 @@ function fieldErrorText(control: AbstractControl, field: string): string {
     UiDialog,
     UiEmpty,
     UiField,
+    UiInput,
+    UiSelect,
     UiSwitch,
     UiTable,
   ],

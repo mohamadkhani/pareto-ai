@@ -108,6 +108,12 @@
       @if (!benchmarkSyncAvailable()) {
         <span class="sync-status__item">Benchmark sync is not available in this build.</span>
       }
+      @if (missingCatalogConnector()) {
+        <span class="sync-status__item sync-status__connector-hint">
+          Prices need a connector for this provider.
+          <a routerLink="/providers">Configure one on Providers</a>
+        </span>
+      }
     </div>
 
     @if (loadError()) {

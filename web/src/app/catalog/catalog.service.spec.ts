@@ -11,6 +11,7 @@ import { AuthService, type User } from '../auth/auth.service';
 import { CatalogService } from './catalog.service';
 import type { Credential, Price, PriceInput, Provider, SyncOutcome } from './catalog.types';
 import type { ModelsOverview } from './overview.types';
+import { emptyConnectorConfig } from './connectors.types';
 
 function authStub(): object {
   return {
@@ -37,6 +38,7 @@ const provider: Provider = {
   last_discovery_at: null,
   last_discovery_created: null,
   last_discovery_unchanged: null,
+  connectors: [],
 };
 
 const credential: Credential = {
@@ -52,6 +54,11 @@ const credential: Credential = {
   balance_updated_at: '2026-01-01T00:00:00.000Z',
   balance_updated_by: 'u1',
   balance_low_threshold: null,
+  balance_available: null,
+  balance_currency: null,
+  balance_error: null,
+  balance_fetched_at: null,
+  balance_gate: 'warn',
   status: 'ok',
   last_tested_at: '2026-01-01T00:05:00.000Z',
   cooldown_until: null,
@@ -102,6 +109,15 @@ describe('CatalogService', () => {
     expect(call.credentials).toBe('include');
     expect(call.body).toBeNull();
     expect(call.headers.get('X-CSRF-Token')).toBeNull();
+  });
+
+  it('normalizes an omitted connectors array on the provider view', async () => {
+    const { connectors: _omitted, ...withoutConnectors } = provider;
+    fetchMock.respond(jsonResponse(200, [withoutConnectors]));
+    const catalog = TestBed.inject(CatalogService);
+
+    const [loaded] = await catalog.listProviders();
+    expect(loaded.connectors).toEqual([]);
   });
 
   it('createProvider posts the provider with the CSRF header', async () => {
@@ -313,6 +329,81 @@ describe('CatalogService', () => {
     expect(call.method).toBe('POST');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
     expect(call.body).toEqual({ dry_run: true });
+  });
+
+  it('reads connector templates and one connector', async () => {
+    const view = {
+      provider_id: 'p1',
+      kind: 'catalog' as const,
+      configured: false,
+      enabled: false,
+      config: null,
+      updated_at: null,
+      updated_by: null,
+    };
+    fetchMock.respond(jsonResponse(200, []));
+    fetchMock.respond(jsonResponse(200, view));
+    const catalog = TestBed.inject(CatalogService);
+
+    await catalog.connectorTemplates('p1');
+    await expect(catalog.getConnector('p1', 'catalog')).resolves.toEqual(view);
+
+    expect(fetchMock.requests[0].url).toBe('/api/providers/p1/connectors/templates');
+    expect(fetchMock.requests[0].method).toBe('GET');
+    expect(fetchMock.requests[1].url).toBe('/api/providers/p1/connectors/catalog');
+    expect(fetchMock.requests[1].headers.get('X-CSRF-Token')).toBeNull();
+  });
+
+  it('saves a connector and previews it with CSRF-protected calls', async () => {
+    const config = emptyConnectorConfig('catalog');
+    fetchMock.respond(jsonResponse(200, { configured: true }));
+    fetchMock.respond(jsonResponse(200, { kind: 'catalog', body: '{}' }));
+    fetchMock.respond(jsonResponse(200, { kind: 'catalog', ok: true }));
+    const catalog = TestBed.inject(CatalogService);
+
+    await catalog.putConnector('p1', 'catalog', config, true);
+    await catalog.sampleConnector('p1', 'catalog', { config, credential_id: 'c1' });
+    await catalog.testConnector('p1', 'catalog', { config });
+
+    const [put, sample, test] = fetchMock.requests;
+    expect(put.url).toBe('/api/providers/p1/connectors/catalog');
+    expect(put.method).toBe('PUT');
+    expect(put.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(put.body).toEqual({ config, enabled: true });
+
+    expect(sample.method).toBe('POST');
+    expect(sample.url).toBe('/api/providers/p1/connectors/catalog/sample');
+    expect(sample.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(sample.body).toEqual({ config, credential_id: 'c1' });
+
+    expect(test.method).toBe('POST');
+    expect(test.url).toBe('/api/providers/p1/connectors/catalog/test');
+    expect(test.body).toEqual({ config });
+  });
+
+  it('refreshes prices, one balance, and every provider balance', async () => {
+    fetchMock.respond(jsonResponse(200, { ok: true, created: 1 }));
+    fetchMock.respond(jsonResponse(200, { ok: true, balance_usd: 5 }));
+    fetchMock.respond(jsonResponse(200, { refreshed: 2, failed: 0, results: [] }));
+    const catalog = TestBed.inject(CatalogService);
+
+    await catalog.refreshPrices('p1', 'c1');
+    await catalog.refreshCredentialBalance('p1', 'c1');
+    await catalog.refreshProviderBalances('p1');
+
+    const [prices, balance, balances] = fetchMock.requests;
+    expect(prices.url).toBe('/api/providers/p1/prices/refresh');
+    expect(prices.method).toBe('POST');
+    expect(prices.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(prices.body).toEqual({ credential_id: 'c1' });
+
+    expect(balance.url).toBe('/api/providers/p1/credentials/c1/balance/refresh');
+    expect(balance.method).toBe('POST');
+    expect(balance.headers.get('X-CSRF-Token')).toBe('csrf-1');
+
+    expect(balances.url).toBe('/api/providers/p1/balances/refresh');
+    expect(balances.method).toBe('POST');
+    expect(balances.headers.get('X-CSRF-Token')).toBe('csrf-1');
   });
 
   it('surfaces the stable error code and message from the envelope', async () => {

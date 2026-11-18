@@ -63,7 +63,7 @@
               [controlId]="'key-name'"
               [error]="showError('name') ? fieldError('name') : ''"
             >
-              <input id="key-name" type="text" formControlName="name" placeholder="laptop" />
+              <ui-input [id]="'key-name'" type="text" formControlName="name" placeholder="laptop" />
             </ui-field>
             <ui-field
               label="Expires at"
@@ -74,15 +74,15 @@
                   : ''
               "
             >
-              <input id="key-expires" type="datetime-local" formControlName="expires_at" />
+              <ui-input [id]="'key-expires'" type="datetime-local" formControlName="expires_at" />
             </ui-field>
             <ui-field
               label="Requests per minute"
               [controlId]="'key-rpm'"
               [error]="showError('rate_limit_rpm') ? fieldError('rate_limit_rpm') : ''"
             >
-              <input
-                id="key-rpm"
+              <ui-input
+                [id]="'key-rpm'"
                 type="number"
                 min="1"
                 step="1"
@@ -95,8 +95,8 @@
               [controlId]="'key-tpm'"
               [error]="showError('rate_limit_tpm') ? fieldError('rate_limit_tpm') : ''"
             >
-              <input
-                id="key-tpm"
+              <ui-input
+                [id]="'key-tpm'"
                 type="number"
                 min="1"
                 step="1"

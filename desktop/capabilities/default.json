@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability set for the main window. The window loads the gateway's own console over http://127.0.0.1, which is not granted IPC access to these commands (remote origins are excluded by default), and the shell itself calls no plugin commands from JavaScript.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
