@@ -142,11 +142,56 @@ The deb installs `pareto-desktop` and `pareto-gateway` side by side in
 `/usr/bin`; the shell finds the sidecar in its own directory, so the bundled
 layout needs no extra configuration.
 
+## Arch Linux (AUR)
+
+Four packages, updated by CI on every `v*` tag (see *Publishing to AUR*):
+
+| Package | Contents |
+| --- | --- |
+| `pareto-gateway` | Server only, built from source: `/usr/bin/pareto-gateway` + the daemon |
+| `pareto-gateway-bin` | The same, from the prebuilt release tarball |
+| `pareto-ai` | Desktop app built from source: tray shell + bundled gateway + the daemon |
+| `pareto-ai-bin` | The same, from the prebuilt release tarball |
+
+The server family is the lightweight install (no GTK/WebKit dependencies). The
+desktop family bundles its own gateway copy (`/usr/lib/pareto-desktop/`, also
+symlinked as `/usr/bin/pareto-gateway`), so **the two families conflict**: only
+one can be installed at a time, and either one is enough to run the gateway.
+
+Every package ships the same daemon, so the gateway runs headless:
+
+```bash
+sudo systemctl enable --now pareto-gateway   # http://127.0.0.1:8081
+sudo systemctl edit pareto-gateway           # or edit /etc/pareto-gateway.conf
+```
+
+State lives in `/var/lib/pareto-gateway` (created by `StateDirectory`); the
+first run serves the setup wizard at the console URL. With the desktop family
+the tray app manages its **own** per-user instance (random port, data in
+`~/.local/share/dev.logicamp.paretoai/`), independent of the daemon — use one
+or the other.
+
+### Publishing to AUR
+
+`packaging/arch/` holds the four canonical PKGBUILDs plus `pareto-gateway.service`,
+`pareto-gateway.sysusers`, `pareto-gateway.conf`, `pareto-ai.desktop` and
+`publish-aur.sh`. On a `v*` tag, after the GitHub Release is up, the
+`publish-aur` jobs in `ci.yml` (server) and `desktop.yml` (desktop) copy each
+PKGBUILD into its AUR repo, inject the version and the real b2sum, regenerate
+`.SRCINFO` and push — the `dicto` flow. Hand-edits on AUR are overwritten on
+the next release.
+
+This needs the `AUR_SSH_PRIVATE_KEY` repository secret (an ed25519 key
+registered on the AUR account, `https://aur.archlinux.org/account/ssh`); the
+same key publishes all four packages. Without the secret the release still
+ships, but the `publish-aur` jobs fail.
+
 The plain server binaries — no desktop shell — are a separate CI artifact from
 `.github/workflows/ci.yml` (the `gateway` job):
 `pareto-gateway-<version>-linux-x86_64.tar.gz` and
 `pareto-gateway-<version>-windows-x64.zip`, each holding the embedded-UI binary
-as `pareto-gateway[.exe]` and the api-only one as `pareto-gateway-api[.exe]`.
+as `pareto-gateway[.exe]` and the api-only one as `pareto-gateway-api[.exe]`,
+plus the systemd daemon files on Linux.
 Every run uploads them to the run's *Artifacts* section: the `gateway` job waits
 only for the web **build** (`web`), never for the UI tests (`web-check`), so a
 failing test run still publishes downloadable server binaries. They are attached
@@ -228,6 +273,11 @@ Windows:
 
 Keep every key out of the repository; only the CI secret store holds them.
 
+AUR publishing (optional): the `AUR_SSH_PRIVATE_KEY` secret is an ed25519
+private key whose public half is registered on the AUR account. It is
+account-wide (AUR has no per-package deploy keys) and updates all four
+packages; see *Arch Linux (AUR)* above.
+
 ## Cross-compile limits
 
 - This Linux host can only build Linux bundles. Windows needs MSVC + WebView2,
@@ -257,6 +307,7 @@ Keep every key out of the repository; only the CI secret store holds them.
 | `cargo check` / `cargo clippy --all-targets -- -D warnings` in `desktop/` | clean |
 | `cargo test` in `desktop/` | 4 tests pass (health probe, free port, timeout, log tail) |
 | `just desktop-check` after the tray change | clean (fmt, clippy `-D warnings`, 4 tests); the tray and hide-on-close behaviour itself was not exercised (no usable display automation here) |
+| AUR packaging (2026-11-18) | `makepkg --printsrcinfo` clean for all four PKGBUILDs, `systemd-analyze verify` clean for the unit (only "binary not installed" on this machine), `bash -n publish-aur.sh` clean; a real `makepkg` build is only possible after the first `v*` tag exists |
 | gateway sidecar with the app's env (`GATEWAY_DATA_DIR`, `GATEWAY_LISTEN`, `GATEWAY_INSECURE_COOKIES`) | `/health` 200, `/api/setup/status` reports `mode=setup`, master key generated in the data dir |
 | `pnpm tauri build --debug --no-bundle` | binary built |
 | `pnpm tauri build --debug --bundles deb,rpm` | both bundles built |

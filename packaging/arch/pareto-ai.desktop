@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Pareto AI
+GenericName=AI model router
+Comment=Local AI model router with a spend and quality console
+Exec=pareto-desktop
+Icon=pareto-ai
+Terminal=false
+Categories=Development;Network;
+Keywords=ai;llm;router;gateway;openai;proxy;budget;
+StartupNotify=true

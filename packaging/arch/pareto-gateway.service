@@ -1,0 +1,35 @@
+[Unit]
+Description=Pareto AI gateway (local AI model router)
+Documentation=https://github.com/mohamadkhani/pareto-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=pareto-gateway
+Group=pareto-gateway
+StateDirectory=pareto-gateway
+WorkingDirectory=/var/lib/pareto-gateway
+# Defaults; override in /etc/pareto-gateway.conf and restart the unit.
+Environment=GATEWAY_DATA_DIR=/var/lib/pareto-gateway
+Environment=GATEWAY_LISTEN=127.0.0.1:8081
+# Plain HTTP on loopback: a Secure cookie would never be sent back. Set
+# GATEWAY_INSECURE_COOKIES=0 in /etc/pareto-gateway.conf when TLS terminates
+# in front of the gateway.
+Environment=GATEWAY_INSECURE_COOKIES=1
+EnvironmentFile=-/etc/pareto-gateway.conf
+ExecStart=/usr/bin/pareto-gateway
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the gateway only needs its state directory, TCP and /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

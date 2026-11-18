@@ -28,7 +28,8 @@
 # falls back to a local `pnpm run build` only when the artifact is unavailable
 # (for example a re-run of a single job). On a `v*` tag the release job attaches
 # the artifacts to the GitHub Release — only when web-check, rust and gateway
-# are all green.
+# are all green — and `publish-aur` updates the server AUR packages with the
+# AUR_SSH_PRIVATE_KEY secret (desktop packages are published by desktop.yml).
 #
 # No secrets are required. Desktop packaging lives in desktop.yml.
 
@@ -262,7 +263,9 @@ jobs:
           cp "target/${{ matrix.target }}/release/gateway${{ matrix.ext }}" \
              "../dist/bin/pareto-gateway-api${{ matrix.ext }}"
 
-      # Layout inside the archive: the two binaries plus LICENSE and README.md.
+      # Layout inside the archive: the two binaries plus LICENSE, README.md and
+      # the systemd daemon files (also consumed by the AUR pareto-gateway-bin
+      # PKGBUILD).
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -274,6 +277,9 @@ jobs:
           mkdir -p "dist/$name"
           cp dist/bin/* "dist/$name/"
           cp LICENSE README.md "dist/$name/"
+          cp packaging/arch/pareto-gateway.service \
+             packaging/arch/pareto-gateway.sysusers \
+             packaging/arch/pareto-gateway.conf "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ls -l "dist/$name.tar.gz"
 
@@ -301,6 +307,35 @@ jobs:
           # No retention override: same repository retention as the desktop
           # installers, so the server binaries do not expire earlier.
 
+  # Lints the AUR recipes (missing depends, bad perms, wrong install paths) on
+  # every run; the real build test happens on the first user's makepkg. PLACEHOLDER
+  # sums are swapped for SKIP so namcap's checksum checks pass; CI injects the
+  # real sums only when publishing.
+  aur-lint:
+    name: Lint PKGBUILDs with namcap
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git namcap
+
+      - uses: actions/checkout@v4
+
+      - name: Lint PKGBUILDs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in packaging/arch/pareto-gateway packaging/arch/pareto-gateway-bin \
+                     packaging/arch/pareto-ai packaging/arch/pareto-ai-bin; do
+            cp "$pkg/PKGBUILD" /tmp/PKGBUILD
+            sed -i "s/'PLACEHOLDER'/'SKIP'/" /tmp/PKGBUILD
+            echo "::group::namcap $pkg"
+            namcap /tmp/PKGBUILD
+            echo "::endgroup::"
+          done
+
   release:
     name: Attach gateway binaries to the GitHub Release
     # A release attaches only when the whole gate is green. The gateway job
@@ -323,3 +358,49 @@ jobs:
           files: artifacts/**/*
           fail_on_unmatched_files: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Updates the server-only AUR packages (pareto-gateway, pareto-gateway-bin)
+  # on every v* tag. The desktop family is published by desktop.yml.
+  publish-aur:
+    name: Publish AUR packages (server)
+    needs: release
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git openssh curl
+
+      - uses: actions/checkout@v4
+
+      # The AUR push uses an ed25519 key registered on the AUR account,
+      # stored as the AUR_SSH_PRIVATE_KEY repo secret. AUR has no per-package
+      # deploy keys, so that key is account-wide — treat it as a credential.
+      - name: Publish pareto-gateway (source) to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          export AUR_REPO=pareto-gateway
+          export PKGBUILD_PATH=packaging/arch/pareto-gateway/PKGBUILD
+          curl -fsSL "https://github.com/mohamadkhani/pareto-ai/archive/refs/tags/v${VERSION}.tar.gz" -o /tmp/tag-tarball.tar.gz
+          export B2SUM="$(b2sum /tmp/tag-tarball.tar.gz | awk '{print $1}')"
+          packaging/arch/publish-aur.sh
+
+      - name: Publish pareto-gateway-bin (prebuilt) to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          export AUR_REPO=pareto-gateway-bin
+          export PKGBUILD_PATH=packaging/arch/pareto-gateway-bin/PKGBUILD
+          TARBALL_URL="https://github.com/mohamadkhani/pareto-ai/releases/download/v${VERSION}/pareto-gateway-${VERSION}-linux-x86_64.tar.gz"
+          curl -fsSL "$TARBALL_URL" -o /tmp/release-tarball.tar.gz
+          export B2SUM="$(b2sum /tmp/release-tarball.tar.gz | awk '{print $1}')"
+          packaging/arch/publish-aur.sh
