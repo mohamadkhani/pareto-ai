@@ -263,7 +263,7 @@ function normalizeTab(tab: string): string {
     UiTabs,
   ],
   templateUrl: './connectors.html',
-  styleUrl: './connectors.css',
+  styleUrl: './connectors.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Connectors implements OnInit {

@@ -129,7 +129,7 @@ type PreviewSource = { kind: 'draft'; input: ComboInput } | { kind: 'saved'; com
     UiTabs,
   ],
   templateUrl: './combos.html',
-  styleUrl: './combos.css',
+  styleUrl: './combos.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Combos {

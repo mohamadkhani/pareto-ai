@@ -1,0 +1,176 @@
+.models ui-banner
+  display: block
+  margin-bottom: var(--space-4)
+.models-toolbar
+  display: flex
+  align-items: flex-end
+  gap: var(--space-3)
+  margin-bottom: var(--space-3)
+  flex-wrap: wrap
+.result-count
+  margin: 0 0 var(--space-2)
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.models-toolbar ui-field
+  min-width: 14rem
+.toolbar-spacer
+  flex: 1
+.sync-status
+  display: flex
+  flex-wrap: wrap
+  gap: var(--space-2) var(--space-4)
+  margin-bottom: var(--space-4)
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.sync-status__item
+  display: inline-flex
+  align-items: center
+  gap: var(--space-2)
+  flex-wrap: wrap
+.sync-status__label
+  color: var(--text)
+  font-weight: var(--weight-semibold)
+.sync-status__value
+  font-family: var(--font-mono)
+.sync-status__error
+  color: var(--danger)
+.sort-button
+  display: inline-flex
+  align-items: center
+  gap: var(--space-1)
+  padding: 0
+  border: 0
+  background: none
+  color: inherit
+  font: inherit
+  letter-spacing: inherit
+  text-transform: inherit
+  cursor: pointer
+.sort-button:hover
+  color: var(--text)
+.sort-button:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: 2px
+  border-radius: var(--radius-sm)
+.sort-indicator
+  font-family: var(--font-mono)
+  font-size: var(--text-badge)
+th.num,
+td.num
+  text-align: right
+th.num .sort-button
+  width: 100%
+  justify-content: flex-end
+.model-name
+  display: block
+  font-weight: var(--weight-semibold)
+.model-family
+  display: block
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.price-cell
+  white-space: nowrap
+.price
+  display: block
+  font-family: var(--font-mono)
+.price-min
+  display: block
+  color: var(--text-muted)
+  font-family: var(--font-mono)
+  font-size: var(--text-small)
+.basis-label
+  color: var(--text-muted)
+  font-family: var(--font-mono)
+  font-size: var(--text-badge)
+  font-weight: var(--weight-regular)
+  text-transform: none
+.price-cell ui-badge
+  margin-left: var(--space-1)
+.mix-table
+  margin-top: var(--space-3)
+.mix-table tfoot th,
+.mix-table tfoot td
+  border-top: 1px solid var(--border-strong)
+  border-bottom: 0
+  font-weight: var(--weight-semibold)
+.mix-table thead th:first-child,
+.mix-table tbody th
+  text-align: left
+.price-missing
+  color: var(--text-muted)
+.quality-score
+  display: inline-block
+  margin-right: var(--space-2)
+  font-family: var(--font-mono)
+.actions
+  white-space: nowrap
+  text-align: right
+.empty-link
+  color: var(--accent)
+  font-weight: var(--weight-semibold)
+.detail
+  display: flex
+  flex-direction: column
+  gap: var(--space-5)
+.detail-section h3
+  margin: 0 0 var(--space-2)
+  font-family: var(--font-display)
+  font-size: var(--text-h3)
+.facts
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr))
+  gap: var(--space-2) var(--space-4)
+  margin: 0
+.facts dt
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.facts dd
+  margin: 0
+  font-size: var(--text-body)
+.note
+  margin: var(--space-2) 0 0
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.price-grid
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr))
+  gap: var(--space-3)
+.mini-table
+  width: 100%
+  border-collapse: collapse
+  font-size: var(--text-small)
+.mini-table th,
+.mini-table td
+  padding: var(--space-2)
+  border-bottom: 1px solid var(--border-subtle)
+  text-align: right
+.mini-table th:first-child
+  text-align: left
+.mini-table thead th
+  color: var(--text-muted)
+  font-weight: var(--weight-semibold)
+.override-editor
+  display: flex
+  align-items: flex-end
+  gap: var(--space-3)
+  flex-wrap: wrap
+  margin-top: var(--space-3)
+.override-editor ui-field
+  flex: 1
+  min-width: 12rem
+.override-editor ui-banner
+  display: block
+  margin-top: var(--space-2)
+.model-form
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr))
+  gap: var(--space-3) var(--space-4)
+.form-full
+  grid-column: 1 / -1
+.section-label
+  display: block
+  margin-bottom: var(--space-2)
+  font-weight: var(--weight-semibold)
+  font-size: var(--text-body)
+.offering-remove
+  margin-top: var(--space-3)

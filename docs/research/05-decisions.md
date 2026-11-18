@@ -918,6 +918,31 @@ so operator edits are never silently replaced. The UI calls the surface
 `/providers?setup=<id>&tab=prices|balance|health`; API and DB names stay
 `connectors/*`.
 
+### D53. The console is styled with indented Sass, without a formatter
+
+**Decision (user, 2026-11-19):** every stylesheet under `web/src` is indented
+Sass (`.sass`), not plain CSS and not SCSS. `web/src/styles.sass` is the global
+entry and `@use`s six partials in load order: `_fonts.sass`, `_tokens.sass`,
+`_themes.sass`, `_base.sass`, `_utilities.sass`, `_components.sass`. Each
+component points its `styleUrl`/`styleUrls` at its own `.sass` file, primitives
+included. `sass` is a devDependency; Angular compiles the indented syntax once
+it is installed.
+
+**Why:** the user prefers the indentation-based syntax over CSS/SCSS braces,
+and `@use` replaces the old `@import` entry list with an explicit, ordered
+module graph. The converter output was checked against the previous production
+CSS: the emitted global bundle is semantically identical (329 rules and
+declarations, same order; only Sass's harmless `@charset "UTF-8"`, single- to
+double-quote normalisation, and the removal of `calc()` inside `min()` differ).
+
+**Consequences:** Prettier cannot parse indented Sass, so `just ui-fmt`
+(`prettier --check src/`) skips these files and no auto-formatter exists; the
+Angular build is the syntax check, and `src/app/style-extension.spec.ts` fails
+if any `.css` file reappears under `web/src` (the allowlist is empty). Declaration
+order is load order, so the `@use` list must stay fonts → tokens → themes →
+base → utilities → components. Note: the requested decision number "D50" was
+already taken by breaker visibility, so the styles decision is recorded as D53.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

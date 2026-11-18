@@ -187,7 +187,7 @@ function emptyPriceDraft(): PriceDraft {
     UiTable,
   ],
   templateUrl: './models.html',
-  styleUrl: './models.css',
+  styleUrl: './models.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown)': 'onDocumentKeydown($event)' },
 })

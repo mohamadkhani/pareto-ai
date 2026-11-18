@@ -1,0 +1,153 @@
+.intro
+  margin: 0 0 var(--space-4)
+  color: var(--text-muted)
+.form-stack
+  display: flex
+  flex-direction: column
+  gap: var(--space-4)
+.template-row
+  display: flex
+  align-items: flex-end
+  gap: var(--space-3)
+.template-row ui-field
+  flex: 1
+.section-title
+  margin: 0
+  font-family: var(--font-display)
+  font-size: var(--text-h3)
+.note
+  margin: 0
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.pointer-grid
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))
+  gap: var(--space-3)
+.pointer-row
+  display: flex
+  flex-direction: column
+  gap: var(--space-1)
+  padding: var(--space-2)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+.pointer-row.is-active
+  border-color: var(--accent)
+  background: var(--surface-hover)
+.pointer-head
+  display: flex
+  align-items: center
+  gap: var(--space-2)
+.pointer-label
+  font-weight: var(--weight-semibold)
+.picking
+  color: var(--accent)
+  font-size: var(--text-small)
+.sample-value
+  color: var(--text-muted)
+  font-family: var(--font-mono)
+  font-size: var(--text-small)
+.tier-helper
+  display: flex
+  flex-wrap: wrap
+  align-items: center
+  justify-content: space-between
+  gap: var(--space-3)
+  padding: var(--space-3)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+  background: var(--surface-sunken)
+.tier-options
+  display: flex
+  gap: var(--space-2)
+.unit-grid
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr))
+  gap: var(--space-3)
+.example
+  margin: 0
+  padding: var(--space-2) var(--space-3)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+  background: var(--surface-sunken)
+  font-family: var(--font-mono)
+  font-size: var(--text-body)
+.headers
+  display: flex
+  flex-direction: column
+  gap: var(--space-2)
+.header-row
+  display: flex
+  align-items: center
+  gap: var(--space-2)
+.header-row ui-input
+  flex: 1
+.preview-actions
+  display: flex
+  flex-wrap: wrap
+  align-items: center
+  gap: var(--space-3)
+.summary
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.configured
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.sample summary
+  cursor: pointer
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.sample app-json-tree
+  margin-top: var(--space-2)
+.warning-list
+  margin: 0
+  padding-left: var(--space-4)
+.warnings-cell
+  display: flex
+  flex-direction: column
+  gap: var(--space-1)
+.warning-text
+  color: var(--warning)
+  font-size: var(--text-small)
+tr.is-warning
+  background: var(--warning-soft)
+tr.is-warning .warning-text
+  font-weight: var(--weight-semibold)
+.muted
+  color: var(--text-muted)
+.gate-list
+  display: flex
+  flex-direction: column
+  gap: var(--space-2)
+.gate-row
+  display: flex
+  flex-wrap: wrap
+  align-items: flex-end
+  gap: var(--space-3)
+  padding: var(--space-2)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+.gate-label
+  display: flex
+  flex-direction: column
+  flex: 1
+  min-width: 10rem
+.gate-balance
+  font-weight: var(--weight-semibold)
+.gate-detail
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.balance-result
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr))
+  gap: var(--space-3)
+  margin: 0
+  padding: var(--space-3)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+  background: var(--surface-sunken)
+.balance-result dt
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.balance-result dd
+  margin: 0
+  font-family: var(--font-mono)

@@ -57,7 +57,7 @@ interface TokenSwatch {
     UiTextarea,
   ],
   templateUrl: './styleguide.html',
-  styleUrl: './styleguide.css',
+  styleUrl: './styleguide.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Styleguide {

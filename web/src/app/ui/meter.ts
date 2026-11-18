@@ -10,7 +10,7 @@ export type MeterTone = 'accent' | 'success' | 'warning' | 'danger';
 @Component({
   selector: 'ui-meter',
   templateUrl: './meter.html',
-  styleUrl: './meter.css',
+  styleUrl: './meter.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

@@ -13,7 +13,7 @@ export interface Attention {
   selector: 'app-dashboard-attention',
   imports: [RouterLink],
   templateUrl: './attention.html',
-  styleUrl: './attention.css',
+  styleUrl: './attention.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class DashboardAttention {

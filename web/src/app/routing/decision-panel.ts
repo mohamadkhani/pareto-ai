@@ -24,7 +24,7 @@ const MARKER_HELP: Record<ScoreMarker, string> = {
   selector: 'app-decision-panel',
   imports: [UiBadge, UiCard, UiTable],
   templateUrl: './decision-panel.html',
-  styleUrl: './decision-panel.css',
+  styleUrl: './decision-panel.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class DecisionPanel {

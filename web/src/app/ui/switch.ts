@@ -7,7 +7,7 @@ import { ChangeDetectionStrategy, Component, input, model } from '@angular/core'
 @Component({
   selector: 'ui-switch',
   templateUrl: './switch.html',
-  styleUrl: './switch.css',
+  styleUrl: './switch.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class.is-disabled]': 'disabled()' },
 })

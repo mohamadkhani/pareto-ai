@@ -22,7 +22,7 @@ export interface ActivityRow {
   selector: 'app-dashboard-activity',
   imports: [RouterLink, UiBadge, UiBanner, UiCard, UiTable],
   templateUrl: './activity.html',
-  styleUrl: './activity.css',
+  styleUrl: './activity.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class DashboardActivity {

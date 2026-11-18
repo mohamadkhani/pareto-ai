@@ -89,7 +89,7 @@ function buildPatch(key: ApiKeyView, raw: { name: string; expires_at: string }):
     UiTable,
   ],
   templateUrl: './keys.html',
-  styleUrl: './keys.css',
+  styleUrl: './keys.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Keys {

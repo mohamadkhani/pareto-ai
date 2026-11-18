@@ -1,0 +1,165 @@
+// Shared classes that are not owned by a single component: page chrome still
+// used by migrated pages, plus primitives whose content is projected and
+// therefore cannot be styled with component-scoped CSS.
+//
+// The pre-design-system classes (.btn, .badge, .card, .data-table, .field,
+// .banner, …) were removed once the pages moved to `web/src/app/ui/`. What is
+// left is listed below and every rule is still referenced by markup. New code
+// should use the primitives instead.
+// Page header used by every page: `<header class="page-head"><h1>…`
+.page-head h1
+  margin: 0
+  font-size: var(--text-h1)
+/*
+ * Muted one-line description under a page title.
+ */
+.hint
+  margin: var(--space-1) 0 var(--space-5)
+  color: var(--text-muted)
+  font-size: var(--text-body)
+/*
+ * Plain surface for the "Forbidden" state on admin pages.
+ */
+.card
+  background: var(--surface)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+  padding: var(--space-5)
+.card h2
+  margin: 0 0 var(--space-3)
+  font-size: var(--text-h2)
+/*
+ * Row of controls above a table; `.spacer` pushes the right-hand group over.
+ */
+.toolbar
+  display: flex
+  align-items: center
+  gap: var(--space-3)
+  margin-bottom: var(--space-4)
+  flex-wrap: wrap
+.toolbar .spacer
+  flex: 1
+/*
+ * Two-column-ish form layout shared by the form dialogs.
+ */
+.form-grid
+  display: grid
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr))
+  gap: var(--space-3) var(--space-4)
+  align-items: start
+/*
+ * Inline validation message under a field.
+ */
+.field-error
+  margin: 0
+  color: var(--danger)
+  font-size: var(--text-small)
+/*
+ * Stand-in for a table/list body while it loads or is empty.
+ */
+.empty-note
+  color: var(--text-muted)
+  font-size: var(--text-body)
+/*
+ * --- Primitives whose content is projected and therefore styled globally. ---
+ */
+.ui-table table
+  width: 100%
+  border-collapse: collapse
+  font-size: var(--text-small)
+.ui-table th,
+.ui-table td
+  text-align: left
+  padding: var(--space-2) var(--space-3)
+  border-bottom: 1px solid var(--border-subtle)
+  vertical-align: top
+.ui-table thead th
+  background: var(--surface-sunken)
+  color: var(--text-muted)
+  font-size: var(--text-small)
+  font-weight: var(--weight-semibold)
+  letter-spacing: 0.04em
+  text-transform: uppercase
+  white-space: nowrap
+.ui-table tbody tr:hover
+  background: var(--surface-hover)
+.ui-table tbody tr:last-child td
+  border-bottom: none
+.ui-table.is-dense th,
+.ui-table.is-dense td
+  padding: var(--space-1) var(--space-2)
+.ui-table.is-sticky thead th
+  position: sticky
+  top: 0
+  z-index: var(--z-sticky)
+dialog::backdrop
+  background: var(--backdrop)
+/*
+ * Dialog actions are projected content, so the component-scoped footer cannot
+ * lay out the buttons itself. `display: contents` promotes the buttons into
+ * the footer flex row, which gives them the footer's gap and alignment.
+ */
+.dialog-actions > [ui-dialog-actions]
+  display: contents
+/*
+ * Icons are projected into icon buttons, so their size lives globally.
+ */
+.ui-icon-button svg
+  width: 1.15em
+  height: 1.15em
+/*
+ * --- Auth screens (sign in and forced password change) ---
+ */
+.auth-page
+  display: flex
+  align-items: center
+  justify-content: center
+  min-height: 100dvh
+  padding: var(--space-6) var(--space-4)
+.auth-card
+  display: flex
+  flex-direction: column
+  gap: var(--space-4)
+  width: 100%
+  max-width: 26rem
+  padding: var(--space-6)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-lg)
+  background: var(--surface)
+  box-shadow: var(--shadow-md)
+.auth-card__head
+  display: flex
+  flex-direction: column
+  gap: var(--space-1)
+.auth-card__title
+  margin: 0
+  font-size: var(--text-h1)
+.auth-card__subtitle
+  margin: 0
+  color: var(--text-muted)
+  font-size: var(--text-small)
+  line-height: var(--leading-relaxed)
+.auth-card__actions
+  display: flex
+  flex-direction: column
+  gap: var(--space-2)
+  margin-top: var(--space-2)
+/*
+ * Loading placeholders shared by card and table bodies.
+ */
+.skeleton
+  display: flex
+  flex-direction: column
+  gap: var(--space-2)
+.skeleton-value
+  width: 45%
+  height: 2rem
+  border-radius: var(--radius-xs)
+  background: var(--surface-sunken)
+.skeleton-line
+  width: 80%
+  height: 0.7rem
+  border-radius: var(--radius-xs)
+  background: var(--surface-sunken)
+.skeleton-line.is-short
+  width: 55%

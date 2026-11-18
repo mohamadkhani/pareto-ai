@@ -6,7 +6,7 @@ export type BadgeTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info' | 
 @Component({
   selector: 'ui-badge',
   template: '<ng-content />',
-  styleUrl: './badge.css',
+  styleUrl: './badge.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

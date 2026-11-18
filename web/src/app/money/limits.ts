@@ -60,7 +60,7 @@ function progressPercent(used: number, limit: number): number {
     UiTable,
   ],
   templateUrl: './limits.html',
-  styleUrl: './limits.css',
+  styleUrl: './limits.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Limits {

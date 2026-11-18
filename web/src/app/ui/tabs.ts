@@ -24,7 +24,7 @@ let nextTabsId = 0;
 @Component({
   selector: 'ui-tabs',
   templateUrl: './tabs.html',
-  styleUrl: './tabs.css',
+  styleUrl: './tabs.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class UiTabs {

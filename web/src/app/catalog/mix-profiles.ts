@@ -84,7 +84,7 @@ function emptyDraft(): ProfileDraft {
   selector: 'app-mix-profiles',
   imports: [UiBadge, UiBanner, UiButton, UiDialog, UiField, UiInput, UiSelect, UiTable],
   templateUrl: './mix-profiles.html',
-  styleUrl: './mix-profiles.css',
+  styleUrl: './mix-profiles.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class MixProfiles {

@@ -104,7 +104,7 @@ interface ExposureNote {
     UiIconButton,
   ],
   templateUrl: './shell.html',
-  styleUrl: './shell.css',
+  styleUrl: './shell.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(document:keydown.escape)': 'onEscape()' },
 })

@@ -29,7 +29,7 @@ export type DialogSize = 'md' | 'lg';
 @Component({
   selector: 'ui-dialog',
   templateUrl: './dialog.html',
-  styleUrl: './dialog.css',
+  styleUrl: './dialog.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class UiDialog implements AfterViewInit {

@@ -1,0 +1,62 @@
+// Theme value sets. `data-theme` lives on <html> in the app; the styleguide
+// also sets it on a wrapper element to render both themes side by side, so
+// selectors target any element carrying the attribute.
+:root,
+html[data-theme='light'],
+[data-theme='light']
+  color-scheme: light
+  --bg: #f4f6f9
+  --surface: #ffffff
+  --surface-raised: #ffffff
+  --surface-sunken: #eceff4
+  --surface-hover: #f1f4f8
+  --border: #838da0
+  --border-subtle: #d9e0e9
+  --border-strong: #5f6b7d
+  --border-hover: #6f7b8c
+  --text: #16202e
+  --text-muted: #4d5968
+  --accent: #2456c4
+  --accent-hover: #1e4bb5
+  --accent-contrast: #ffffff
+  --accent-soft: #e8f0fe
+  --success: #1a6b3c
+  --success-soft: #e7f5ec
+  --warning: #7a4900
+  --warning-soft: #fff4e5
+  --danger: #a3261e
+  --danger-soft: #fdecea
+  --info: #1e4b9e
+  --info-soft: #e8f0fe
+  --focus-ring: #2456c4
+  --backdrop: rgb(12 17 25 / 0.55)
+  --shadow-color: rgb(23 32 46 / 0.14)
+html[data-theme='dark'],
+[data-theme='dark']
+  color-scheme: dark
+  --bg: #12161d
+  --surface: #1b2230
+  --surface-raised: #222b3b
+  --surface-sunken: #0d1117
+  --surface-hover: #263043
+  --border: #7c8ba3
+  --border-subtle: #303a4b
+  --border-strong: #aab6c8
+  --border-hover: #93a2b8
+  --text: #e8edf4
+  --text-muted: #aab6c8
+  --accent: #8fb3ff
+  --accent-hover: #b3cbff
+  --accent-contrast: #10151d
+  --accent-soft: #1c2b47
+  --success: #5cc28a
+  --success-soft: #14251c
+  --warning: #f0b45e
+  --warning-soft: #2a2113
+  --danger: #ff8a80
+  --danger-soft: #2b1715
+  --info: #8fb3ff
+  --info-soft: #151d2b
+  --focus-ring: #8fb3ff
+  --backdrop: rgb(0 0 0 / 0.65)
+  --shadow-color: rgb(0 0 0 / 0.45)

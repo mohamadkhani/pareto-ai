@@ -1,0 +1,19 @@
+.actions
+  white-space: nowrap
+.actions ui-button + ui-button
+  margin-left: var(--space-2)
+.status-cell ui-badge + ui-badge
+  margin-left: var(--space-1)
+/*
+ * The reset dialog carries the warning and the form with some breathing room.
+ */
+.reset-panel form
+  margin-top: var(--space-4)
+/*
+ * The row is the drawer trigger, so it must read as interactive.
+ */
+.user-row
+  cursor: pointer
+.user-row:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: -2px

@@ -75,7 +75,7 @@ function groupKey(group: UsageGroup, groupBy: UsageGroupBy): string {
     UiTabs,
   ],
   templateUrl: './usage.html',
-  styleUrl: './usage.css',
+  styleUrl: './usage.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Usage {

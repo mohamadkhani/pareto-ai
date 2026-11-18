@@ -119,7 +119,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
       </ul>
     }
   `,
-  styleUrl: './json-tree.css',
+  styleUrl: './json-tree.sass',
 })
 export class JsonTree {
   /** Parsed JSON document (not a string). */

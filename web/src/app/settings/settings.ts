@@ -23,7 +23,7 @@ function describeError(err: unknown): string {
   selector: 'app-settings',
   imports: [UiBanner, UiButton, UiCard, UiEmpty, UiField, UiInput],
   templateUrl: './settings.html',
-  styleUrl: './settings.css',
+  styleUrl: './settings.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Settings {

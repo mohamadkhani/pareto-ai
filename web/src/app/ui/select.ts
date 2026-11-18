@@ -17,7 +17,7 @@ import { UI_FIELD } from './field';
 @Component({
   selector: 'ui-select',
   templateUrl: './select.html',
-  styleUrls: ['./control.css', './select.css'],
+  styleUrls: ['./control.sass', './select.sass'],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class.size-sm]': "size() === 'sm'" },
   providers: [{ provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => UiSelect), multi: true }],

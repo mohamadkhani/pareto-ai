@@ -24,7 +24,7 @@ function describeError(err: unknown): string {
   selector: 'app-audit',
   imports: [UiBadge, UiBanner, UiButton, UiEmpty, UiTable],
   templateUrl: './audit.html',
-  styleUrl: './audit.css',
+  styleUrl: './audit.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Audit {

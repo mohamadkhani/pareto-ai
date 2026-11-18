@@ -6,7 +6,7 @@ export type BannerTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
 @Component({
   selector: 'ui-banner',
   templateUrl: './banner.html',
-  styleUrl: './banner.css',
+  styleUrl: './banner.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

@@ -36,7 +36,7 @@ export type InputType =
 @Component({
   selector: 'ui-input',
   templateUrl: './input.html',
-  styleUrl: './control.css',
+  styleUrl: './control.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class.size-sm]': "size() === 'sm'" },
   providers: [{ provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => UiInput), multi: true }],

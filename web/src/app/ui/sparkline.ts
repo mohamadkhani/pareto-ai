@@ -13,7 +13,7 @@ const PAD = 3;
 @Component({
   selector: 'ui-sparkline',
   templateUrl: './sparkline.html',
-  styleUrl: './sparkline.css',
+  styleUrl: './sparkline.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class UiSparkline {

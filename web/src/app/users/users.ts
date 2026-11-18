@@ -66,7 +66,7 @@ function fieldErrorText(control: AbstractControl, field: string): string {
     UserDrawer,
   ],
   templateUrl: './users.html',
-  styleUrl: './users.css',
+  styleUrl: './users.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Users {

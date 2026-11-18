@@ -2,13 +2,13 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 
 /**
  * Scroll wrapper for a projected `<table>`; styling of the projected cells is
- * global (see `styles/components.css`). `sticky` pins the header, `dense`
+ * global (see `styles/_components.sass`). `sticky` pins the header, `dense`
  * tightens cell padding.
  */
 @Component({
   selector: 'ui-table',
   templateUrl: './table.html',
-  styleUrl: './table.css',
+  styleUrl: './table.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

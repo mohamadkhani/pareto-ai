@@ -8,7 +8,7 @@ import { ChangeDetectionStrategy, Component, input, model } from '@angular/core'
 @Component({
   selector: 'ui-checkbox',
   templateUrl: './checkbox.html',
-  styleUrl: './checkbox.css',
+  styleUrl: './checkbox.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class.is-disabled]': 'disabled()' },
 })

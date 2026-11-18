@@ -20,7 +20,7 @@ export type ButtonSize = 'sm' | 'md';
   selector: 'ui-button',
   imports: [UiSpinner],
   templateUrl: './button.html',
-  styleUrl: './button.css',
+  styleUrl: './button.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

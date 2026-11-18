@@ -157,6 +157,12 @@ just verify    # just check, then the production binary
 `just` lists every recipe (`just build`, `just test`, `just dev`, `just dev-ui`,
 `just ui-test`, ...).
 
+The console in `web/` is styled with indented Sass (`.sass`, D53): the global
+entry is `web/src/styles.sass` and every component has its own `.sass` file. No
+`.css` file may exist under `web/src` — a Vitest guardrail fails if one appears.
+Prettier cannot format the indented syntax and is not used for it; the Angular
+build is the syntax check. See [`web/README.md`](web/README.md).
+
 ## Dependencies and the cargo cache
 
 `crates.io` is reachable again (2026-11-17), so `cargo add` works normally.

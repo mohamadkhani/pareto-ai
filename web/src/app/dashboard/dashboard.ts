@@ -112,7 +112,7 @@ function errorPercent(entries: readonly RequestLogEntry[]): number | null {
     DashboardAttention,
   ],
   templateUrl: './dashboard.html',
-  styleUrl: './dashboard.css',
+  styleUrl: './dashboard.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Dashboard {

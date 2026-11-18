@@ -1,8 +1,8 @@
 # pareto-ai web console
 
 Angular admin console for the pareto-ai gateway (last rewritten 2026-11-16 at
-`d864224`). Plain CSS, standalone components, signals, strict TypeScript — no
-UI framework. JavaScript tooling is pnpm (D21); from the repo root the `just`
+`d864224`). Indented Sass (`.sass`, D53), standalone components, signals, strict
+TypeScript — no UI framework. JavaScript tooling is pnpm (D21); from the repo root the `just`
 recipes (`just ui-build`, `just ui-test`, `just ui-fmt`, `just dev-ui`) wrap
 everything here.
 
@@ -59,6 +59,14 @@ pnpm run build    # output in dist/web/browser/, embedded into the gateway binar
 pnpm test         # unit tests (Vitest, jsdom)
 pnpm exec prettier --check src/
 ```
+
+Styles are indented Sass: `src/styles.sass` `@use`s `src/styles/_fonts.sass`,
+`_tokens.sass`, `_themes.sass`, `_base.sass`, `_utilities.sass` and
+`_components.sass` in that order, and each component has its own `.sass` file
+referenced by `styleUrl`. Prettier does not support the indented syntax, so it
+skips these files — the Angular build and `style-extension.spec.ts` (which fails
+on any `.css` under `src/`) are what keep them correct. Do not add a `.css`
+file.
 
 ## Layout
 

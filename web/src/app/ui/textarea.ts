@@ -5,7 +5,7 @@ import { UI_FIELD } from './field';
 @Component({
   selector: 'ui-textarea',
   templateUrl: './textarea.html',
-  styleUrl: './control.css',
+  styleUrl: './control.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class UiTextarea {

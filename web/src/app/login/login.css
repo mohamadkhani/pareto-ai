@@ -1,5 +1,0 @@
-/* Layout for the sign-in screen; shared auth chrome lives in components.css. */
-
-:host {
-  display: block;
-}

@@ -96,7 +96,7 @@ function capKey(modelId: string, period: MoneyPeriod): string {
     UiTabs,
   ],
   templateUrl: './users-drawer.html',
-  styleUrl: './users-drawer.css',
+  styleUrl: './users-drawer.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class UserDrawer implements OnInit {

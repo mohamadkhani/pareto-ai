@@ -8,7 +8,7 @@ import type { ButtonVariant, ButtonSize } from './button';
 @Component({
   selector: 'ui-icon-button',
   templateUrl: './icon-button.html',
-  styleUrl: './icon-button.css',
+  styleUrl: './icon-button.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

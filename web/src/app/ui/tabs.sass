@@ -1,0 +1,34 @@
+:host
+  display: block
+.tablist
+  display: flex
+  gap: var(--space-1)
+  border-bottom: 1px solid var(--border-subtle)
+.tab
+  padding: var(--space-2) var(--space-3)
+  border: 0
+  border-bottom: 2px solid transparent
+  background: none
+  color: var(--text-muted)
+  font-family: var(--font-display)
+  font-size: var(--text-body)
+  font-weight: var(--weight-medium)
+  cursor: pointer
+.tab:hover:not(:disabled)
+  color: var(--text)
+  background: var(--surface-hover)
+.tab.is-active
+  color: var(--accent)
+  border-bottom-color: var(--accent)
+  font-weight: var(--weight-semibold)
+.tab:disabled
+  cursor: not-allowed
+  opacity: 0.5
+.tab:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: -2px
+.panel
+  padding: var(--space-4) 0
+.panel:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: var(--focus-ring-offset)

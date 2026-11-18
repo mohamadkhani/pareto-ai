@@ -20,7 +20,7 @@ import {
   selector: 'app-combo-preview',
   imports: [UiBadge, UiBanner],
   templateUrl: './combo-preview.html',
-  styleUrl: './combo-preview.css',
+  styleUrl: './combo-preview.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class ComboPreviewPanel {

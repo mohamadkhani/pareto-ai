@@ -31,7 +31,7 @@ function describeError(err: unknown): string {
   selector: 'app-change-password',
   imports: [UiBanner, UiButton, UiField, UiInput],
   templateUrl: './change-password.html',
-  styleUrl: './change-password.css',
+  styleUrl: './change-password.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class ChangePassword {

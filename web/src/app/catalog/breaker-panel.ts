@@ -38,7 +38,7 @@ interface BreakerGroup {
   selector: 'app-breaker-panel',
   imports: [UiBadge, UiBanner, UiButton, UiEmpty, UiSpinner, UiSwitch],
   templateUrl: './breaker-panel.html',
-  styleUrl: './breaker-panel.css',
+  styleUrl: './breaker-panel.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class BreakerPanel {

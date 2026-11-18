@@ -40,7 +40,7 @@ let nextFieldId = 0;
 @Component({
   selector: 'ui-field',
   templateUrl: './field.html',
-  styleUrl: './field.css',
+  styleUrl: './field.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [{ provide: UI_FIELD, useExisting: forwardRef(() => UiField) }],
   host: { class: 'ui-field-host' },

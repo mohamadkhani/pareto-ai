@@ -7,7 +7,7 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 @Component({
   selector: 'ui-empty',
   templateUrl: './empty.html',
-  styleUrl: './empty.css',
+  styleUrl: './empty.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class.is-compact]': 'compact()' },
 })

@@ -1,0 +1,25 @@
+// The wizard reuses the shared auth chrome; only its local bits live here.
+:host
+  display: block
+.divider
+  display: flex
+  align-items: center
+  gap: var(--space-3)
+  color: var(--text-muted)
+  font-size: var(--text-small)
+.divider::before,
+.divider::after
+  content: ''
+  flex: 1
+  border-top: 1px solid var(--border-subtle)
+.skip-note
+  margin: 0
+  color: var(--text-muted)
+  font-size: var(--text-small)
+  line-height: var(--leading-relaxed)
+.skip-note strong
+  color: var(--text)
+  font-weight: var(--weight-semibold)
+.skip-note code
+  font-family: var(--font-mono)
+  font-size: var(--text-small)

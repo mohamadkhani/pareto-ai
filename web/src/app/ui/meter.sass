@@ -1,0 +1,19 @@
+:host
+  display: block
+.track
+  height: 0.5rem
+  overflow: hidden
+  border-radius: var(--radius-full)
+  background: var(--surface-sunken)
+.fill
+  display: block
+  height: 100%
+  border-radius: inherit
+  background: var(--accent)
+  transition: width var(--duration-normal) var(--ease-standard)
+:host(.tone-success) .fill
+  background: var(--success)
+:host(.tone-warning) .fill
+  background: var(--warning)
+:host(.tone-danger) .fill
+  background: var(--danger)

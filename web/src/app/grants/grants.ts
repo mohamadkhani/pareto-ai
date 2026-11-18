@@ -58,7 +58,7 @@ function describeGrantError(err: unknown): string {
     UiTable,
   ],
   templateUrl: './grants.html',
-  styleUrl: './grants.css',
+  styleUrl: './grants.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Grants {

@@ -61,7 +61,7 @@ export interface CredentialChange {
   selector: 'app-credentials',
   imports: [HeadersEditor, UiBadge, UiBanner, UiButton, UiEmpty, UiField, UiInput, UiSelect],
   templateUrl: './credentials.html',
-  styleUrl: './credentials.css',
+  styleUrl: './credentials.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Credentials {

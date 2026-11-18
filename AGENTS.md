@@ -64,7 +64,13 @@ Rules for every agent working in this repository. They are enforced by
 - **No component library.** Primitives live in `web/src/app/ui/` (see D28);
   use them instead of raw markup for buttons, fields, dialogs, badges, tables.
 - **Tokens only.** Colors, spacing, radius, type, shadows come from
-  `web/src/styles/tokens.css`; no hard-coded colors or sizes in components.
+  `web/src/styles/_tokens.sass`; no hard-coded colors or sizes in components.
+- **Styles are indented Sass (`.sass`), never plain CSS** (D53). The global
+  entry is `web/src/styles.sass`, which `@use`s the partials in load order;
+  components point `styleUrl` at their `.sass` file. No `.css` file may exist
+  under `web/src` — `style-extension.spec.ts` fails if one appears. Prettier
+  cannot format the indented syntax, so `just ui-fmt` skips it; the Angular
+  build and that guardrail are the checks.
 - **Every primitive and state appears on `/styleguide`** before it is used.
   When you add a primitive or a variant, add it there in the same change.
 - **Pages do not restyle primitives** — only tokens and variants. Light and

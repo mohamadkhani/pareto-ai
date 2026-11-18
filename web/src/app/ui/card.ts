@@ -11,7 +11,7 @@ export type CardPadding = 'none' | 'sm' | 'md';
 @Component({
   selector: 'ui-card',
   templateUrl: './card.html',
-  styleUrl: './card.css',
+  styleUrl: './card.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

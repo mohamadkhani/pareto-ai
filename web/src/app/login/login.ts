@@ -38,7 +38,7 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   selector: 'app-login',
   imports: [UiBanner, UiButton, UiField, UiInput],
   templateUrl: './login.html',
-  styleUrl: './login.css',
+  styleUrl: './login.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Login {

@@ -33,7 +33,7 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   selector: 'app-setup',
   imports: [UiBanner, UiButton, UiField, UiInput],
   templateUrl: './setup.html',
-  styleUrl: './setup.css',
+  styleUrl: './setup.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Setup {

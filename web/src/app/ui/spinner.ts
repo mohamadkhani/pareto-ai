@@ -2,11 +2,11 @@ import { ChangeDetectionStrategy, Component, input } from '@angular/core';
 
 export type SpinnerSize = 'sm' | 'md' | 'lg';
 
-/** Busy indicator with a screen-reader label; motion is disabled by base.css. */
+/** Busy indicator with a screen-reader label; motion is disabled by base.sass. */
 @Component({
   selector: 'ui-spinner',
   templateUrl: './spinner.html',
-  styleUrl: './spinner.css',
+  styleUrl: './spinner.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '[class]': 'hostClass()' },
 })

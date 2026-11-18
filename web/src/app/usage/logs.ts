@@ -41,7 +41,7 @@ const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as
   selector: 'app-logs',
   imports: [DecisionPanel, UiBadge, UiBanner, UiButton, UiEmpty, UiField, UiSelect, UiTable],
   templateUrl: './logs.html',
-  styleUrl: './logs.css',
+  styleUrl: './logs.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Logs {

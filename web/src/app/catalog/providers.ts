@@ -125,7 +125,7 @@ function setupTabParam(tab: SetupTab): string {
     UiSwitch,
   ],
   templateUrl: './providers.html',
-  styleUrl: './providers.css',
+  styleUrl: './providers.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class Providers {
