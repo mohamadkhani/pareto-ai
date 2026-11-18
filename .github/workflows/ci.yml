@@ -264,7 +264,7 @@ jobs:
              "../dist/bin/pareto-gateway-api${{ matrix.ext }}"
 
       # Layout inside the archive: the two binaries plus LICENSE, README.md and
-      # the systemd daemon files (also consumed by the AUR pareto-gateway-bin
+      # the systemd daemon files (also consumed by the AUR pareto-ai-bin
       # PKGBUILD).
       - name: Package (Linux)
         if: runner.os == 'Linux'
@@ -273,7 +273,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          name="pareto-gateway-${VERSION}-${{ matrix.name }}"
+          name="pareto-ai-${VERSION}-${{ matrix.name }}"
           mkdir -p "dist/$name"
           cp dist/bin/* "dist/$name/"
           cp LICENSE README.md "dist/$name/"
@@ -289,7 +289,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $name = "pareto-gateway-$env:VERSION-${{ matrix.name }}"
+          $name = "pareto-ai-$env:VERSION-${{ matrix.name }}"
           $stage = "dist/$name"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "dist/bin/*" $stage
@@ -299,7 +299,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pareto-gateway-${{ steps.version.outputs.version }}-${{ matrix.name }}
+          name: pareto-ai-${{ steps.version.outputs.version }}-${{ matrix.name }}
           if-no-files-found: error
           # Exactly one archive per platform; the expression avoids a warning
           # about the pattern that cannot match on this runner.
@@ -327,8 +327,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for pkg in packaging/arch/pareto-gateway packaging/arch/pareto-gateway-bin \
-                     packaging/arch/pareto-ai packaging/arch/pareto-ai-bin; do
+          for pkg in packaging/arch/pareto-ai packaging/arch/pareto-ai-bin \
+                     packaging/arch/pareto-ai-desktop packaging/arch/pareto-ai-desktop-bin; do
             cp "$pkg/PKGBUILD" /tmp/PKGBUILD
             sed -i "s/'PLACEHOLDER'/'SKIP'/" /tmp/PKGBUILD
             echo "::group::namcap $pkg"
@@ -349,7 +349,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: pareto-gateway-*
+          pattern: pareto-ai-*
           path: artifacts
           merge-multiple: true
 
@@ -359,8 +359,8 @@ jobs:
           fail_on_unmatched_files: false
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # Updates the server-only AUR packages (pareto-gateway, pareto-gateway-bin)
-  # on every v* tag. The desktop family is published by desktop.yml.
+  # Updates the server AUR packages (pareto-ai, pareto-ai-bin) on every v*
+  # tag. The desktop family is published by desktop.yml.
   publish-aur:
     name: Publish AUR packages (server)
     needs: release
@@ -378,29 +378,29 @@ jobs:
       # The AUR push uses an ed25519 key registered on the AUR account,
       # stored as the AUR_SSH_PRIVATE_KEY repo secret. AUR has no per-package
       # deploy keys, so that key is account-wide — treat it as a credential.
-      - name: Publish pareto-gateway (source) to AUR
+      - name: Publish pareto-ai (source) to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           export VERSION
-          export AUR_REPO=pareto-gateway
-          export PKGBUILD_PATH=packaging/arch/pareto-gateway/PKGBUILD
+          export AUR_REPO=pareto-ai
+          export PKGBUILD_PATH=packaging/arch/pareto-ai/PKGBUILD
           curl -fsSL "https://github.com/mohamadkhani/pareto-ai/archive/refs/tags/v${VERSION}.tar.gz" -o /tmp/tag-tarball.tar.gz
           export B2SUM="$(b2sum /tmp/tag-tarball.tar.gz | awk '{print $1}')"
           packaging/arch/publish-aur.sh
 
-      - name: Publish pareto-gateway-bin (prebuilt) to AUR
+      - name: Publish pareto-ai-bin (prebuilt) to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           export VERSION
-          export AUR_REPO=pareto-gateway-bin
-          export PKGBUILD_PATH=packaging/arch/pareto-gateway-bin/PKGBUILD
-          TARBALL_URL="https://github.com/mohamadkhani/pareto-ai/releases/download/v${VERSION}/pareto-gateway-${VERSION}-linux-x86_64.tar.gz"
+          export AUR_REPO=pareto-ai-bin
+          export PKGBUILD_PATH=packaging/arch/pareto-ai-bin/PKGBUILD
+          TARBALL_URL="https://github.com/mohamadkhani/pareto-ai/releases/download/v${VERSION}/pareto-ai-${VERSION}-linux-x86_64.tar.gz"
           curl -fsSL "$TARBALL_URL" -o /tmp/release-tarball.tar.gz
           export B2SUM="$(b2sum /tmp/release-tarball.tar.gz | awk '{print $1}')"
           packaging/arch/publish-aur.sh

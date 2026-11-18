@@ -221,7 +221,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "Pareto AI.app" \
             "${{ github.workspace }}/Pareto AI-${{ matrix.name }}.app.zip"
 
-      # Flat tarball consumed by the AUR `pareto-ai-bin` PKGBUILD: both
+      # Flat tarball consumed by the AUR `pareto-ai-desktop-bin` PKGBUILD: both
       # binaries plus the desktop entry, icon, systemd daemon files and
       # LICENSE at the archive root.
       - name: Package the AUR tarball (Linux)
@@ -229,7 +229,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stage="pareto-ai-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          stage="pareto-ai-desktop-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir -p "$stage"
           cp "desktop/target/${{ matrix.target }}/release/pareto-desktop" "$stage/"
           cp "desktop/binaries/pareto-gateway-${{ matrix.target }}" "$stage/pareto-gateway"
@@ -257,7 +257,7 @@ jobs:
             desktop/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             desktop/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             desktop/target/${{ matrix.target }}/release/bundle/msi/*.msi
-            pareto-ai-*.tar.gz
+            pareto-ai-desktop-*.tar.gz
             *.app.zip
 
   release:
@@ -279,8 +279,8 @@ jobs:
           fail_on_unmatched_files: false
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # Updates the desktop AUR packages (pareto-ai, pareto-ai-bin) on every v*
-  # tag. The server-only family is published by ci.yml.
+  # Updates the desktop AUR packages (pareto-ai-desktop, pareto-ai-desktop-bin)
+  # on every v* tag. The server family is published by ci.yml.
   publish-aur:
     name: Publish AUR packages (desktop)
     needs: release
@@ -298,29 +298,29 @@ jobs:
       # The AUR push uses an ed25519 key registered on the AUR account,
       # stored as the AUR_SSH_PRIVATE_KEY repo secret. AUR has no per-package
       # deploy keys, so that key is account-wide — treat it as a credential.
-      - name: Publish pareto-ai (source) to AUR
+      - name: Publish pareto-ai-desktop (source) to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           export VERSION
-          export AUR_REPO=pareto-ai
-          export PKGBUILD_PATH=packaging/arch/pareto-ai/PKGBUILD
+          export AUR_REPO=pareto-ai-desktop
+          export PKGBUILD_PATH=packaging/arch/pareto-ai-desktop/PKGBUILD
           curl -fsSL "https://github.com/mohamadkhani/pareto-ai/archive/refs/tags/v${VERSION}.tar.gz" -o /tmp/tag-tarball.tar.gz
           export B2SUM="$(b2sum /tmp/tag-tarball.tar.gz | awk '{print $1}')"
           packaging/arch/publish-aur.sh
 
-      - name: Publish pareto-ai-bin (prebuilt) to AUR
+      - name: Publish pareto-ai-desktop-bin (prebuilt) to AUR
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           export VERSION
-          export AUR_REPO=pareto-ai-bin
-          export PKGBUILD_PATH=packaging/arch/pareto-ai-bin/PKGBUILD
-          TARBALL_URL="https://github.com/mohamadkhani/pareto-ai/releases/download/v${VERSION}/pareto-ai-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          export AUR_REPO=pareto-ai-desktop-bin
+          export PKGBUILD_PATH=packaging/arch/pareto-ai-desktop-bin/PKGBUILD
+          TARBALL_URL="https://github.com/mohamadkhani/pareto-ai/releases/download/v${VERSION}/pareto-ai-desktop-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           curl -fsSL "$TARBALL_URL" -o /tmp/release-tarball.tar.gz
           export B2SUM="$(b2sum /tmp/release-tarball.tar.gz | awk '{print $1}')"
           packaging/arch/publish-aur.sh

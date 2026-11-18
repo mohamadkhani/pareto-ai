@@ -4,7 +4,8 @@
 # Called by CI with these env vars:
 #   AUR_SSH_PRIVATE_KEY  — ed25519 private key whose public half is registered
 #                          on the AUR account (https://aur.archlinux.org/account/ssh)
-#   AUR_REPO             — AUR package repo name: "pareto-ai" or "pareto-ai-bin"
+#   AUR_REPO             — AUR package repo name: "pareto-ai", "pareto-ai-bin",
+#                          "pareto-ai-desktop" or "pareto-ai-desktop-bin"
 #   PKGBUILD_PATH        — path to the canonical PKGBUILD in this repo
 #   VERSION              — bare version, e.g. 0.1.0 (no leading 'v')
 #   B2SUM                — real b2sum of the released tarball

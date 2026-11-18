@@ -748,6 +748,16 @@ share the port, so only one of them may run at a time (documented in
 `docs/desktop.md`). If the port is taken by anything else, startup fails with
 the log-tail error dialog instead of silently moving.
 
+### D47. AUR package names: pareto-ai for the server, pareto-ai-desktop for the desktop
+
+**Decision (user, 2026-11-18):** the server family is `pareto-ai` /
+`pareto-ai-bin` and the desktop family is `pareto-ai-desktop` /
+`pareto-ai-desktop-bin`; the release tarballs follow the package names. The
+first naming (`pareto-gateway*` for the server, `pareto-ai*` for the desktop)
+was dropped within the day; the old AUR packages are deleted rather than
+migrated. Binary names (`pareto-gateway`, `pareto-desktop`) and the daemon
+unit (`pareto-gateway.service`) are unchanged.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

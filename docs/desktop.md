@@ -148,10 +148,10 @@ Four packages, updated by CI on every `v*` tag (see *Publishing to AUR*):
 
 | Package | Contents |
 | --- | --- |
-| `pareto-gateway` | Server only, built from source: `/usr/bin/pareto-gateway` + the daemon |
-| `pareto-gateway-bin` | The same, from the prebuilt release tarball |
-| `pareto-ai` | Desktop app built from source: tray shell + bundled gateway + the daemon |
+| `pareto-ai` | Server only, built from source: `/usr/bin/pareto-gateway` + the daemon |
 | `pareto-ai-bin` | The same, from the prebuilt release tarball |
+| `pareto-ai-desktop` | Desktop app built from source: tray shell + bundled gateway + the daemon |
+| `pareto-ai-desktop-bin` | The same, from the prebuilt release tarball |
 
 The server family is the lightweight install (no GTK/WebKit dependencies). The
 desktop family bundles its own gateway copy (`/usr/lib/pareto-desktop/`, also
@@ -188,8 +188,8 @@ ships, but the `publish-aur` jobs fail.
 
 The plain server binaries — no desktop shell — are a separate CI artifact from
 `.github/workflows/ci.yml` (the `gateway` job):
-`pareto-gateway-<version>-linux-x86_64.tar.gz` and
-`pareto-gateway-<version>-windows-x64.zip`, each holding the embedded-UI binary
+`pareto-ai-<version>-linux-x86_64.tar.gz` and
+`pareto-ai-<version>-windows-x64.zip`, each holding the embedded-UI binary
 as `pareto-gateway[.exe]` and the api-only one as `pareto-gateway-api[.exe]`,
 plus the systemd daemon files on Linux.
 Every run uploads them to the run's *Artifacts* section: the `gateway` job waits
