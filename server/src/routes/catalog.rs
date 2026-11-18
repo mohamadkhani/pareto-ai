@@ -458,7 +458,10 @@ pub async fn override_price(
 /// overrides win) and prices in USD per 1M tokens. Unknown price components
 /// are null — never 0. Enabled combos are appended as `combo:<name>` entries
 /// (review m4 — discoverable), with null limits and price (they vary per
-/// member). Auth: an API key (any account) or an admin session.
+/// member); a combo is shown when at least one of its candidate offerings is
+/// allowed for the caller — explicit members for a members pool, any catalog
+/// offering for a whole-catalog pool (D35). Auth: an API key (any account) or
+/// an admin session.
 #[utoipa::path(
     get,
     path = "/v1/models",
@@ -481,39 +484,46 @@ pub async fn v1_models(
     // Access control (decision D9): the listing shows only the models the
     // caller may use through at least one enabled offering. Credentials are
     // not evaluated here — the chat pipeline checks them per request. A combo
-    // is shown when at least one member offering is allowed.
+    // is shown when at least one candidate offering is allowed: its explicit
+    // members for a members pool, or any catalog offering for a whole-catalog
+    // pool (D35 — that pool has no member list to check).
     let api_key_id = caller.api_key.as_ref().map(|key| key.key_id.as_str());
     let grants = crate::access::Grants::load(&state.pool, &caller.user_id, api_key_id)
         .await
         .map_err(|e| ApiError::internal("loading grants", e).with_request_id(rid.clone()))?;
-    let mut data: Vec<V1Model> = entries
-        .into_iter()
-        .filter(|entry| {
-            grants.allows(
-                caller.role,
-                &caller.user_id,
-                api_key_id,
-                &entry.model_id,
-                &entry.offering_id,
-                None,
-            )
-        })
-        .map(|entry| entry.model)
-        .collect();
+    let mut any_offering_allowed = false;
+    let mut data: Vec<V1Model> = Vec::new();
+    for entry in entries {
+        if grants.allows(
+            caller.role,
+            &caller.user_id,
+            api_key_id,
+            &entry.model_id,
+            &entry.offering_id,
+            None,
+        ) {
+            any_offering_allowed = true;
+            data.push(entry.model);
+        }
+    }
     let combos = crate::combos::list_v1_entries(&state.pool)
         .await
         .map_err(|e| e.into_api_error(rid.clone()))?;
     for combo in combos {
-        if combo.members.iter().any(|(model_id, offering_id)| {
-            grants.allows(
-                caller.role,
-                &caller.user_id,
-                api_key_id,
-                model_id,
-                offering_id,
-                None,
-            )
-        }) {
+        let shown = match combo.pool {
+            crate::combos::Pool::All => any_offering_allowed,
+            crate::combos::Pool::Members => combo.members.iter().any(|(model_id, offering_id)| {
+                grants.allows(
+                    caller.role,
+                    &caller.user_id,
+                    api_key_id,
+                    model_id,
+                    offering_id,
+                    None,
+                )
+            }),
+        };
+        if shown {
             data.push(combo.model);
         }
     }
@@ -524,6 +534,7 @@ pub async fn v1_models(
 mod tests {
     use crate::auth::Role;
     use crate::test_support::{self, TestApp, api_request, send};
+    use axum::body::Body;
     use axum::http::{Method, StatusCode};
     use serde_json::json;
 
@@ -1512,5 +1523,73 @@ mod tests {
                 .all(|entry| entry["id"] != "combo:smart"),
             "disabled combos disappear from the listing"
         );
+    }
+
+    #[tokio::test]
+    async fn v1_models_advertises_catalog_pool_combos_to_api_keys() {
+        // D35: a `pool = "all"` combo has no explicit members. It must still
+        // show up in GET /v1/models — the visibility check used to look only
+        // at members and hid every whole-catalog combo from API-key callers.
+        let app = TestApp::new().await;
+        let admin_id = app
+            .create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        let (provider_id, model_id) = provider_and_model(&router, &cookie, &csrf).await;
+        create_offering(&router, &cookie, &csrf, &provider_id, &model_id, "brain-1").await;
+
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/combos",
+                Some(json!({
+                    "name": "pro",
+                    "strategy": "weighted",
+                    "pool": "all",
+                    "min_quality": 0.5,
+                    "members": [],
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        let key = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/users/{admin_id}/keys"),
+                Some(json!({ "name": "sdk", "rate_limit_rpm": 30 })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(key.status, StatusCode::CREATED, "{}", key.body);
+        let key = key.body["key"].as_str().expect("plaintext key").to_string();
+
+        let listing = send(
+            router.clone(),
+            axum::http::Request::builder()
+                .method(Method::GET)
+                .uri("/v1/models")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(listing.status, StatusCode::OK, "{}", listing.body);
+        let data = listing.body["data"].as_array().expect("data");
+        let combo = data
+            .iter()
+            .find(|entry| entry["id"] == "combo:pro")
+            .expect("whole-catalog combo entry");
+        assert_eq!(combo["name"], "pro");
+        assert!(combo["price"].is_null(), "the pool prices its own calls");
+        assert!(combo["context_length"].is_null());
     }
 }

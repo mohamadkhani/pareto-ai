@@ -1409,19 +1409,23 @@ pub async fn advance_cursor(pool: &SqlitePool, combo_id: &str) -> Result<i64, Co
 }
 
 /// One advertised combo for `GET /v1/models` (review m4 — combos must be
-/// discoverable, not a hidden namespace): the `combo:<name>` entry plus its
-/// members' `(model_id, offering_id)` pairs for access filtering.
+/// discoverable, not a hidden namespace): the `combo:<name>` entry, its pool
+/// kind, and its members' `(model_id, offering_id)` pairs for access filtering.
 #[derive(Debug)]
 pub struct ComboV1Entry {
     pub model: catalog::V1Model,
-    /// `(model_id, offering_id)` of every member that still exists.
+    /// Where the candidates come from (D35).
+    pub pool: Pool,
+    /// `(model_id, offering_id)` of every member that still exists. Empty for
+    /// [`Pool::All`], whose candidates are the whole catalog.
     pub members: Vec<(String, String)>,
 }
 
 /// The enabled combos as advertised by `GET /v1/models`: one `combo:<name>`
 /// entry per enabled combo. Limits and price are null — they vary per member
-/// and the chat pipeline checks them per candidate. Failure mode:
-/// [`ComboError`].
+/// and the chat pipeline checks them per candidate. A [`Pool::All`] combo is
+/// advertised with an empty `members` list; the route decides its visibility
+/// against the caller's catalog-wide access. Failure mode: [`ComboError`].
 pub async fn list_v1_entries(pool: &SqlitePool) -> Result<Vec<ComboV1Entry>, ComboError> {
     let mut entries = Vec::new();
     for combo in list(pool).await? {
@@ -1440,6 +1444,7 @@ pub async fn list_v1_entries(pool: &SqlitePool) -> Result<Vec<ComboV1Entry>, Com
             }
         }
         entries.push(ComboV1Entry {
+            pool: combo.pool,
             model: catalog::V1Model {
                 id: format!("{NAMESPACE}{}", combo.name),
                 name: combo.name.clone(),
