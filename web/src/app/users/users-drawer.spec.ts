@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
+import { waitFor, waitForText } from '../../testing/wait-for';
 import { AuthService, type User } from '../auth/auth.service';
 import { UserDrawer } from './users-drawer';
 import type { UserView } from './users.types';
@@ -184,35 +185,56 @@ describe('UserDrawer', () => {
     const fixture = TestBed.createComponent(UserDrawer);
     fixture.componentRef.setInput('user', userFixture());
     fixture.detectChanges();
-    for (let i = 0; i < 6; i += 1) {
-      await fixture.whenStable();
-      await Promise.resolve();
-      fixture.detectChanges();
-    }
+    await waitFor(
+      fixture,
+      () =>
+        fixture.nativeElement.querySelector('.limit-row') !== null ||
+        fixture.nativeElement.textContent?.includes('Loading limits failed.') === true,
+      'the initial limits load',
+    );
     return fixture;
   }
 
+  /**
+   * Waits until the tab has rendered its result: the request count has stopped
+   * growing and no spinner or busy button is on screen. Counting
+   * `whenStable()` rounds is not enough — a mocked `fetch` chain is invisible
+   * to Angular's scheduler, so a slow CI machine can still be mid-request when
+   * the assertions run.
+   */
   async function settle(fixture: ComponentFixture<UserDrawer>): Promise<void> {
-    for (let i = 0; i < 6; i += 1) {
-      await fixture.whenStable();
-      await Promise.resolve();
-      fixture.detectChanges();
-    }
+    const root = fixture.nativeElement as HTMLElement;
+    let previousCount = -1;
+    await waitFor(
+      fixture,
+      () => {
+        const count = fetchMock.requests.length;
+        if (count !== previousCount) {
+          previousCount = count;
+          return false;
+        }
+        return (
+          root.querySelector('[aria-busy="true"]') === null &&
+          root.querySelector('.drawer-loading') === null
+        );
+      },
+      'the drawer to finish loading',
+    );
+    fixture.detectChanges();
   }
 
   it('renders four tabs and the four budget rows with used/limit progress', async () => {
     queueLimits([budget], [cap], [m1]);
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
-    const text = root.textContent ?? '';
 
     expect(
       Array.from(root.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent?.trim()),
     ).toEqual(['Limits', 'Grants', 'Keys', 'Overview']);
-    expect(text).toContain('week');
-    expect(text).toContain('$4.00 of $10.00');
-    expect(text).toContain('openai/gpt-5');
-    expect(text).toContain('250 of 1,000');
+    await waitForText(fixture, root, 'week');
+    await waitForText(fixture, root, '$4.00 of $10.00');
+    await waitForText(fixture, root, 'openai/gpt-5');
+    await waitForText(fixture, root, '250 of 1,000');
     expect(root.querySelectorAll('ui-meter').length).toBeGreaterThan(0);
     expect(root.querySelector('dialog')?.classList.contains('dialog--drawer')).toBe(true);
   });
