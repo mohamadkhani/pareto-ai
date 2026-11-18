@@ -147,7 +147,11 @@ The plain server binaries — no desktop shell — are a separate CI artifact fr
 `pareto-gateway-<version>-linux-x86_64.tar.gz` and
 `pareto-gateway-<version>-windows-x64.zip`, each holding the embedded-UI binary
 as `pareto-gateway[.exe]` and the api-only one as `pareto-gateway-api[.exe]`.
-They are attached to the GitHub Release on a `v*` tag.
+Every run uploads them to the run's *Artifacts* section: the `gateway` job waits
+only for the web **build** (`web`), never for the UI tests (`web-check`), so a
+failing test run still publishes downloadable server binaries. They are attached
+to the GitHub Release on a `v*` tag, when `web-check`, `rust` and `gateway` are
+all green.
 
 ## Icons
 

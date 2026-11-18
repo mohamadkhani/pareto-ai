@@ -1,7 +1,7 @@
 # Continuous integration for the gateway and the console.
 #
-# The same gate as `just check`, split in two so the two toolchains do not wait
-# on each other:
+# The same gate as `just check`, split so the toolchains do not wait on each
+# other and the server binaries stay downloadable on every run:
 #
 #   just fmt-check  -> cargo fmt --check
 #   just lint       -> cargo clippy --all-targets -- -D warnings
@@ -9,19 +9,26 @@
 #   just build-api  -> cargo build --release --no-default-features
 #   just ui-check   -> pnpm build + pnpm test + prettier --check
 #
+# The web work is split in two on purpose: `web` builds the console and uploads
+# `web/dist`, `web-check` runs the UI tests and the formatting check. `rust` and
+# `gateway` only wait for the build, so a failing UI test never blocks the
+# downloadable server binaries.
+#
 # Two differences from the Justfile:
 #
 # - no `--offline`: the Justfile relies on a warm local cargo cache, a fresh
 #   runner has none;
-# - the Rust job gets `web/dist` from the web job as an artifact instead of
+# - the Rust jobs get `web/dist` from the web job as an artifact instead of
 #   rebuilding Angular, because the server embeds it at compile time
 #   (`rust-embed`).
 #
 # The `gateway` job packages the two server binaries (embedded UI and api-only)
-# for Linux and Windows and, on a `v*` tag, attaches them to the GitHub
-# Release. It reuses the web job's `web-dist` artifact instead of rebuilding
-# Angular, and falls back to a local `pnpm run build` only when the artifact is
-# unavailable (for example a re-run of a single job).
+# for Linux and Windows and uploads them as run artifacts on every run. It
+# reuses the web job's `web-dist` artifact instead of rebuilding Angular, and
+# falls back to a local `pnpm run build` only when the artifact is unavailable
+# (for example a re-run of a single job). On a `v*` tag the release job attaches
+# the artifacts to the GitHub Release — only when web-check, rust and gateway
+# are all green.
 #
 # No secrets are required. Desktop packaging lives in desktop.yml.
 
@@ -46,8 +53,10 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Builds the Angular console and publishes web/dist for the Rust jobs. The UI
+  # tests live in `web-check` so they cannot block the server binaries.
   web:
-    name: Web (build, tests, formatting)
+    name: Web (build)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -67,10 +76,41 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
 
-      # Output lands in web/dist/web/browser and is consumed by the Rust job.
+      # Output lands in web/dist/web/browser and is consumed by the Rust jobs.
       - name: Build
         working-directory: web
         run: pnpm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          if-no-files-found: error
+          path: web/dist/web/browser
+          retention-days: 1
+
+  # The UI half of the gate: unit tests and formatting. Independent of the
+  # build job, so a failing test still leaves web/dist and the gateway binaries
+  # downloadable from the run.
+  web-check:
+    name: Web (tests, formatting)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
 
       - name: Test
         working-directory: web
@@ -79,13 +119,6 @@ jobs:
       - name: Check formatting
         working-directory: web
         run: pnpm exec prettier --check src/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: web-dist
-          if-no-files-found: error
-          path: web/dist/web/browser
-          retention-days: 1
 
   rust:
     name: Rust (format, clippy, tests, api-only build)
@@ -130,6 +163,8 @@ jobs:
   # proven step as the desktop sidecar in desktop.yml.
   gateway:
     name: Gateway binary (${{ matrix.name }})
+    # Only the web *build*, never the UI tests: the server binaries must stay
+    # downloadable from the run even when web-check is red.
     needs: web
     runs-on: ${{ matrix.os }}
     strategy:
@@ -263,11 +298,15 @@ jobs:
           # Exactly one archive per platform; the expression avoids a warning
           # about the pattern that cannot match on this runner.
           path: ${{ runner.os == 'Windows' && 'dist/*.zip' || 'dist/*.tar.gz' }}
-          retention-days: 7
+          # No retention override: same repository retention as the desktop
+          # installers, so the server binaries do not expire earlier.
 
   release:
     name: Attach gateway binaries to the GitHub Release
-    needs: gateway
+    # A release attaches only when the whole gate is green. The gateway job
+    # alone is deliberately not gated on the UI tests, so the release has to
+    # wait for web-check (and rust) explicitly.
+    needs: [web-check, rust, gateway]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
