@@ -48,6 +48,9 @@
                 <td>{{ entry.actor_user_id ?? '—' }}</td>
                 <td>
                   <code>{{ entry.action }}</code>
+                  @if (entry.insecure) {
+                    <ui-badge tone="warning">insecure</ui-badge>
+                  }
                 </td>
                 <td class="target-cell">
                   {{ target(entry) }}

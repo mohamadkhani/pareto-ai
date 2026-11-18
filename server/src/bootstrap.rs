@@ -55,7 +55,7 @@ pub async fn ensure_admin_with(
     email: Option<String>,
     admin_password: Option<String>,
 ) -> Result<BootstrapOutcome> {
-    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
         .fetch_one(pool)
         .await
         .context("counting users")?;
@@ -93,26 +93,52 @@ pub async fn ensure_admin_with(
     let password_hash =
         password::hash_password(&admin_password).context("hashing the bootstrap admin password")?;
 
-    sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash, role, is_active, must_change_password) \
-         VALUES (?, ?, ?, ?, 'admin', 1, 1)",
+    let mut tx = pool
+        .begin()
+        .await
+        .context("starting the bootstrap transaction")?;
+    // The local-operator placeholder is promoted in place so every existing
+    // audit and `*_updated_by` reference to it stays valid.
+    let promoted = sqlx::query_as::<_, (String,)>(
+        "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
+           must_change_password = 1, is_placeholder = 0, \
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ? AND is_placeholder = 1 \
+         RETURNING id",
     )
-    .bind(&user_id)
     .bind(&email)
     .bind(&email)
     .bind(&password_hash)
-    .execute(pool)
+    .bind(auth::LOCAL_OPERATOR_ID)
+    .fetch_optional(&mut *tx)
     .await
-    .context("creating the bootstrap admin user")?;
+    .context("promoting the local operator account")?;
+    let (user_id, promoted) = match promoted {
+        Some((id,)) => (id, true),
+        None => {
+            sqlx::query(
+                "INSERT INTO users (id, email, display_name, password_hash, role, is_active, must_change_password) \
+                 VALUES (?, ?, ?, ?, 'admin', 1, 1)",
+            )
+            .bind(&user_id)
+            .bind(&email)
+            .bind(&email)
+            .bind(&password_hash)
+            .execute(&mut *tx)
+            .await
+            .context("creating the bootstrap admin user")?;
+            (user_id, false)
+        }
+    };
 
     auth::audit(
-        pool,
+        &mut *tx,
         Some(&user_id),
         "auth.bootstrap_admin_created",
         Some("user"),
         Some(&user_id),
         Some(
-            serde_json::json!({ "email": email, "source": "env" })
+            serde_json::json!({ "email": email, "source": "env", "promoted_local_operator": promoted })
                 .to_string()
                 .as_str(),
         ),
@@ -120,8 +146,11 @@ pub async fn ensure_admin_with(
     )
     .await
     .context("auditing the bootstrap admin creation")?;
+    tx.commit()
+        .await
+        .context("committing the bootstrap admin")?;
 
-    tracing::info!(email = %email, "created bootstrap admin account from the environment");
+    tracing::info!(email = %email, promoted_local_operator = promoted, "created bootstrap admin account from the environment");
     Ok(BootstrapOutcome::AdminCreated)
 }
 
@@ -173,6 +202,44 @@ mod tests {
             .await
             .expect("audit rows");
         assert_eq!(actions, ["auth.bootstrap_admin_created"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn promotes_the_local_operator_placeholder_in_place() {
+        let (dir, pool) = test_pool().await;
+        crate::setup::ensure_local_operator(&pool)
+            .await
+            .expect("seed the placeholder");
+
+        let outcome = ensure_admin_with(
+            &pool,
+            Some("boss@example.com".to_string()),
+            Some("a-long-enough-password".to_string()),
+        )
+        .await
+        .expect("bootstrap must promote the placeholder");
+        assert_eq!(outcome, BootstrapOutcome::AdminCreated);
+
+        let (id, email, must_change, placeholder): (String, String, i64, i64) =
+            sqlx::query_as("SELECT id, email, must_change_password, is_placeholder FROM users")
+                .fetch_one(&pool)
+                .await
+                .expect("user row");
+        assert_eq!(id, crate::auth::LOCAL_OPERATOR_ID, "same row, promoted");
+        assert_eq!(email, "boss@example.com");
+        assert_eq!(
+            must_change, 1,
+            "an environment-supplied password must be rotated"
+        );
+        assert_eq!(placeholder, 0, "it is a real account now");
+
+        assert_eq!(
+            ensure_admin_with(&pool, None, None)
+                .await
+                .expect("second bootstrap must not need credentials"),
+            BootstrapOutcome::UsersExist
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

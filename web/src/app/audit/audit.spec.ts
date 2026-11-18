@@ -28,6 +28,7 @@ function entry(i: number): AuditEntry {
     target_id: `u${i}`,
     detail_json: null,
     ip: '127.0.0.1',
+    insecure: false,
     occurred_at: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, i)).toISOString(),
   };
 }
@@ -81,6 +82,23 @@ describe('Audit', () => {
 
     const detail = root.querySelector('.detail')?.textContent ?? '';
     expect(detail).toContain('"reason": "bad"');
+  });
+
+  it('flags entries done in insecure mode', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          { ...entry(0), action: 'provider.create', insecure: true },
+          { ...entry(1), action: 'provider.update' },
+        ],
+      }),
+    );
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const rows = root.querySelectorAll('tbody tr');
+    expect(rows[0]?.textContent).toContain('insecure');
+    expect(rows[1]?.textContent).not.toContain('insecure');
   });
 
   it('shows an empty state when there are no entries', async () => {

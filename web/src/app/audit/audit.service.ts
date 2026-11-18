@@ -11,6 +11,8 @@ export interface AuditEntry {
   /** JSON object with action-specific detail, when the action recorded any. */
   detail_json: string | null;
   ip: string | null;
+  /** True when the action was done in insecure mode: the gateway ran without a password and the unauthenticated local operator performed it. */
+  insecure: boolean;
   occurred_at: string;
 }
 

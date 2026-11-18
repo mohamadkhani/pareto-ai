@@ -234,7 +234,7 @@ async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(),
     if state.setup.mode().is_protected() {
         return Err(already_complete(rid.clone()));
     }
-    let users = setup::user_count(&state.pool)
+    let users = setup::real_user_count(&state.pool)
         .await
         .map_err(|e| ApiError::internal("counting users", e).with_request_id(rid.clone()))?;
     if users > 0 {

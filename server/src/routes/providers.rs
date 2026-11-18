@@ -724,6 +724,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unprotected_mode_mutations_work_and_their_audit_rows_are_flagged_insecure() {
+        let app = TestApp::unprotected().await;
+        let router = app.router();
+
+        // The pre-fix failure: an audited mutation as the synthetic local
+        // operator broke its foreign key onto `users` and rolled back.
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "acme", "base_url": "https://api.acme.example/v1" })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        let (actor, insecure): (Option<String>, i64) = sqlx::query_as(
+            "SELECT actor_user_id, insecure FROM audit_log WHERE action = 'provider.create'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("audit row");
+        assert_eq!(actor.as_deref(), Some("local-operator"));
+        assert_eq!(insecure, 1, "done in insecure mode");
+
+        // The flag is visible through the API too.
+        let audits = send(
+            router.clone(),
+            api_request(Method::GET, "/api/audit?limit=50", None, None, None),
+        )
+        .await;
+        assert_eq!(audits.status, StatusCode::OK, "{}", audits.body);
+        let entry = audits.body["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .find(|e| e["action"] == "provider.create")
+            .expect("provider.create entry");
+        assert_eq!(entry["insecure"], json!(true));
+    }
+
+    #[tokio::test]
     async fn secret_never_reaches_the_database_and_header_values_are_redacted_everywhere() {
         let app = TestApp::new().await;
         app.create_user("admin@example.com", Role::Admin, true)

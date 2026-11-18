@@ -156,6 +156,14 @@ async fn main() -> Result<()> {
         // disagreement means something changed under us mid-start.
         tracing::warn!(?bootstrap, mode = mode.as_str(), "setup mode mismatch");
     }
+    if mode == setup::Mode::Unprotected {
+        // Heal databases from before migration 0016 (and any lost row): the
+        // unauthenticated local operator must exist in `users` or every
+        // audited mutation fails its foreign key.
+        setup::ensure_local_operator(&pool)
+            .await
+            .context("seeding the local operator account")?;
+    }
 
     // Exposure rule: setup and unprotected are local conveniences. Binding a
     // network interface in those modes would publish every route without a

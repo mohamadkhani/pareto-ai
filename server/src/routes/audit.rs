@@ -39,6 +39,11 @@ pub struct AuditEntry {
     /// JSON object with action-specific detail, when the action recorded any.
     pub detail_json: Option<String>,
     pub ip: Option<String>,
+    /// True when the action was done in insecure mode: the gateway ran
+    /// without a password and the unauthenticated local operator performed
+    /// it. Promoting that account to a real admin does not rewrite history —
+    /// these rows keep the flag.
+    pub insecure: bool,
     pub occurred_at: String,
 }
 
@@ -139,7 +144,8 @@ pub async fn list(
     // timestamp alone would permanently exclude the same-millisecond rows
     // that share it with the last entry of a page.
     let entries = sqlx::query_as::<_, AuditEntry>(
-        "SELECT id, actor_user_id, action, target_type, target_id, detail_json, ip, occurred_at \
+        "SELECT id, actor_user_id, action, target_type, target_id, detail_json, ip, insecure, \
+                occurred_at \
          FROM audit_log \
          WHERE (? IS NULL OR occurred_at < ? \
                 OR (? IS NOT NULL AND occurred_at = ? AND id < ?)) \

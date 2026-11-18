@@ -451,7 +451,9 @@ pub async fn end_session(
     Ok(())
 }
 
-/// Writes one `audit_log` row.
+/// Writes one `audit_log` row. `insecure` is stamped automatically: a row
+/// written while the actor is the unauthenticated local-operator placeholder
+/// is marked as done in insecure mode.
 #[allow(clippy::too_many_arguments)] // the audit columns are fixed by the schema
 pub async fn audit<'e, E>(
     db: E,
@@ -466,8 +468,10 @@ where
     E: sqlx::SqliteExecutor<'e>,
 {
     sqlx::query(
-        "INSERT INTO audit_log (actor_user_id, action, target_type, target_id, detail_json, ip) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO audit_log (actor_user_id, action, target_type, target_id, detail_json, ip, \
+                                insecure) \
+         VALUES (?, ?, ?, ?, ?, ?, \
+                 COALESCE((SELECT is_placeholder FROM users WHERE id = ?), 0))",
     )
     .bind(actor_user_id)
     .bind(action)
@@ -475,6 +479,7 @@ where
     .bind(target_id)
     .bind(detail_json)
     .bind(ip)
+    .bind(actor_user_id)
     .execute(db)
     .await?;
     Ok(())
@@ -696,7 +701,7 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
         // like the admin plane and trusts the local operator.
         if state.setup.mode() == crate::setup::Mode::Unprotected {
             return Ok(Self(DataPlaneCaller {
-                user_id: "local-operator".to_string(),
+                user_id: LOCAL_OPERATOR_ID.to_string(),
                 role: Role::Admin,
                 api_key: None,
             }));
@@ -725,6 +730,11 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
     }
 }
 
+/// The user id of the synthetic local operator, and of the real placeholder
+/// row in `users` that backs it (migration 0016): completing setup promotes
+/// that same row to the first admin.
+pub const LOCAL_OPERATOR_ID: &str = "local-operator";
+
 /// The synthetic caller used while the gateway is in **unprotected** mode: a
 /// trusted local operator with admin rights and no session (the wizard allows
 /// this only for a loopback/setup context). `session_id` is empty, so
@@ -732,7 +742,7 @@ impl FromRequestParts<AppState> for DataPlaneAuth {
 /// nothing to act on.
 pub fn local_operator() -> AuthUser {
     AuthUser {
-        user_id: "local-operator".to_string(),
+        user_id: LOCAL_OPERATOR_ID.to_string(),
         email: "local@localhost".to_string(),
         display_name: "Local operator".to_string(),
         role: Role::Admin,

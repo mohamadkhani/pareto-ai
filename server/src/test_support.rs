@@ -35,9 +35,13 @@ impl TestApp {
     }
 
     /// A throwaway gateway that has skipped setup: every `/api` and `/v1`
-    /// request acts as the trusted local operator.
+    /// request acts as the trusted local operator. Mirrors the real skip
+    /// flow: the local-operator placeholder row is seeded too.
     pub async fn unprotected() -> Self {
         let app = Self::new().await;
+        crate::setup::mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("mark setup skipped");
         app.state.setup.set_mode(crate::setup::Mode::Unprotected);
         app
     }

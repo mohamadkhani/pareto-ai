@@ -106,10 +106,11 @@ pub enum SetupError {
     Password(#[from] crate::password::PasswordError),
 }
 
-/// Derives the startup mode from the database: any user means protected, an
-/// explicit skip means unprotected, otherwise setup.
+/// Derives the startup mode from the database: any real account means
+/// protected, an explicit skip means unprotected, otherwise setup. The
+/// local-operator placeholder does not count as an account.
 pub async fn resolve_mode(pool: &SqlitePool) -> Result<Mode, sqlx::Error> {
-    if user_count(pool).await? > 0 {
+    if real_user_count(pool).await? > 0 {
         return Ok(Mode::Protected);
     }
     let skipped: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
@@ -122,14 +123,39 @@ pub async fn resolve_mode(pool: &SqlitePool) -> Result<Mode, sqlx::Error> {
     })
 }
 
-/// Number of rows in `users`.
-pub async fn user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM users")
+/// Number of real accounts in `users`; the local-operator placeholder does
+/// not count.
+pub async fn real_user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
         .fetch_one(pool)
         .await
 }
 
-/// Records the explicit skip so the unprotected mode survives a restart.
+/// Seeds the local-operator placeholder account (migration 0016): the row
+/// behind the synthetic [`crate::auth::local_operator`] identity, so every
+/// audit and `*_updated_by` write during unprotected mode satisfies its
+/// foreign key onto `users`. A no-op when the placeholder already exists or
+/// when a real account does (the identity is only used without one).
+pub async fn ensure_local_operator<'e, E>(db: E) -> Result<(), SetupError>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    sqlx::query(
+        "INSERT OR IGNORE INTO users \
+           (id, email, display_name, password_hash, role, is_active, must_change_password, \
+            is_placeholder) \
+         SELECT ?, 'local@localhost', 'Local operator', '!', 'admin', 1, 0, 1 \
+         WHERE NOT EXISTS (SELECT 1 FROM users WHERE is_placeholder = 0)",
+    )
+    .bind(crate::auth::LOCAL_OPERATOR_ID)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Records the explicit skip so the unprotected mode survives a restart, and
+/// seeds the local-operator placeholder account (a no-op when a real account
+/// exists).
 pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError> {
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -141,6 +167,7 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
     .bind(SETTING_SETUP_SKIPPED)
     .execute(&mut *tx)
     .await?;
+    ensure_local_operator(&mut *tx).await?;
     crate::auth::audit(
         &mut *tx,
         None,
@@ -157,8 +184,12 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
 
 /// Creates the first admin from the wizard: role admin, active, and **not**
 /// flagged for forced rotation (the operator chose this password themselves).
+/// When the local-operator placeholder exists (setup was skipped earlier) it
+/// is promoted to that admin **in place** — same row, so every audit and
+/// `*_updated_by` reference to it stays valid — instead of a second row
+/// appearing.
 ///
-/// Failure mode: [`SetupError::AlreadyComplete`] when a user exists,
+/// Failure mode: [`SetupError::AlreadyComplete`] when a real account exists,
 /// [`SetupError::Invalid`] for a bad email or a too-short password.
 pub async fn create_first_admin(
     pool: &SqlitePool,
@@ -166,7 +197,7 @@ pub async fn create_first_admin(
     password: &str,
     ip: &str,
 ) -> Result<String, SetupError> {
-    if user_count(pool).await? > 0 {
+    if real_user_count(pool).await? > 0 {
         return Err(SetupError::AlreadyComplete);
     }
     let email =
@@ -175,31 +206,53 @@ pub async fn create_first_admin(
     let password = password.to_string();
     let password_hash = crate::password::hash_password_offload(password).await?;
 
-    let id = uuid::Uuid::new_v4().to_string();
     let mut tx = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash, role, is_active, \
-                            must_change_password) \
-         VALUES (?, ?, ?, ?, 'admin', 1, 0)",
+    let promoted = sqlx::query_as::<_, (String,)>(
+        "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
+           must_change_password = 0, is_placeholder = 0, \
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ? AND is_placeholder = 1 \
+         RETURNING id",
     )
-    .bind(&id)
     .bind(&email)
     .bind(&email)
     .bind(&password_hash)
-    .execute(&mut *tx)
+    .bind(crate::auth::LOCAL_OPERATOR_ID)
+    .fetch_optional(&mut *tx)
     .await?;
+    let (id, promoted) = match promoted {
+        Some((id,)) => (id, true),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO users (id, email, display_name, password_hash, role, is_active, \
+                                    must_change_password) \
+                 VALUES (?, ?, ?, ?, 'admin', 1, 0)",
+            )
+            .bind(&id)
+            .bind(&email)
+            .bind(&email)
+            .bind(&password_hash)
+            .execute(&mut *tx)
+            .await?;
+            (id, false)
+        }
+    };
     crate::auth::audit(
         &mut *tx,
         Some(&id),
         "auth.bootstrap_admin_created",
         Some("user"),
         Some(&id),
-        Some(&serde_json::json!({ "email": email, "source": "setup" }).to_string()),
+        Some(
+            &serde_json::json!({ "email": email, "source": "setup", "promoted_local_operator": promoted })
+                .to_string(),
+        ),
         Some(ip),
     )
     .await?;
     tx.commit().await?;
-    tracing::info!(email = %email, "created the first admin from the setup wizard");
+    tracing::info!(email = %email, promoted_local_operator = promoted, "created the first admin from the setup wizard");
     Ok(id)
 }
 
@@ -374,6 +427,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_skip_seeds_the_local_operator_placeholder_without_counting_as_a_user() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip");
+        let (total, placeholders): (i64, i64) =
+            sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(is_placeholder), 0) FROM users")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("users");
+        assert_eq!(total, 1, "the placeholder is a real row in users");
+        assert_eq!(placeholders, 1, "and it is flagged as the placeholder");
+        assert_eq!(
+            real_user_count(&app.state.pool).await.expect("count"),
+            0,
+            "the placeholder is not a real account"
+        );
+
+        // Seeding is idempotent and never adds a second row.
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip again");
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("users");
+        assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn the_placeholder_is_promoted_in_place_and_insecure_actions_stay_marked() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip");
+
+        // While the placeholder acts (unprotected mode), audit rows say so.
+        crate::auth::audit(
+            &app.state.pool,
+            Some(crate::auth::LOCAL_OPERATOR_ID),
+            "test.insecure_action",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("audit");
+        let insecure: i64 = sqlx::query_scalar(
+            "SELECT insecure FROM audit_log WHERE action = 'test.insecure_action'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("flag");
+        assert_eq!(insecure, 1, "unprotected actions are flagged insecure");
+
+        let id = create_first_admin(
+            &app.state.pool,
+            "boss@example.com",
+            "first-admin-password",
+            "127.0.0.1",
+        )
+        .await
+        .expect("create");
+        assert_eq!(
+            id,
+            crate::auth::LOCAL_OPERATOR_ID,
+            "the placeholder is promoted in place, not replaced"
+        );
+
+        let (email, must_change, placeholder): (String, i64, i64) = sqlx::query_as(
+            "SELECT email, must_change_password, is_placeholder FROM users WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("row");
+        assert_eq!(email, "boss@example.com");
+        assert_eq!(must_change, 0, "the operator chose this password");
+        assert_eq!(placeholder, 0, "it is a real account now");
+        let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(&id)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("hash");
+        assert!(crate::password::verify_password("first-admin-password", &hash).expect("verify"));
+
+        // The same id acting as a real account is no longer insecure, and the
+        // rows written before the promotion keep their flag.
+        crate::auth::audit(
+            &app.state.pool,
+            Some(crate::auth::LOCAL_OPERATOR_ID),
+            "test.action_after",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("audit");
+        let (before, after): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT insecure FROM audit_log WHERE action = 'test.insecure_action'), \
+                    (SELECT insecure FROM audit_log WHERE action = 'test.action_after')",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("flags");
+        assert_eq!(
+            (before, after),
+            (1, 0),
+            "only insecure-mode actions are flagged"
+        );
+
+        assert_eq!(
+            resolve_mode(&app.state.pool).await.expect("mode"),
+            Mode::Protected,
+            "a promoted account protects the gateway"
+        );
+        let again = create_first_admin(
+            &app.state.pool,
+            "second@example.com",
+            "second-admin-password",
+            "127.0.0.1",
+        )
+        .await
+        .expect_err("a second first-admin must fail");
+        assert!(matches!(again, SetupError::AlreadyComplete), "{again:?}");
+    }
+
+    #[tokio::test]
     async fn create_first_admin_is_unflagged_audited_and_only_once() {
         use crate::test_support::TestApp;
         let app = TestApp::new().await;
@@ -433,7 +619,7 @@ mod tests {
             create_first_admin(&app.state.pool, "a@example.com", "short", "ip").await,
             Err(SetupError::Invalid(_))
         ));
-        assert_eq!(user_count(&app.state.pool).await.expect("count"), 0);
+        assert_eq!(real_user_count(&app.state.pool).await.expect("count"), 0);
     }
 
     #[test]
