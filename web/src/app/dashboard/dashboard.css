@@ -24,49 +24,6 @@
   flex: 1;
 }
 
-/* --- attention strip ----------------------------------------------------- */
-
-.attention {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
-  background: var(--warning-soft);
-  color: var(--warning);
-  font-size: var(--text-small);
-}
-
-.attention.is-danger {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.attention p {
-  flex: 1 1 18rem;
-  margin: 0;
-}
-
-.attention-icon {
-  width: 1.1rem;
-  height: 1.1rem;
-  flex: none;
-}
-
-.attention-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.attention a {
-  color: inherit;
-  font-weight: var(--weight-semibold);
-}
-
 /* --- card grid ----------------------------------------------------------- */
 
 .card-grid {
@@ -320,28 +277,4 @@
   margin: 0;
   color: var(--text-muted);
   font-size: var(--text-small);
-}
-
-.skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.skeleton-value {
-  width: 45%;
-  height: 2rem;
-  border-radius: var(--radius-xs);
-  background: var(--surface-sunken);
-}
-
-.skeleton-line {
-  width: 80%;
-  height: 0.7rem;
-  border-radius: var(--radius-xs);
-  background: var(--surface-sunken);
-}
-
-.skeleton-line.is-short {
-  width: 55%;
 }

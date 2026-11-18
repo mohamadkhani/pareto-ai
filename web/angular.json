@@ -33,13 +33,13 @@
               "budgets": [
                 {
                   "type": "initial",
-                  // 800 kB: the initial total (~769 kB) includes the dashboard, the user
-                  // drawer, the design
-                  // system's fonts (`@fontsource-variable`), the global token
-                  // and primitive CSS, and the shared primitive chunk. The
-                  // `/styleguide` route itself is lazy-loaded and no longer
-                  // part of this number.
-                  "maximumWarning": "800kB",
+                  // 850 kB: the initial total (~806 kB) includes the richer
+                  // dashboard (sparkline, attention strip, activity card), the
+                  // user drawer, the design system's fonts
+                  // (`@fontsource-variable`), the global token and primitive
+                  // CSS, and the shared primitive chunk. The `/styleguide`
+                  // route itself is lazy-loaded and not part of this number.
+                  "maximumWarning": "850kB",
                   "maximumError": "1MB"
                 },
                 {

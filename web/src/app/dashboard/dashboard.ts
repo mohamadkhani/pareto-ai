@@ -16,6 +16,7 @@ import { UiEmpty } from '../ui/empty';
 import { UiIconButton } from '../ui/icon-button';
 import { UiSparkline } from '../ui/sparkline';
 import { DashboardActivity, type ActivityRow } from './activity';
+import { DashboardAttention, type Attention } from './attention';
 import { UsageService } from '../usage/usage.service';
 import type {
   ErrorSummaryRow,
@@ -60,13 +61,6 @@ interface RequestSegment {
   label: string;
   count: number;
   tone: 'success' | 'warning' | 'info';
-}
-
-/** The single strip that surfaces problems before the cards. */
-interface Attention {
-  tone: 'danger' | 'warning';
-  parts: readonly string[];
-  links: readonly { label: string; path: string }[];
 }
 
 const LOG_SAMPLE = 100;
@@ -115,6 +109,7 @@ function errorPercent(entries: readonly RequestLogEntry[]): number | null {
     UiIconButton,
     UiSparkline,
     DashboardActivity,
+    DashboardAttention,
   ],
   templateUrl: './dashboard.html',
   styleUrl: './dashboard.css',
