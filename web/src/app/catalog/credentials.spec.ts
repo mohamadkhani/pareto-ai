@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
+import { waitFor, waitForButton, waitForText } from '../../testing/wait-for';
 import { AuthService, type User } from '../auth/auth.service';
 import type { Credential, Provider } from './catalog.types';
 import { Credentials } from './credentials';
@@ -70,14 +71,9 @@ function typeInto(root: HTMLElement, selector: string, value: string): void {
   input.dispatchEvent(new Event('input'));
 }
 
-function buttonByText(root: HTMLElement, text: string): HTMLButtonElement {
-  const button = Array.from(root.querySelectorAll('button')).find(
-    (candidate) => candidate.textContent?.trim() === text,
-  );
-  if (button === undefined) {
-    throw new Error(`no button labelled ${text}`);
-  }
-  return button;
+/** A loading button carries `aria-busy`, so this covers in-flight actions. */
+function isBusy(root: ParentNode): boolean {
+  return root.querySelector('[aria-busy="true"]') !== null;
 }
 
 describe('Credentials', () => {
@@ -103,9 +99,26 @@ describe('Credentials', () => {
     fixture.componentRef.setInput('provider', provider);
     await fixture.whenStable();
     fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+    await waitFor(
+      fixture,
+      () => fetchMock.requests.length > 0 && !isBusy(root),
+      'the initial credentials load',
+    );
     return fixture;
+  }
+
+  /** Waits until at least `count` calls were made and no action is in flight. */
+  async function waitForRequests(
+    fixture: ComponentFixture<Credentials>,
+    root: ParentNode,
+    count: number,
+  ): Promise<void> {
+    await waitFor(
+      fixture,
+      () => fetchMock.requests.length >= count && !isBusy(root),
+      `${count} requests to finish`,
+    );
   }
 
   it('lists credentials with masked secret, balance source and age', async () => {
@@ -162,8 +175,7 @@ describe('Credentials', () => {
     }
     gate.value = 'block';
     gate.dispatchEvent(new Event('change'));
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await waitForText(fixture, root, 'set to block');
 
     const call = fetchMock.requests[1];
     expect(call.method).toBe('PATCH');
@@ -199,10 +211,7 @@ describe('Credentials', () => {
       throw new Error('no row refresh button');
     }
     rowRefresh.click();
-    await fixture.whenStable();
-    fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    await waitForText(fixture, root, '$12.34 available');
 
     const call = fetchMock.requests[1];
     expect(call.method).toBe('POST');
@@ -216,11 +225,11 @@ describe('Credentials', () => {
     const fixture = await create([]);
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'New credential').click();
+    (await waitForButton(fixture, root, 'New credential')).click();
     fixture.detectChanges();
     typeInto(root, '#cred-label', 'prod');
     typeInto(root, '#cred-secret', 'sk-live-1');
-    buttonByText(root, 'Add header').click();
+    (await waitForButton(fixture, root, 'Add header')).click();
     fixture.detectChanges();
     typeInto(root, '[aria-label="Header name 1"]', 'x-region');
     fixture.detectChanges();
@@ -228,9 +237,8 @@ describe('Credentials', () => {
     fixture.detectChanges();
     fetchMock.respond(jsonResponse(201, credentialFixture()));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    buttonByText(root, 'Save').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 3);
 
     const call = fetchMock.requests[1];
     expect(call.method).toBe('POST');
@@ -250,9 +258,9 @@ describe('Credentials', () => {
     const fixture = await create([]);
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'New credential').click();
+    (await waitForButton(fixture, root, 'New credential')).click();
     fixture.detectChanges();
-    buttonByText(root, 'Save').click();
+    (await waitForButton(fixture, root, 'Save')).click();
     fixture.detectChanges();
 
     expect(fetchMock.requests).toHaveLength(1);
@@ -264,14 +272,13 @@ describe('Credentials', () => {
     const fixture = await create([credentialFixture()]);
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Edit').click();
+    (await waitForButton(fixture, root, 'Edit')).click();
     fixture.detectChanges();
     typeInto(root, '#cred-label', 'prod-eu');
     fetchMock.respond(jsonResponse(200, credentialFixture({ label: 'prod-eu' })));
     fetchMock.respond(jsonResponse(200, [credentialFixture({ label: 'prod-eu' })]));
-    buttonByText(root, 'Save').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 3);
 
     const call = fetchMock.requests[1];
     expect(call.method).toBe('PATCH');
@@ -284,27 +291,25 @@ describe('Credentials', () => {
     const fixture = await create([credentialFixture({ header_names: ['x-region', 'x-team'] })]);
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Edit').click();
+    (await waitForButton(fixture, root, 'Edit')).click();
     fixture.detectChanges();
     typeInto(root, '#cred-label', 'prod-eu');
     fetchMock.respond(jsonResponse(200, credentialFixture({ label: 'prod-eu' })));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    buttonByText(root, 'Save').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 3);
 
     // Untouched headers are not part of the patch at all.
     expect(fetchMock.requests[1].body).toEqual({ label: 'prod-eu' });
 
-    buttonByText(root, 'Edit').click();
+    (await waitForButton(fixture, root, 'Edit')).click();
     fixture.detectChanges();
     typeInto(root, '[aria-label="Header value 1"]', 'eu');
     fixture.detectChanges();
     fetchMock.respond(jsonResponse(200, credentialFixture()));
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    buttonByText(root, 'Save').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 5);
 
     // The row whose value stayed blank (write-only, not retyped) is dropped.
     expect(fetchMock.requests[3].body).toEqual({ headers: { 'x-region': 'eu' } });
@@ -327,9 +332,8 @@ describe('Credentials', () => {
     fetchMock.respond(
       jsonResponse(200, [credentialFixture({ last_tested_at: '2026-01-01T00:05:00.000Z' })]),
     );
-    buttonByText(root, 'Test').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Test')).click();
+    await waitForText(fixture, root, 'Probe passed for prod');
 
     expect(fetchMock.requests[1].url).toBe('/api/credentials/c1/test');
     expect(fetchMock.requests[1].headers.get('X-CSRF-Token')).toBe('csrf-1');
@@ -353,9 +357,8 @@ describe('Credentials', () => {
       }),
     );
     fetchMock.respond(jsonResponse(200, [credentialFixture({ status: 'error' })]));
-    buttonByText(root, 'Test').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Test')).click();
+    await waitForText(fixture, root, 'Probe failed for prod');
 
     const banner = root.querySelector('ui-banner.tone-danger')?.textContent ?? '';
     expect(banner).toContain('Probe failed for prod');
@@ -366,16 +369,14 @@ describe('Credentials', () => {
     const fixture = await create([credentialFixture()]);
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Delete').click();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Delete')).click();
+    await waitForText(fixture, root, 'Delete prod from openrouter');
     expect(fetchMock.requests).toHaveLength(1);
-    expect(root.textContent).toContain('Delete prod from openrouter');
 
     fetchMock.respond(noContentResponse());
     fetchMock.respond(jsonResponse(200, []));
-    buttonByText(root, 'Delete credential').click();
-    await fixture.whenStable();
-    fixture.detectChanges();
+    (await waitForButton(fixture, root, 'Delete credential')).click();
+    await waitForText(fixture, root, 'No credentials yet');
 
     const call = fetchMock.requests[1];
     expect(call.method).toBe('DELETE');

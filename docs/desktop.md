@@ -141,6 +141,14 @@ removed.
 
 ## CI (`.github/workflows/desktop.yml`)
 
+**macOS is disabled for now (2026-11-18).** With a private repository in the
+current plan, GitHub cancels the `macos-14` job within ~2 s without running a
+single step — no macOS runner is assigned. Options: make the repository public
+(public repos get free macOS minutes), enable paid macOS minutes / a spending
+limit, or build locally on a Mac with `just desktop-sidecar && just desktop-build`
+in `desktop/`. Re-enable the commented matrix entry once one of the first two
+applies.
+
 Hosted runners only: Windows and macOS bundles cannot be produced on the Linux
 development host.
 

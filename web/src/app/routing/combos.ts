@@ -498,8 +498,8 @@ export class Combos {
   /** `header` reads X-Session-Id; `auto` hashes identity + first message. */
   protected stickinessHint(): string {
     return this.draft().stickinessKeySource === 'header'
-      ? 'Reads the X-Session-Id request header; a request without it is not pinned (no derived fallback in this mode).'
-      : 'Derived from the user or API key plus the system prompt and first user message; X-Session-Id wins when present.';
+      ? 'Reads X-Session-Id; requests without it are not pinned.'
+      : 'Derived from the user or API key and the first message; X-Session-Id wins.';
   }
 
   /** True for the weights editor: presets only matter to the weighted strategy. */

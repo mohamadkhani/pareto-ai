@@ -53,8 +53,9 @@ export const routes: Routes = [
       { path: 'users', component: Users },
       { path: 'grants', component: Grants },
       { path: 'logs', component: Logs },
-      // Review surface for the design system; linked from the shell for admins
-      // and marked admin-only here, with the component showing Forbidden.
+      // Review surface for the design system; development builds only. The
+      // shell hides the nav link and the component renders Forbidden in a
+      // production build (D28).
       // Lazy-loaded: it renders every primitive twice and is not needed on
       // first paint (it kept the initial bundle over the 600 kB budget).
       {

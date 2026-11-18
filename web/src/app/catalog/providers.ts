@@ -5,7 +5,7 @@ import { BalanceCache } from './balance-cache';
 import { CatalogService } from './catalog.service';
 import { Connectors } from './connectors';
 import type { ConnectorKind, PriceDisplay } from './connectors.types';
-import { Credentials } from './credentials';
+import { Credentials, type CredentialChange } from './credentials';
 import { describeError, isForbidden } from './errors';
 import { formatAge } from './format';
 import type {
@@ -269,6 +269,30 @@ export class Providers {
   }
 
   /**
+   * The credentials panel reports its fresh list, so the provider row's count
+   * and an open Load models picker update without a second read.
+   */
+  protected onCredentialsChanged(change: CredentialChange): void {
+    this.credentialsByProvider.update((map) =>
+      new Map(map).set(change.providerId, [...change.credentials]),
+    );
+    const state = this.discovery();
+    if (state === null || state.provider.id !== change.providerId) {
+      return;
+    }
+    const selectedStillExists = change.credentials.some(
+      (credential) => credential.id === state.credentialId,
+    );
+    this.discovery.set({
+      ...state,
+      credentials: [...change.credentials],
+      credentialId: selectedStillExists
+        ? state.credentialId
+        : defaultCredentialId(change.credentials),
+    });
+  }
+
+  /**
    * Sums the credentials' known balances. An unavailable provider balance is
    * never zero: with no usable number the row says "unavailable".
    */
@@ -450,7 +474,7 @@ export class Providers {
 
   // --- Load models (discovery) --------------------------------------------
 
-  protected openDiscovery(provider: Provider): void {
+  protected async openDiscovery(provider: Provider): Promise<void> {
     const credentials = this.credentialsByProvider().get(provider.id) ?? [];
     this.discovery.set({
       provider,
@@ -460,6 +484,35 @@ export class Providers {
       applied: null,
       error: null,
       running: null,
+    });
+    // The cached list is stale after a credential was just created or edited:
+    // re-read it before the operator can run a preview with it.
+    await this.refreshDiscoveryCredentials(provider.id);
+  }
+
+  /**
+   * Re-reads a provider's credentials while its Load models dialog is open.
+   * A failure keeps the cached list so the dialog stays usable.
+   */
+  private async refreshDiscoveryCredentials(providerId: string): Promise<void> {
+    let credentials: Credential[];
+    try {
+      credentials = await this.catalog.listCredentials(providerId);
+    } catch {
+      return;
+    }
+    this.credentialsByProvider.update((map) => new Map(map).set(providerId, credentials));
+    const state = this.discovery();
+    if (state === null || state.provider.id !== providerId) {
+      return;
+    }
+    const selectedStillExists = credentials.some(
+      (credential) => credential.id === state.credentialId,
+    );
+    this.discovery.set({
+      ...state,
+      credentials,
+      credentialId: selectedStillExists ? state.credentialId : defaultCredentialId(credentials),
     });
   }
 

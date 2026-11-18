@@ -1,6 +1,7 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { AuthService, type User } from '../auth/auth.service';
+import { DEV_MODE } from '../dev-mode';
 import { Styleguide } from './styleguide';
 
 function authStub(role: 'admin' | 'user'): object {
@@ -18,10 +19,16 @@ function authStub(role: 'admin' | 'user'): object {
 }
 
 describe('Styleguide', () => {
-  async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Styleguide>> {
+  async function create(
+    role: 'admin' | 'user' = 'admin',
+    devMode = true,
+  ): Promise<ComponentFixture<Styleguide>> {
     TestBed.configureTestingModule({
       imports: [Styleguide],
-      providers: [{ provide: AuthService, useValue: authStub(role) }],
+      providers: [
+        { provide: AuthService, useValue: authStub(role) },
+        { provide: DEV_MODE, useValue: devMode },
+      ],
     });
     await TestBed.compileComponents();
     const fixture = TestBed.createComponent(Styleguide);
@@ -59,7 +66,17 @@ describe('Styleguide', () => {
     const root = fixture.nativeElement as HTMLElement;
 
     expect(root.textContent).toContain('Forbidden');
-    expect(root.textContent).toContain('restricted to administrators');
+    expect(root.textContent).toContain('development builds only');
+    expect(root.querySelectorAll('ui-button')).toHaveLength(0);
+    expect(root.querySelector('[data-theme="light"]')).toBeNull();
+  });
+
+  it('shows the forbidden state in a production build even for an admin', async () => {
+    const fixture = await create('admin', false);
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Forbidden');
+    expect(root.textContent).toContain('development builds only');
     expect(root.querySelectorAll('ui-button')).toHaveLength(0);
     expect(root.querySelector('[data-theme="light"]')).toBeNull();
   });

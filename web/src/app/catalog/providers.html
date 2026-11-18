@@ -63,8 +63,35 @@
           </thead>
           <tbody>
             @for (provider of providers(); track provider.id) {
-              <tr [class.is-selected]="selectedId() === provider.id">
-                <td>
+              <tr
+                class="provider-row"
+                [class.is-selected]="selectedId() === provider.id"
+                (click)="toggleSelected(provider)"
+              >
+                <td class="provider-cell">
+                  <button
+                    type="button"
+                    class="row-disclosure"
+                    [class.is-expanded]="selectedId() === provider.id"
+                    [attr.aria-expanded]="selectedId() === provider.id"
+                    [attr.aria-controls]="'credentials-' + provider.id"
+                    [attr.aria-label]="
+                      (selectedId() === provider.id ? 'Hide' : 'Show') +
+                      ' credentials for ' +
+                      provider.name
+                    "
+                    (click)="toggleSelected(provider); $event.stopPropagation()"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <path d="m9 6 6 6-6 6" />
+                    </svg>
+                  </button>
                   <span class="provider-name">{{ provider.name }}</span>
                 </td>
                 <td>
@@ -107,13 +134,10 @@
                 <td class="num">{{ credentialCount(provider.id) }}</td>
                 <td class="num">{{ offeringCount(provider.id) }}</td>
                 <td class="last-load">{{ discoveryLabel(provider) }}</td>
-                <td class="actions">
+                <td class="actions" (click)="$event.stopPropagation()">
                   <ui-button size="sm" (clicked)="openDiscovery(provider)">Load models</ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="openConnectors(provider)">
                     Connectors
-                  </ui-button>
-                  <ui-button size="sm" variant="ghost" (clicked)="toggleSelected(provider)">
-                    {{ selectedId() === provider.id ? 'Hide credentials' : 'Credentials' }}
                   </ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="openEdit(provider)">
                     Edit
@@ -136,12 +160,16 @@
                   <td colspan="10">
                     <section
                       class="credentials-panel"
+                      [attr.id]="'credentials-' + provider.id"
                       [attr.aria-label]="'Credentials — ' + provider.name"
                     >
                       <div class="credentials-head">
                         <h2>Credentials — {{ provider.name }}</h2>
                       </div>
-                      <app-credentials [provider]="provider" (changed)="reload()" />
+                      <app-credentials
+                        [provider]="provider"
+                        (changed)="onCredentialsChanged($event)"
+                      />
                     </section>
                   </td>
                 </tr>

@@ -48,6 +48,12 @@ function emptyDraft(): CredentialDraft {
   return { label: '', secret: '', max_concurrency: '', balance_usd: '' };
 }
 
+/** A credential-list change raised by the panel so the provider page stays fresh. */
+export interface CredentialChange {
+  providerId: string;
+  credentials: readonly Credential[];
+}
+
 /**
  * Credentials for one provider: list, create/edit (secret write-only), delete,
  * and a health probe. Loaded whenever the `provider` input's id changes.
@@ -75,8 +81,12 @@ export class Credentials {
   private readonly balanceCache = inject(BalanceCache);
 
   readonly provider = input.required<Provider>();
-  /** Raised when a balance refresh changes data the provider row renders. */
-  readonly changed = output<void>();
+  /**
+   * Raised with the freshly loaded list when a credential is created, edited,
+   * or deleted (and after a balance refresh), so the provider page can update
+   * its cached counts and the Load models credential picker.
+   */
+  readonly changed = output<CredentialChange>();
 
   protected readonly credentials = signal<Credential[]>([]);
   protected readonly loading = signal(false);
@@ -188,6 +198,7 @@ export class Credentials {
       }
       this.closeForm();
       await this.load(this.providerId());
+      this.emitChange();
     } catch (err) {
       this.formError.set(describeError(err, 'Saving the credential failed.'));
     } finally {
@@ -245,7 +256,7 @@ export class Credentials {
             },
       );
       await this.load(this.providerId());
-      this.changed.emit();
+      this.changed.emit({ providerId: this.providerId(), credentials: this.credentials() });
     } catch (err) {
       this.actionError.set(describeError(err, 'Refreshing the balance failed.'));
     } finally {
@@ -328,6 +339,7 @@ export class Credentials {
       this.deleting.set(null);
       this.notice.set('Credential deleted.');
       await this.load(this.providerId());
+      this.emitChange();
     } catch (err) {
       this.actionError.set(describeError(err, 'Deleting the credential failed.'));
     } finally {
@@ -350,6 +362,10 @@ export class Credentials {
 
   protected sourceTone(source: Credential['balance_source']): BadgeTone {
     return source === 'manual' ? 'warning' : source === 'provider_api' ? 'info' : 'neutral';
+  }
+
+  private emitChange(): void {
+    this.changed.emit({ providerId: this.providerId(), credentials: this.credentials() });
   }
 
   private async load(providerId: string): Promise<void> {

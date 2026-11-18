@@ -10,6 +10,7 @@ import {
 import { NgTemplateOutlet } from '@angular/common';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
+import { DEV_MODE } from '../dev-mode';
 import { SetupService } from '../setup/setup.service';
 import { UiBadge } from '../ui/badge';
 import { UiBanner, type BannerTone } from '../ui/banner';
@@ -22,6 +23,8 @@ interface NavLink {
   readonly label: string;
   readonly path: string;
   readonly adminOnly: boolean;
+  /** Hidden from production builds; the route itself also refuses to render. */
+  readonly devOnly?: boolean;
 }
 
 /** A labelled group of navigation links. */
@@ -72,7 +75,7 @@ const NAV_SECTIONS: readonly NavSection[] = [
   },
   {
     label: 'Development',
-    links: [{ label: 'Styleguide', path: '/styleguide', adminOnly: true }],
+    links: [{ label: 'Styleguide', path: '/styleguide', adminOnly: true, devOnly: true }],
   },
 ];
 
@@ -105,6 +108,7 @@ export class Shell {
   protected readonly theme = inject(ThemeService);
   private readonly setup = inject(SetupService);
   private readonly router = inject(Router);
+  private readonly devMode = inject(DEV_MODE);
 
   protected readonly signingOut = signal(false);
   /** Whether the compact (below ~900px) navigation panel is open. */
@@ -132,7 +136,9 @@ export class Shell {
     const admin = this.auth.isAdmin();
     return NAV_SECTIONS.map((section) => ({
       label: section.label,
-      links: section.links.filter((link) => admin || !link.adminOnly),
+      links: section.links.filter(
+        (link) => (admin || !link.adminOnly) && (this.devMode || !link.devOnly),
+      ),
     })).filter((section) => section.links.length > 0);
   });
 

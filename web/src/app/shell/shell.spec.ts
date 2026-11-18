@@ -3,6 +3,7 @@ import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { Router, provideRouter } from '@angular/router';
 import { FetchMock, noContentResponse } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
+import { DEV_MODE } from '../dev-mode';
 import { SetupService, type SetupStatus } from '../setup/setup.service';
 import { ThemeService } from '../ui/theme.service';
 import { Shell } from './shell';
@@ -48,10 +49,11 @@ describe('Shell', () => {
     vi.unstubAllGlobals();
   });
 
-  async function create(user: User): Promise<ComponentFixture<Shell>> {
+  async function create(user: User, devMode = true): Promise<ComponentFixture<Shell>> {
     TestBed.configureTestingModule({
       imports: [Shell, Blank],
       providers: [
+        { provide: DEV_MODE, useValue: devMode },
         provideRouter([
           { path: 'audit', component: Blank },
           { path: 'keys', component: Blank },
@@ -98,6 +100,20 @@ describe('Shell', () => {
     expect(links).not.toContain('Offerings');
     expect(links).not.toContain('Benchmarks');
     expect(links).not.toContain('Price sync');
+  });
+
+  it('hides the development-only styleguide in a production build', async () => {
+    const fixture = await create(admin, false);
+    const root = fixture.nativeElement as HTMLElement;
+    const labels = Array.from(root.querySelectorAll('.nav-desktop .nav-section__label')).map(
+      (label) => label.textContent?.trim(),
+    );
+    const hrefs = Array.from(root.querySelectorAll('.nav-desktop a')).map((link) =>
+      link.getAttribute('href'),
+    );
+
+    expect(labels).not.toContain('Development');
+    expect(hrefs).not.toContain('/styleguide');
   });
 
   it('never shows the setup wizard as a navigation entry', async () => {

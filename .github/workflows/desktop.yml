@@ -63,13 +63,17 @@ jobs:
             bundles: nsis,msi
             universal: false
             ext: ".exe"
-          - name: macos-universal
-            os: macos-14
-            target: universal-apple-darwin
-            toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            bundles: dmg,app
-            universal: true
-            ext: ""
+          # macOS is disabled for now: on a private repo in the current plan,
+          # GitHub cancels the macos-14 job within ~2 s without running a step
+          # (no macOS runner is available). Re-enable this entry when the repo
+          # is public or paid macOS minutes are enabled, and see docs/desktop.md.
+          # - name: macos-universal
+          #   os: macos-14
+          #   target: universal-apple-darwin
+          #   toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          #   bundles: dmg,app
+          #   universal: true
+          #   ext: ""
     steps:
       - uses: actions/checkout@v4
 

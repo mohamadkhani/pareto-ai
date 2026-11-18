@@ -1,6 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { AuthService } from '../auth/auth.service';
+import { DEV_MODE } from '../dev-mode';
 import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
@@ -25,9 +26,9 @@ interface TokenSwatch {
 
 /**
  * Review surface for the design system: tokens plus every primitive in every
- * state, rendered twice (forced light and forced dark). Admin-only: the route
- * carries `data.adminOnly`, the shell hides the link, and a `user` account
- * gets the same Forbidden state as the other admin surfaces.
+ * state, rendered twice (forced light and forced dark). Development only: the
+ * shell hides the link and the route renders the usual Forbidden state outside
+ * a development build (D28). It is also admin-only.
  */
 @Component({
   selector: 'app-styleguide',
@@ -55,8 +56,9 @@ interface TokenSwatch {
 })
 export class Styleguide {
   private readonly auth = inject(AuthService);
+  private readonly devMode = inject(DEV_MODE);
 
-  protected readonly forbidden = computed(() => !this.auth.isAdmin());
+  protected readonly forbidden = computed(() => !this.devMode || !this.auth.isAdmin());
 
   protected readonly colorTokens: readonly TokenSwatch[] = [
     { token: '--bg', label: 'Background' },

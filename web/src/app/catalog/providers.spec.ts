@@ -7,6 +7,7 @@ import {
   jsonResponse,
   noContentResponse,
 } from '../../testing/fetch-mock';
+import { waitFor, waitForButton, waitForText } from '../../testing/wait-for';
 import { AuthService, type User } from '../auth/auth.service';
 import { BalanceCache } from './balance-cache';
 import type { Credential, DiscoverySummary, Offering, Provider } from './catalog.types';
@@ -109,12 +110,15 @@ function typeInto(root: HTMLElement, selector: string, value: string): void {
   input.dispatchEvent(new Event('input'));
 }
 
-function buttonByText(root: HTMLElement, text: string): HTMLButtonElement {
-  const button = Array.from(root.querySelectorAll('button')).find(
-    (candidate) => candidate.textContent?.trim() === text,
-  );
-  if (button === undefined) {
-    throw new Error(`no button labelled ${text}`);
+/** A loading button carries `aria-busy`, so this covers in-flight actions. */
+function isBusy(root: ParentNode): boolean {
+  return root.querySelector('[aria-busy="true"]') !== null;
+}
+
+function disclosure(root: HTMLElement): HTMLButtonElement {
+  const button = root.querySelector('.row-disclosure');
+  if (!(button instanceof HTMLButtonElement)) {
+    throw new Error('no row disclosure button');
   }
   return button;
 }
@@ -163,15 +167,28 @@ describe('Providers', () => {
     const fixture = TestBed.createComponent(Providers);
     await fixture.whenStable();
     fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+    await waitFor(
+      fixture,
+      () =>
+        (root.textContent ?? '').includes('Forbidden') ||
+        (fetchMock.requests.length > 0 && !isBusy(root)),
+      'the initial providers load',
+    );
     return fixture;
   }
 
-  /** Waits for reactive effects and their async work to settle and render. */
-  async function settle(fixture: ComponentFixture<Providers>): Promise<void> {
-    await fixture.whenStable();
-    fixture.detectChanges();
-    await fixture.whenStable();
-    fixture.detectChanges();
+  /** Waits until at least `count` calls were made and no action is in flight. */
+  async function waitForRequests(
+    fixture: ComponentFixture<Providers>,
+    root: ParentNode,
+    count: number,
+  ): Promise<void> {
+    await waitFor(
+      fixture,
+      () => fetchMock.requests.length >= count && !isBusy(root),
+      `${count} requests to finish`,
+    );
   }
 
   it('shows a forbidden state for non-admins without calling the API', async () => {
@@ -219,7 +236,7 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'New provider').click();
+    (await waitForButton(fixture, root, 'New provider')).click();
     fixture.detectChanges();
     typeInto(root, '#provider-name', 'azure');
     typeInto(root, '#provider-base-url', 'https://a.example/v1');
@@ -230,8 +247,8 @@ describe('Providers', () => {
       ),
     );
     queueLoad([providerFixture(), providerFixture({ id: 'p2', name: 'azure' })]);
-    buttonByText(root, 'Save').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 8);
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('POST');
@@ -250,9 +267,9 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'New provider').click();
+    (await waitForButton(fixture, root, 'New provider')).click();
     fixture.detectChanges();
-    buttonByText(root, 'Save').click();
+    (await waitForButton(fixture, root, 'Save')).click();
     fixture.detectChanges();
 
     expect(fetchMock.requests).toHaveLength(2);
@@ -261,7 +278,7 @@ describe('Providers', () => {
 
     typeInto(root, '#provider-name', 'azure');
     typeInto(root, '#provider-base-url', 'ftp://a.example');
-    buttonByText(root, 'Save').click();
+    (await waitForButton(fixture, root, 'Save')).click();
     fixture.detectChanges();
 
     expect(fetchMock.requests).toHaveLength(2);
@@ -275,8 +292,8 @@ describe('Providers', () => {
 
     fetchMock.respond(jsonResponse(200, providerFixture({ enabled: false })));
     queueLoad([providerFixture({ enabled: false })]);
-    buttonByText(root, 'Disable').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Disable')).click();
+    await waitForRequests(fixture, root, 7);
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('PATCH');
@@ -290,7 +307,7 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Edit').click();
+    (await waitForButton(fixture, root, 'Edit')).click();
     fixture.detectChanges();
     typeInto(root, '#provider-name', 'openrouter-eu');
     const toggle = root.querySelector('ui-dialog button[role="switch"]');
@@ -303,8 +320,8 @@ describe('Providers', () => {
     queueLoad([providerFixture({ name: 'openrouter-eu', enabled: false })]);
     toggle.click();
     fixture.detectChanges();
-    buttonByText(root, 'Save').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 7);
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('PATCH');
@@ -316,15 +333,15 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Delete').click();
+    (await waitForButton(fixture, root, 'Delete')).click();
     fixture.detectChanges();
 
     // Opening the confirmation must not delete anything yet.
     expect(fetchMock.requests).toHaveLength(3);
     fetchMock.respond(noContentResponse());
     queueLoad([]);
-    buttonByText(root, 'Delete provider').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Delete provider')).click();
+    await waitForText(fixture, root, 'No providers yet');
 
     const call = fetchMock.requests[3];
     expect(call.method).toBe('DELETE');
@@ -337,14 +354,28 @@ describe('Providers', () => {
     queueLoad([providerFixture()], { p1: [credentialFixture()] });
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
+    const toggle = disclosure(root);
+
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-controls')).toBe('credentials-p1');
+    expect(root.querySelector('#credentials-p1')).toBeNull();
 
     fetchMock.respond(jsonResponse(200, [credentialFixture()]));
-    buttonByText(root, 'Credentials').click();
-    await settle(fixture);
+    toggle.click();
+    await waitForText(fixture, root, 'prod');
 
     expect(root.textContent).toContain('Credentials — openrouter');
     expect(root.textContent).toContain('prod');
     expect(fetchMock.requests[3].url).toBe('/api/providers/p1/credentials');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.classList.contains('is-expanded')).toBe(true);
+    expect(root.querySelector('#credentials-p1')).not.toBeNull();
+
+    // The whole row is a second, pointer-only toggle target.
+    root.querySelector<HTMLElement>('tr.provider-row')?.click();
+    fixture.detectChanges();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('#credentials-p1')).toBeNull();
   });
 
   it('previews discovery with a dry run, then applies and links to Models', async () => {
@@ -352,19 +383,20 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Load models').click();
-    fixture.detectChanges();
-    expect(root.textContent).toContain('Load models — openrouter');
+    // Opening the dialog re-reads credentials before Preview can run.
+    fetchMock.respond(jsonResponse(200, [credentialFixture()]));
+    (await waitForButton(fixture, root, 'Load models')).click();
+    await waitForText(fixture, root, 'Load models — openrouter');
 
     fetchMock.respond(jsonResponse(200, discoveryFixture()));
-    buttonByText(root, 'Preview').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Preview')).click();
+    await waitForText(fixture, root, 'Preview (no changes written)');
 
-    const previewCall = fetchMock.requests[3];
-    expect(previewCall.method).toBe('POST');
-    expect(previewCall.url).toBe('/api/providers/p1/discover-models');
-    expect(previewCall.headers.get('X-CSRF-Token')).toBe('csrf-1');
-    expect(previewCall.body).toEqual({ credential_id: 'c1', dry_run: true });
+    const previewCall = fetchMock.requests.find((call) => call.url.endsWith('/discover-models'));
+    expect(previewCall?.method).toBe('POST');
+    expect(previewCall?.url).toBe('/api/providers/p1/discover-models');
+    expect(previewCall?.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(previewCall?.body).toEqual({ credential_id: 'c1', dry_run: true });
     expect(root.textContent).toContain('Preview (no changes written)');
     expect(root.textContent).toContain('New models');
     expect(root.textContent).toContain('5');
@@ -382,11 +414,17 @@ describe('Providers', () => {
       ],
       { p1: [credentialFixture()] },
     );
-    buttonByText(root, 'Apply').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Apply')).click();
+    await waitFor(
+      fixture,
+      () => (root.querySelector('td.last-load')?.textContent ?? '').includes('+2 models'),
+      'the applied discovery row to reload',
+    );
 
-    const applyCall = fetchMock.requests[4];
-    expect(applyCall.body).toEqual({ credential_id: 'c1', dry_run: false });
+    const applyCall = fetchMock.requests
+      .filter((call) => call.url.endsWith('/discover-models'))
+      .at(-1);
+    expect(applyCall?.body).toEqual({ credential_id: 'c1', dry_run: false });
     expect(root.textContent).toContain('Applied: 5 discovered');
     const link = root.querySelector('a[href="/models?provider=p1"]');
     expect(link).not.toBeNull();
@@ -395,6 +433,43 @@ describe('Providers', () => {
     expect(lastLoad?.textContent).toContain('+2 models');
     expect(lastLoad?.textContent).toContain('3 unchanged');
     expect(lastLoad?.textContent).not.toContain('never');
+  });
+
+  it('uses a credential created in the panel for Load models without a page reload', async () => {
+    queueLoad([providerFixture()], { p1: [] });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const created = credentialFixture({ id: 'c2', label: 'fresh' });
+
+    // Expand the panel so the create form is reachable.
+    fetchMock.respond(jsonResponse(200, []));
+    disclosure(root).click();
+    await waitForText(fixture, root, 'No credentials yet');
+
+    (await waitForButton(fixture, root, 'New credential')).click();
+    fixture.detectChanges();
+    typeInto(root, '#cred-label', 'fresh');
+    typeInto(root, '#cred-secret', 'sk-fresh');
+    fetchMock.respond(jsonResponse(201, created));
+    fetchMock.respond(jsonResponse(200, [created]));
+    (await waitForButton(fixture, root, 'Save')).click();
+    await waitForRequests(fixture, root, 6);
+
+    // Opening Load models re-reads the list; the new credential is selectable.
+    fetchMock.respond(jsonResponse(200, [created]));
+    (await waitForButton(fixture, root, 'Load models')).click();
+    await waitForText(fixture, root, 'fresh (ok)');
+
+    const select = root.querySelector<HTMLSelectElement>('#discovery-credential');
+    expect(select?.value).toBe('c2');
+    expect(root.textContent).toContain('fresh (ok)');
+
+    fetchMock.respond(jsonResponse(200, discoveryFixture({ credential_id: 'c2' })));
+    (await waitForButton(fixture, root, 'Preview')).click();
+    await waitForText(fixture, root, 'Preview (no changes written)');
+
+    const previewCall = fetchMock.requests.find((call) => call.url.endsWith('/discover-models'));
+    expect(previewCall?.body).toEqual({ credential_id: 'c2', dry_run: true });
   });
 
   it('shows connector badges and a balance from the connector display', async () => {
@@ -457,8 +532,12 @@ describe('Providers', () => {
       }),
     );
     const fixture = await create();
-    await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
+    await waitFor(
+      fixture,
+      () => root.querySelector('.provider-balance')?.textContent?.trim() === '€3.50',
+      'the connector price display to load',
+    );
 
     const badges = Array.from(root.querySelectorAll('.connector-badges .ui-badge'));
     expect(badges.map((badge) => badge.textContent?.trim())).toEqual([
@@ -536,8 +615,12 @@ describe('Providers', () => {
       }),
     );
     const fixture = await create();
-    await settle(fixture);
     const root = fixture.nativeElement as HTMLElement;
+    await waitFor(
+      fixture,
+      () => root.querySelector('.provider-balance')?.textContent?.trim() === 'unavailable',
+      'the unavailable provider balance to render',
+    );
 
     const balance = root.querySelector('.provider-balance');
     expect(balance?.textContent?.trim()).toBe('unavailable');
@@ -550,9 +633,9 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Connectors').click();
-    fixture.detectChanges();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Connectors')).click();
+    await waitForText(fixture, root, 'Connectors — openrouter');
+    await waitForRequests(fixture, root, 4);
 
     expect(root.textContent).toContain('Connectors — openrouter');
     expect(fetchMock.requests[3].url).toBe('/api/providers/p1/connectors/templates');
@@ -563,8 +646,9 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Load models').click();
-    fixture.detectChanges();
+    fetchMock.respond(jsonResponse(200, [credentialFixture()]));
+    (await waitForButton(fixture, root, 'Load models')).click();
+    await waitForText(fixture, root, 'Load models — openrouter');
     fetchMock.respond(
       errorResponse(
         502,
@@ -572,13 +656,13 @@ describe('Providers', () => {
         'The provider answered 503 after 10s; no models were loaded.',
       ),
     );
-    buttonByText(root, 'Preview').click();
-    await settle(fixture);
+    (await waitForButton(fixture, root, 'Preview')).click();
+    await waitForText(fixture, root, 'The provider answered 503 after 10s; no models were loaded.');
 
     expect(root.textContent).toContain(
       'The provider answered 503 after 10s; no models were loaded.',
     );
-    expect(buttonByText(root, 'Apply').disabled).toBe(true);
+    expect((await waitForButton(fixture, root, 'Apply')).disabled).toBe(true);
   });
 
   it('explains a missing credential instead of calling discovery', async () => {
@@ -586,18 +670,22 @@ describe('Providers', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    buttonByText(root, 'Load models').click();
-    fixture.detectChanges();
+    fetchMock.respond(jsonResponse(200, []));
+    (await waitForButton(fixture, root, 'Load models')).click();
+    await waitForText(fixture, root, 'This provider has no credentials yet');
 
     expect(root.textContent).toContain('This provider has no credentials yet');
-    expect(buttonByText(root, 'Preview').disabled).toBe(true);
-    expect(fetchMock.requests).toHaveLength(3);
+    expect((await waitForButton(fixture, root, 'Preview')).disabled).toBe(true);
+    // The dialog's open-time refresh made one read and discovery was never called.
+    expect(fetchMock.requests).toHaveLength(4);
+    expect(fetchMock.requests[3].url).toBe('/api/providers/p1/credentials');
   });
 
   it('shows the server message when loading fails', async () => {
     fetchMock.respond(errorResponse(500, 'internal', 'Reading providers failed.'));
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
+    await waitForText(fixture, root, 'Reading providers failed.');
 
     expect(root.textContent).toContain('Reading providers failed.');
   });
