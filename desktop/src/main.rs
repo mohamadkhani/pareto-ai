@@ -10,7 +10,9 @@
 //! 3. poll `GET /health` for up to 20 s,
 //! 4. open the main window at `http://127.0.0.1:<port>/` (the gateway keeps
 //!    serving its embedded console; no assets are duplicated here),
-//! 5. kill the sidecar when the app exits.
+//! 5. keep a system-tray icon: closing the window hides it instead of
+//!    stopping the gateway, so the service keeps running in the background,
+//! 6. kill the sidecar when the app exits (tray "Quit Pareto AI").
 //!
 //! The sidecar's stdout/stderr go to `<app-data>/gateway/sidecar.log`; the
 //! tail of that file is shown in a native error dialog if startup fails.
@@ -25,7 +27,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 /// How long the gateway may take to serve `/health` before startup fails.
@@ -38,6 +42,12 @@ const HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const LOG_TAIL_LINES: usize = 40;
 /// Name of the process log inside the gateway data directory.
 const LOG_FILE: &str = "sidecar.log";
+/// Label of the main (and only) window.
+const MAIN_WINDOW: &str = "main";
+/// Tray menu item id: show the main window.
+const TRAY_OPEN: &str = "open";
+/// Tray menu item id: stop the gateway and exit the app.
+const TRAY_QUIT: &str = "quit";
 
 /// The running gateway process, killed on exit.
 struct Gateway {
@@ -69,11 +79,7 @@ fn main() {
     let app = tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the first window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -90,12 +96,26 @@ fn main() {
             std::process::exit(1);
         });
 
-    app.run(|app_handle, event| {
-        if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+    app.run(|app_handle, event| match event {
+        // Closing the main window only hides it: the gateway keeps serving in
+        // the background and the tray icon stays alive (full quit is a tray
+        // menu item). Any other window keeps the default close behavior.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == MAIN_WINDOW => {
+            if let Some(window) = app_handle.get_webview_window(MAIN_WINDOW) {
+                let _ = window.hide();
+            }
+            api.prevent_close();
+        }
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
             if let Some(gateway) = app_handle.try_state::<Gateway>() {
                 gateway.stop();
             }
         }
+        _ => {}
     });
 }
 
@@ -197,7 +217,7 @@ fn start(app: &tauri::AppHandle) -> Result<(), StartupError> {
             log_tail: log_tail(&log_path),
         })?;
 
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+    WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::External(url))
         .title("Pareto AI")
         .inner_size(1280.0, 800.0)
         .min_inner_size(900.0, 600.0)
@@ -207,6 +227,66 @@ fn start(app: &tauri::AppHandle) -> Result<(), StartupError> {
             log_tail: log_tail(&log_path),
         })?;
 
+    build_tray(app).map_err(|error| StartupError {
+        message: format!("cannot create the tray icon: {error}"),
+        log_tail: log_tail(&log_path),
+    })?;
+
+    Ok(())
+}
+
+/// Shows the main window, restoring it from the tray or a minimized state.
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Stops the gateway and exits the app; the tray menu's "Quit".
+fn quit_app(app: &tauri::AppHandle) {
+    if let Some(gateway) = app.try_state::<Gateway>() {
+        gateway.stop();
+    }
+    app.exit(0);
+}
+
+/// Builds the tray icon and its menu ("Open Pareto AI", "Quit Pareto AI").
+///
+/// The icon is registered with the app's resource table, so it stays alive
+/// after this function returns. Failures: no tray-capable desktop or an
+/// unwritable icon temp dir on Linux.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, TRAY_OPEN, "Open Pareto AI", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "Quit Pareto AI", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &separator, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id(MAIN_WINDOW)
+        .tooltip("Pareto AI — gateway running")
+        .menu(&menu)
+        // macOS convention: the menu opens on left click. Elsewhere the right
+        // click shows the menu and a left double-click opens the window.
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            TRAY_OPEN => show_main_window(app),
+            TRAY_QUIT => quit_app(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
     Ok(())
 }
 

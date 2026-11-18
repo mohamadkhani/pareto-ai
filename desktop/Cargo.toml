@@ -11,7 +11,9 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon: the app lives in the system tray and keeps the gateway running
+# after the window is closed.
+tauri = { version = "2", features = ["tray-icon"] }
 # One shell per user: a second launch focuses the existing window.
 tauri-plugin-single-instance = "2"
 # Native error dialog when the gateway does not come up.

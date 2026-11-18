@@ -721,6 +721,20 @@ unit gets caught before saving.
 million, cents), and guessing wrong misprices by 100x. Only the operator can
 confirm the invoice.
 
+### D45. The desktop service lives in the system tray
+
+**Decision (user, 2026-11-18):** the desktop shell keeps the gateway running
+in the background after the window is closed. Closing the window hides it and
+leaves the tray icon active; the only user-facing way to stop the service is
+"Quit Pareto AI" in the tray menu, which kills the sidecar before exiting.
+The tray menu also offers "Open Pareto AI" to restore the window; a second
+launch keeps focusing the running instance.
+
+**Why:** the gateway is a long-running local service (routing, budgets,
+telemetry); killing it because the user closed the window would break API
+clients and scheduled work. An explicit quit keeps "stop the service"
+deliberate.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

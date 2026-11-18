@@ -32,10 +32,28 @@ is no second frontend build and no custom webview assets.
    the setup wizard.
 4. It polls `GET /health` every 200 ms for up to 20 s.
 5. On success it opens the main window (1280×800, minimum 900×600) at
-   `http://127.0.0.1:<port>/`.
+   `http://127.0.0.1:<port>/` and shows the system-tray icon.
 6. On failure it shows a native error dialog containing the last 40 lines of
    `<app-data>/gateway/sidecar.log`, then exits with status 1.
 7. On exit it kills and reaps the sidecar.
+
+## Tray and background operation
+
+The shell owns one system-tray icon (`tauri`'s `tray-icon` feature). The
+gateway is a background service: it keeps running after the window is gone,
+and the tray is how the user controls that.
+
+| Action | Result |
+| --- | --- |
+| Close the window (title-bar ✕) | The window hides; the gateway keeps running; the tray icon stays |
+| Tray → "Open Pareto AI" | Shows and focuses the window again |
+| Left double-click the tray icon (Windows) | Shows and focuses the window |
+| Left click the tray icon (macOS) | Opens the tray menu (platform convention) |
+| Tray → "Quit Pareto AI" | Stops and reaps the gateway sidecar, then exits the app |
+| Second app launch | Focuses the running instance's window (single-instance plugin) |
+
+There is no other way to stop the service: `SIGTERM`/session logout still
+exits and stops the sidecar, but the window close button never does.
 
 `<app-data>` is the OS-specific application data directory for the identifier
 `dev.logicamp.paretoai`:
@@ -234,6 +252,7 @@ Keep every key out of the repository; only the CI secret store holds them.
 | --- | --- |
 | `cargo check` / `cargo clippy --all-targets -- -D warnings` in `desktop/` | clean |
 | `cargo test` in `desktop/` | 4 tests pass (health probe, free port, timeout, log tail) |
+| `just desktop-check` after the tray change | clean (fmt, clippy `-D warnings`, 4 tests); the tray and hide-on-close behaviour itself was not exercised (no usable display automation here) |
 | gateway sidecar with the app's env (`GATEWAY_DATA_DIR`, `GATEWAY_LISTEN`, `GATEWAY_INSECURE_COOKIES`) | `/health` 200, `/api/setup/status` reports `mode=setup`, master key generated in the data dir |
 | `pnpm tauri build --debug --no-bundle` | binary built |
 | `pnpm tauri build --debug --bundles deb,rpm` | both bundles built |
