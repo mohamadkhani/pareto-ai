@@ -291,6 +291,24 @@ function modelNames(root: HTMLElement): string[] {
   );
 }
 
+function searchBox(root: HTMLElement): HTMLInputElement {
+  const input = root.querySelector<HTMLInputElement>('#models-search input');
+  if (input === null) {
+    throw new Error('no search box');
+  }
+  return input;
+}
+
+/** Queues the filtered response, then the unfiltered one used for the count. */
+function queueSearch(
+  fetchMock: FetchMock,
+  filtered: ModelsOverview,
+  unfiltered: ModelsOverview,
+): void {
+  fetchMock.respond(jsonResponse(200, filtered));
+  fetchMock.respond(jsonResponse(200, unfiltered));
+}
+
 describe('Models', () => {
   let fetchMock: FetchMock;
 
@@ -308,6 +326,7 @@ describe('Models', () => {
     role: 'admin' | 'user' = 'admin',
     queryProvider: string | null = null,
     queryMix: string | null = null,
+    querySearch: string | null = null,
   ): Promise<ComponentFixture<Models>> {
     const query: Record<string, string> = {};
     if (queryProvider !== null) {
@@ -315,6 +334,9 @@ describe('Models', () => {
     }
     if (queryMix !== null) {
       query['mix'] = queryMix;
+    }
+    if (querySearch !== null) {
+      query['q'] = querySearch;
     }
     TestBed.configureTestingModule({
       imports: [Models],
@@ -1048,5 +1070,135 @@ describe('Models', () => {
     expect(call.url).toBe('/api/offerings/o1');
     expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
     expect(root.textContent).toContain('Offering removed.');
+  });
+
+  it('debounces typing into one API call with the trimmed term and counts results', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    vi.useFakeTimers();
+    try {
+      typeInto(root, searchBox(root), 'dee');
+      await vi.advanceTimersByTimeAsync(100);
+      typeInto(root, searchBox(root), '  deepseek  ');
+      await vi.advanceTimersByTimeAsync(100);
+      // Still inside the debounce window: no search call yet.
+      expect(fetchMock.requests.filter((request) => request.url.includes('q='))).toHaveLength(0);
+
+      queueSearch(fetchMock, emptyOverview, allOverview);
+      await vi.advanceTimersByTimeAsync(150);
+      fixture.detectChanges();
+
+      const searches = fetchMock.requests.filter((request) => request.url.includes('q='));
+      expect(searches.map((request) => request.url)).toEqual([
+        '/api/models/overview?provider=all&mix=mix-code-agent&q=deepseek',
+      ]);
+      expect(TestBed.inject(Location).path()).toContain('q=deepseek');
+      expect(root.textContent).toContain('0 of 2 models');
+      expect(root.textContent).toContain('No models match “deepseek”');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restores a searched page from ?q= together with the provider filter', async () => {
+    const filtered: ModelsOverview = {
+      scope: 'provider',
+      provider_id: 'p1',
+      mix: mixRef,
+      rows: [providerRow({ canonical_name: 'deepseek/v3' })],
+    };
+    queueReload(fetchMock, filtered, { providers: [provider] });
+    const fixture = await create('admin', 'p1', null, 'deepseek');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(fetchMock.requests[3].url).toBe('/api/models/overview?provider=p1&q=deepseek');
+    expect(searchBox(root).value).toBe('deepseek');
+  });
+
+  it('focuses the search box with the "/" shortcut', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const input = searchBox(root);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    fixture.detectChanges();
+
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('clears the search and restores the full list', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    vi.useFakeTimers();
+    typeInto(root, searchBox(root), 'claude');
+    queueSearch(fetchMock, { ...allOverview, rows: [allOverview.rows[1]] }, allOverview);
+    await vi.advanceTimersByTimeAsync(250);
+    vi.useRealTimers();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude']);
+    expect(root.textContent).toContain('1 of 2 models');
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    buttonByText(root, 'Clear').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    expect(searchBox(root).value).toBe('');
+    expect(TestBed.inject(Location).path()).not.toContain('q=');
+    expect(root.textContent).toContain('2 models');
+  });
+
+  it('offers a clear action from the search empty state', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    vi.useFakeTimers();
+    typeInto(root, searchBox(root), 'zzz');
+    queueSearch(fetchMock, emptyOverview, allOverview);
+    await vi.advanceTimersByTimeAsync(250);
+    vi.useRealTimers();
+    fixture.detectChanges();
+
+    expect(root.textContent).toContain('No models match “zzz”');
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    buttonByText(root, 'Clear search').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    expect(root.textContent).not.toContain('No models match');
+  });
+
+  it('combines the search with the provider filter and counts in that scope', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, providerOverview));
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    vi.useFakeTimers();
+    typeInto(root, searchBox(root), 'gpt');
+    queueSearch(fetchMock, providerOverview, providerOverview);
+    await vi.advanceTimersByTimeAsync(250);
+    vi.useRealTimers();
+    fixture.detectChanges();
+
+    const searches = fetchMock.requests.filter((request) => request.url.includes('q='));
+    expect(searches.map((request) => request.url)).toEqual([
+      '/api/models/overview?provider=p1&mix=mix-code-agent&q=gpt',
+    ]);
+    expect(root.textContent).toContain('1 of 1 model');
   });
 });

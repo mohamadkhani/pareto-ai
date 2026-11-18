@@ -24,7 +24,22 @@
       </ui-banner>
     }
 
+    <p class="result-count" aria-live="polite">{{ resultSummary() }}</p>
+
     <div class="models-toolbar">
+      <ui-field label="Search models">
+        <ui-input
+          id="models-search"
+          type="search"
+          placeholder="name, family, upstream id, or provider"
+          [value]="searchInput()"
+          (valueChange)="onSearchInput($event)"
+        />
+      </ui-field>
+      @if (searchInput() !== '') {
+        <ui-button size="sm" variant="ghost" (clicked)="clearSearch()">Clear</ui-button>
+      }
+
       <ui-field label="Provider">
         <ui-select
           [id]="'models-provider-filter'"
@@ -123,7 +138,16 @@
     } @else if (loading() && rows().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (rows().length === 0) {
-      @if (providers().length === 0) {
+      @if (filterActive()) {
+        <ui-empty
+          title="No models match “{{ searchTerm() }}”"
+          description="Try a different name, family, upstream id, or provider."
+        >
+          <span ui-empty-action>
+            <ui-button size="sm" (clicked)="clearSearch()">Clear search</ui-button>
+          </span>
+        </ui-empty>
+      } @else if (providers().length === 0) {
         <ui-empty
           title="No catalog yet"
           description="Connect a provider and load its models, then prices and quality appear here."

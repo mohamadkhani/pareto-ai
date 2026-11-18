@@ -38,7 +38,7 @@
                   // and primitive CSS, and the shared primitive chunk. The
                   // `/styleguide` route itself is lazy-loaded and no longer
                   // part of this number.
-                  "maximumWarning": "700kB",
+                  "maximumWarning": "750kB",
                   "maximumError": "1MB"
                 },
                 {

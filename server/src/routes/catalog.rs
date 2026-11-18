@@ -88,14 +88,18 @@ pub async fn create_model(
 /// offering); `provider=all` or an absent parameter aggregates across
 /// providers (one row per model). Price averages/minima exclude unpriced
 /// offerings (see [`crate::catalog::overview`]). `mix=<id|name>` selects a
-/// token-mix profile; absent means the resolved default (D34).
+/// token-mix profile; absent means the resolved default (D34). `q=<term>`
+/// keeps only offerings whose model name, family, upstream id, or provider
+/// name contains the term, case-insensitively (trimmed, at most 200
+/// characters); the filter applies before aggregation.
 #[utoipa::path(
     get,
     path = "/api/models/overview",
     tag = "catalog",
     params(
         ("provider" = Option<String>, Query, description = "provider id, or all"),
-        ("mix" = Option<String>, Query, description = "token-mix profile id or name")
+        ("mix" = Option<String>, Query, description = "token-mix profile id or name"),
+        ("q" = Option<String>, Query, description = "case-insensitive substring over model name, family, upstream id, or provider name")
     ),
     responses(
         (status = 200, description = "models, prices, quality, and mix prices for the page", body = ModelsOverview),
@@ -116,11 +120,12 @@ pub async fn models_overview(
         tracing::debug!(error = %e, "query string rejected");
         ApiError::bad_request("invalid query parameters").with_request_id(rid.clone())
     })?;
-    let overview = catalog::overview::load_with_mix(
+    let overview = catalog::overview::load_with_search(
         &state.pool,
         query.provider.as_deref(),
         query.mix.as_deref(),
         state.config.token_mix_profile.as_deref(),
+        query.q.as_deref(),
     )
     .await
     .map_err(|e| e.into_api_error(rid))?;

@@ -47,6 +47,13 @@
 //! fields (`category`, `ci`, `rank`, `fetched_at`) come from the selected
 //! benchmark even when an override wins; `overridden` marks that case.
 //!
+//! **Search (decision D31).** `?q=<term>` keeps only offerings whose model
+//! `canonical_name`, `family`, `upstream_model_id`, or provider name contains
+//! the term, case-insensitively. The term is trimmed; empty or absent means no
+//! filter, and more than [`SEARCH_MAX_CHARS`] characters is a 400. The filter
+//! runs in SQL *before* aggregation, so `scope=all` aggregates only matching
+//! offerings and `scope=provider` filters that provider's offerings.
+//!
 //! Determinism: provider rows are ordered by `canonical_name`, then
 //! `upstream_model_id`, then offering id; model rows by `canonical_name`, then
 //! model id. One joined query feeds both scopes (no N+1), and the quality
@@ -63,6 +70,9 @@ use super::{CatalogError, get_provider};
 use crate::benchmarks::{self, QualityDetail};
 use crate::mix::{self, ComponentPrices, MixError, MixPriceView, MixProfile, MixProfileRef};
 
+/// The longest accepted `?q=` term, in characters.
+pub const SEARCH_MAX_CHARS: usize = 200;
+
 /// Query parameters of `GET /api/models/overview`.
 #[derive(Debug, Default, serde::Deserialize, ToSchema)]
 pub struct OverviewQuery {
@@ -70,6 +80,9 @@ pub struct OverviewQuery {
     pub provider: Option<String>,
     /// A token-mix profile id or name; absent means the resolved default.
     pub mix: Option<String>,
+    /// Case-insensitive substring over model name, family, upstream id, or
+    /// provider name; absent or blank means no filter.
+    pub q: Option<String>,
 }
 
 /// Response of `GET /api/models/overview`.
@@ -235,20 +248,21 @@ impl OverviewRowRaw {
     }
 }
 
-/// Loads the overview for `scope` (`None`/`"all"` or a provider id) with an
-/// explicit `?mix=` selector and the environment default.
+/// Loads the overview with an optional `?q=` search term.
 ///
-/// `mix_selector` wins over `env_selector`, which wins over the stored
-/// setting and then the built-in `code-agent`. An unknown `mix_selector` is
-/// [`CatalogError::NotFound("mix profile")`]. A provider id that does not
-/// exist is [`CatalogError::NotFound("provider")`]. Failure mode:
-/// [`CatalogError`].
-pub async fn load_with_mix(
+/// The term is trimmed; blank is no filter and more than [`SEARCH_MAX_CHARS`]
+/// characters is [`CatalogError::Invalid`] (a 400). The match is a
+/// case-insensitive substring over the model name, family, upstream id, and
+/// provider name, applied before aggregation. Failure modes are
+/// [`CatalogError`]; an unknown provider or mix profile is a 404.
+pub async fn load_with_search(
     pool: &SqlitePool,
     scope: Option<&str>,
     mix_selector: Option<&str>,
     env_selector: Option<&str>,
+    search: Option<&str>,
 ) -> Result<ModelsOverview, CatalogError> {
+    let search = normalize_search(search)?;
     let profile = match mix_selector
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -264,7 +278,7 @@ pub async fn load_with_mix(
     let provider_id = scope
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "all");
-    let mut rows = fetch_rows(pool, provider_id).await?;
+    let mut rows = fetch_rows(pool, provider_id, search.as_deref()).await?;
     let quality = quality_map(pool, &rows).await?;
     let mix_ref = MixProfileRef::from(&profile);
 
@@ -318,6 +332,21 @@ pub async fn load_with_mix(
     }
 }
 
+/// Trims the search term and lowercases it for the substring match.
+/// `None` for blank so the query skips the filter entirely; a term longer than
+/// [`SEARCH_MAX_CHARS`] characters is [`CatalogError::Invalid`].
+fn normalize_search(search: Option<&str>) -> Result<Option<String>, CatalogError> {
+    let Some(term) = search.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if term.chars().count() > SEARCH_MAX_CHARS {
+        return Err(CatalogError::Invalid(format!(
+            "search query must be at most {SEARCH_MAX_CHARS} characters"
+        )));
+    }
+    Ok(Some(term.to_lowercase()))
+}
+
 /// Flattens a mix-domain error into the catalog error so the overview uses
 /// the same API mapping as every other catalog read.
 fn mix_error(error: MixError) -> CatalogError {
@@ -332,6 +361,7 @@ fn mix_error(error: MixError) -> CatalogError {
 async fn fetch_rows(
     pool: &SqlitePool,
     provider_id: Option<&str>,
+    search: Option<&str>,
 ) -> Result<Vec<OverviewRowRaw>, CatalogError> {
     let rows = sqlx::query_as::<_, OverviewRowRaw>(
         "SELECT m.id AS model_id, m.canonical_name, m.family, m.modalities_input, \
@@ -342,12 +372,23 @@ async fn fetch_rows(
                 p.reasoning_per_m, p.request_fee, p.variable_price, p.currency, p.source, p.fetched_at \
          FROM offerings o \
          JOIN models m ON m.id = o.model_id \
+         JOIN providers pr ON pr.id = o.provider_id \
          LEFT JOIN prices p ON p.offering_id = o.id \
          WHERE (? IS NULL OR o.provider_id = ?) \
+           AND (? IS NULL \
+                OR instr(lower(m.canonical_name), ?) > 0 \
+                OR instr(lower(coalesce(m.family, '')), ?) > 0 \
+                OR instr(lower(o.upstream_model_id), ?) > 0 \
+                OR instr(lower(pr.name), ?) > 0) \
          ORDER BY m.canonical_name, o.upstream_model_id, o.id",
     )
     .bind(provider_id)
     .bind(provider_id)
+    .bind(search)
+    .bind(search)
+    .bind(search)
+    .bind(search)
+    .bind(search)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -655,7 +696,7 @@ mod tests {
     async fn all_scope_aggregates_price_only_over_priced_offerings() {
         let app = TestApp::new().await;
         fixture(&app).await;
-        let overview = load_with_mix(&app.state.pool, None, None, None)
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         assert_eq!(overview.scope, "all");
@@ -727,7 +768,7 @@ mod tests {
         // An unpriced offering is excluded from the mix aggregate too.
         insert_offering(&app, "off-m3", "prov-m", "model-m", "m-3", None, None).await;
 
-        let overview = load_with_mix(&app.state.pool, None, None, None)
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         let OverviewRow::All(row) = &overview.rows[0] else {
@@ -746,7 +787,7 @@ mod tests {
     async fn provider_scope_mix_prices_follow_the_requested_profile() {
         let app = TestApp::new().await;
         fixture(&app).await;
-        let default = load_with_mix(&app.state.pool, Some("prov-a"), None, None)
+        let default = load_with_search(&app.state.pool, Some("prov-a"), None, None, None)
             .await
             .expect("default");
         assert_eq!(default.mix.profile_id, "mix-code-agent");
@@ -763,7 +804,7 @@ mod tests {
         assert!((mix.per_m - 1.004).abs() < 1e-9, "{}", mix.per_m);
         assert_eq!(mix.profile_name, "code-agent");
 
-        let chat = load_with_mix(&app.state.pool, Some("prov-a"), Some("chat"), None)
+        let chat = load_with_search(&app.state.pool, Some("prov-a"), Some("chat"), None, None)
             .await
             .expect("chat");
         assert_eq!(chat.mix.profile_name, "chat");
@@ -772,7 +813,7 @@ mod tests {
         assert!((mix.per_m - 1.26).abs() < 1e-9, "{}", mix.per_m);
 
         // An unknown profile is a 404, not a silent fallback.
-        let error = load_with_mix(&app.state.pool, Some("prov-a"), Some("missing"), None)
+        let error = load_with_search(&app.state.pool, Some("prov-a"), Some("missing"), None, None)
             .await
             .expect_err("unknown mix profile");
         assert!(
@@ -785,7 +826,7 @@ mod tests {
     async fn provider_scope_lists_offerings_with_effective_limits() {
         let app = TestApp::new().await;
         fixture(&app).await;
-        let overview = load_with_mix(&app.state.pool, Some("prov-a"), None, None)
+        let overview = load_with_search(&app.state.pool, Some("prov-a"), None, None, None)
             .await
             .expect("overview");
         assert_eq!(overview.scope, "provider");
@@ -830,7 +871,7 @@ mod tests {
             .await
             .expect("benchmark");
         }
-        let overview = load_with_mix(&app.state.pool, None, None, None)
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         let OverviewRow::All(a) = &overview.rows[0] else {
@@ -852,7 +893,7 @@ mod tests {
         .execute(&app.state.pool)
         .await
         .expect("override");
-        let overview = load_with_mix(&app.state.pool, None, None, None)
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         let OverviewRow::All(a) = &overview.rows[0] else {
@@ -872,13 +913,13 @@ mod tests {
     #[tokio::test]
     async fn empty_catalog_and_unknown_provider_are_clean() {
         let app = TestApp::new().await;
-        let empty = load_with_mix(&app.state.pool, None, None, None)
+        let empty = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("empty overview");
         assert!(empty.rows.is_empty());
         assert_eq!(empty.scope, "all");
 
-        let error = load_with_mix(&app.state.pool, Some("missing"), None, None)
+        let error = load_with_search(&app.state.pool, Some("missing"), None, None, None)
             .await
             .expect_err("404");
         assert!(
@@ -1022,7 +1063,7 @@ mod tests {
     async fn json_shape_matches_the_documented_fields() {
         let app = TestApp::new().await;
         fixture(&app).await;
-        let overview = load_with_mix(&app.state.pool, Some("prov-a"), None, None)
+        let overview = load_with_search(&app.state.pool, Some("prov-a"), None, None, None)
             .await
             .expect("overview");
         let value = serde_json::to_value(&overview).expect("serializes");
@@ -1046,7 +1087,7 @@ mod tests {
             assert!(row.get(field).is_some(), "missing {field}: {row}");
         }
         assert_eq!(value["mix"]["profile_name"], "code-agent");
-        let all = load_with_mix(&app.state.pool, None, None, None)
+        let all = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         let value = serde_json::to_value(&all).expect("serializes");
@@ -1094,7 +1135,7 @@ mod tests {
         .await
         .expect("variable price");
 
-        let overview = load_with_mix(&app.state.pool, None, None, None)
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
             .await
             .expect("overview");
         let OverviewRow::All(row) = &overview.rows[0] else {
@@ -1106,7 +1147,7 @@ mod tests {
         assert_eq!(row.unpriced_offerings, 1);
         assert_eq!(row.variable_offerings, 1);
 
-        let provider = load_with_mix(&app.state.pool, Some("prov-v"), None, None)
+        let provider = load_with_search(&app.state.pool, Some("prov-v"), None, None, None)
             .await
             .expect("provider overview");
         let OverviewRow::Provider(row) = &provider.rows[0] else {
@@ -1117,5 +1158,206 @@ mod tests {
         assert!(price.input_per_m.is_none());
         let value = serde_json::to_value(&overview).expect("serializes");
         assert_eq!(value["rows"][0]["variable_offerings"], 1);
+    }
+
+    #[tokio::test]
+    async fn search_matches_name_family_upstream_and_provider_case_insensitively() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+
+        let names = |overview: &ModelsOverview| -> Vec<String> {
+            overview
+                .rows
+                .iter()
+                .map(|row| match row {
+                    OverviewRow::All(row) => row.canonical_name.clone(),
+                    OverviewRow::Provider(row) => row.canonical_name.clone(),
+                })
+                .collect()
+        };
+
+        // Canonical name.
+        let by_name = load_with_search(&app.state.pool, None, None, None, Some("a-model"))
+            .await
+            .expect("by name");
+        assert_eq!(names(&by_name), ["a-model"]);
+
+        // Family: every model in the fixture shares `test-family`.
+        let by_family = load_with_search(&app.state.pool, None, None, None, Some("TEST-FAMILY"))
+            .await
+            .expect("by family");
+        assert_eq!(names(&by_family), ["a-model", "b-model"]);
+
+        // Upstream id: only off-a2 carries `a-2`, so the all-scope row
+        // aggregates that one offering.
+        let by_upstream = load_with_search(&app.state.pool, None, None, None, Some("A-2"))
+            .await
+            .expect("upstream");
+        let OverviewRow::All(row) = &by_upstream.rows[0] else {
+            panic!("all row");
+        };
+        assert_eq!(row.canonical_name, "a-model");
+        assert_eq!(row.offerings_count, 1);
+        assert_eq!(row.providers_count, 1);
+
+        // Provider name: alpha owns off-a1, off-a3, and off-b1.
+        let by_provider_name = load_with_search(&app.state.pool, None, None, None, Some("Alpha"))
+            .await
+            .expect("by provider");
+        let OverviewRow::All(a) = &by_provider_name.rows[0] else {
+            panic!("all row");
+        };
+        assert_eq!(a.offerings_count, 2);
+        let OverviewRow::All(b) = &by_provider_name.rows[1] else {
+            panic!("all row");
+        };
+        assert_eq!(b.offerings_count, 1);
+
+        // Whitespace is trimmed; an empty term is no filter.
+        let trimmed = load_with_search(&app.state.pool, None, None, None, Some("  beta  "))
+            .await
+            .expect("trimmed");
+        assert_eq!(names(&trimmed), ["a-model"], "beta owns only off-a2");
+        let blank = load_with_search(&app.state.pool, None, None, None, Some("   "))
+            .await
+            .expect("blank");
+        assert_eq!(names(&blank), ["a-model", "b-model"]);
+    }
+
+    #[tokio::test]
+    async fn search_no_match_is_an_empty_payload() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+        let overview = load_with_search(&app.state.pool, None, None, None, Some("nothing-here"))
+            .await
+            .expect("no match");
+        assert_eq!(overview.scope, "all");
+        assert!(overview.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_filters_before_aggregation_and_combines_with_provider_and_mix() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+
+        // All scope with a term that matches only one offering of a-model:
+        // the aggregates count that offering alone, not every offering.
+        let overview = load_with_search(
+            &app.state.pool,
+            Some("all"),
+            Some("chat"),
+            None,
+            Some("a-1"),
+        )
+        .await
+        .expect("search");
+        assert_eq!(overview.scope, "all");
+        assert_eq!(overview.mix.profile_name, "chat");
+        assert_eq!(overview.rows.len(), 1);
+        let OverviewRow::All(row) = &overview.rows[0] else {
+            panic!("all row");
+        };
+        assert_eq!(row.offerings_count, 1);
+        assert_eq!(row.unpriced_offerings, 0);
+        assert_eq!(
+            row.price_avg.as_ref().and_then(|p| p.input_per_m),
+            Some(1.0)
+        );
+
+        // Provider scope filters that provider's offerings by the same term.
+        let scoped = load_with_search(
+            &app.state.pool,
+            Some("prov-b"),
+            Some("chat"),
+            None,
+            Some("a-"),
+        )
+        .await
+        .expect("scoped");
+        assert_eq!(scoped.scope, "provider");
+        assert_eq!(scoped.provider_id.as_deref(), Some("prov-b"));
+        let OverviewRow::Provider(row) = &scoped.rows[0] else {
+            panic!("provider row");
+        };
+        assert_eq!(row.offering_id, "off-a2");
+        assert_eq!(scoped.rows.len(), 1);
+
+        // A term that matches nothing in the scoped provider is empty, while
+        // the provider itself still resolves (not a 404).
+        let none = load_with_search(&app.state.pool, Some("prov-b"), None, None, Some("a-1"))
+            .await
+            .expect("scoped miss");
+        assert_eq!(none.scope, "provider");
+        assert!(none.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_term_longer_than_two_hundred_characters() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+        let longest = "x".repeat(SEARCH_MAX_CHARS);
+        load_with_search(&app.state.pool, None, None, None, Some(&longest))
+            .await
+            .expect("200 characters is accepted");
+        let too_long = "x".repeat(SEARCH_MAX_CHARS + 1);
+        let error = load_with_search(&app.state.pool, None, None, None, Some(&too_long))
+            .await
+            .expect_err("201 characters is rejected");
+        assert!(matches!(error, CatalogError::Invalid(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn overview_route_applies_q_and_rejects_an_overlong_term() {
+        let app = TestApp::new().await;
+        let (router, cookie, _csrf) = admin(&app).await;
+        fixture(&app).await;
+
+        let matched = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/models/overview?q=ALPHA",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(matched.status, StatusCode::OK, "{}", matched.body);
+        assert_eq!(matched.body["rows"].as_array().expect("rows").len(), 2);
+
+        let missing = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/models/overview?provider=prov-a&q=zzz",
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::OK, "{}", missing.body);
+        assert!(missing.body["rows"].as_array().expect("rows").is_empty());
+
+        let too_long = "x".repeat(SEARCH_MAX_CHARS + 1);
+        let rejected = send(
+            router,
+            api_request(
+                Method::GET,
+                &format!("/api/models/overview?q={too_long}"),
+                None,
+                Some(&cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            rejected.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            rejected.body
+        );
+        assert_eq!(rejected.body["error"]["code"], "invalid_request");
     }
 }

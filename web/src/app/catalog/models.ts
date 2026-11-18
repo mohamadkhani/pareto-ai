@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  ElementRef,
+  computed,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { Location } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { ApiError } from '../api';
@@ -56,6 +65,9 @@ type SortKey = 'name' | 'context' | 'mix' | 'input' | 'output' | 'cache' | 'qual
 
 /** The persisted price-basis choice (`localStorage`); the URL wins on load. */
 const PRICE_BASIS_STORAGE_KEY = 'pareto.models.priceBasis';
+
+/** How long typing must pause before the search hits the API. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /** `components`, `default` (resolved server-side), or a profile id/name. */
 const COMPONENTS_BASIS = 'components';
@@ -177,6 +189,7 @@ function emptyPriceDraft(): PriceDraft {
   templateUrl: './models.html',
   styleUrl: './models.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { '(document:keydown)': 'onDocumentKeydown($event)' },
 })
 export class Models {
   private readonly auth = inject(AuthService);
@@ -185,10 +198,18 @@ export class Models {
   private readonly routing = inject(RoutingService);
   private readonly route = inject(ActivatedRoute);
   private readonly location = inject(Location);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly searchControl = viewChild(UiInput, { read: ElementRef });
 
   protected readonly providers = signal<Provider[]>([]);
   protected readonly overview = signal<ModelsOverview | null>(null);
   protected readonly providerId = signal<string>('all');
+  /** The text in the search box; the API sees the debounced `searchTerm`. */
+  protected readonly searchInput = signal('');
+  /** The debounced, trimmed term the overview was last filtered with. */
+  protected readonly searchTerm = signal('');
+  /** Rows before the search filter, for the "N of M models" count. */
+  protected readonly totalModels = signal<number | null>(null);
   protected readonly loading = signal(false);
   protected readonly loadError = signal<string | null>(null);
   protected readonly forbidden = signal(false);
@@ -318,6 +339,19 @@ export class Models {
     this.rows().some((row) => (isProviderRow(row) ? row.price !== null : row.price_avg !== null)),
   );
   protected readonly allUnpriced = computed(() => this.rows().length > 0 && !this.anyPriced());
+  /** True while a non-empty search term filters the list. */
+  protected readonly filterActive = computed(() => this.searchTerm() !== '');
+  /** "N of M models" while filtering, otherwise "N models". */
+  protected readonly resultSummary = computed(() => {
+    const shown = this.rows().length;
+    const total = this.totalModels();
+    if (this.filterActive() && total !== null) {
+      return `${shown} of ${total} model${total === 1 ? '' : 's'}`;
+    }
+    return `${shown} model${shown === 1 ? '' : 's'}`;
+  });
+
+  private searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     // A link from Providers ("View models for …") arrives as `?provider=<id>`;
@@ -332,6 +366,15 @@ export class Models {
     this.basisExplicit.set(
       this.route.snapshot.queryParamMap.get('mix') !== null || this.storedBasis() !== null,
     ); // Non-admins never call the API: it would answer 403 and the read is audited.
+    // A `?q=` deep link (or reload/back) restores the applied search as-is.
+    const term = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
+    this.searchInput.set(term);
+    this.searchTerm.set(term);
+    this.destroyRef.onDestroy(() => {
+      if (this.searchTimer !== null) {
+        clearTimeout(this.searchTimer);
+      }
+    });
     if (this.auth.isAdmin()) {
       void this.reload();
     } else {
@@ -352,9 +395,7 @@ export class Models {
       this.profiles.set(profiles);
       this.pricing.set(pricing);
       this.canonicaliseBasis(profiles);
-      const overview = await this.catalog.modelsOverview(this.selectedProvider(), this.mixQuery());
-      this.adoptOverviewProfile(overview);
-      this.overview.set(overview);
+      await this.loadOverviewData();
       await this.loadSyncStatuses();
     } catch (err) {
       this.handleError(err);
@@ -367,9 +408,7 @@ export class Models {
     this.loading.set(true);
     this.loadError.set(null);
     try {
-      const overview = await this.catalog.modelsOverview(this.selectedProvider(), this.mixQuery());
-      this.adoptOverviewProfile(overview);
-      this.overview.set(overview);
+      await this.loadOverviewData();
       this.detailOpen.set(false);
     } catch (err) {
       this.handleError(err);
@@ -378,15 +417,94 @@ export class Models {
     }
   }
 
+  /**
+   * Fetches the overview with the active search and provider filter. While a
+   * search is active it also fetches the unfiltered rows once, so the header
+   * can say "N of M models" without the response gaining a count field.
+   */
+  private async loadOverviewData(): Promise<void> {
+    const provider = this.selectedProvider();
+    const term = this.searchTerm();
+    const mix = this.mixQuery();
+    const [overview, unfiltered] = await Promise.all([
+      this.catalog.modelsOverview(provider, mix, term),
+      term === '' ? Promise.resolve(null) : this.catalog.modelsOverview(provider, mix, null),
+    ]);
+    this.adoptOverviewProfile(overview);
+    this.overview.set(overview);
+    this.totalModels.set((unfiltered ?? overview).rows.length);
+  }
+
   /** Changing the filter switches the payload's scope (all ↔ one provider). */
   protected onProviderFilter(value: string): void {
     if (value === this.providerId()) {
       return;
     }
     this.providerId.set(value);
+    this.writeUrlParam('provider', value === 'all' ? null : value);
     this.notice.set(null);
     this.actionError.set(null);
     void this.loadOverview();
+  }
+
+  // --- search --------------------------------------------------------------
+
+  /** Debounces typing so one pause produces at most one API call. */
+  protected onSearchInput(value: string): void {
+    this.searchInput.set(value);
+    if (this.searchTimer !== null) {
+      clearTimeout(this.searchTimer);
+    }
+    this.searchTimer = setTimeout(() => {
+      this.searchTimer = null;
+      void this.applySearch(this.searchInput());
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  /** Applies the trimmed term immediately and mirrors it into the URL. */
+  private async applySearch(raw: string): Promise<void> {
+    const term = raw.trim();
+    if (term === this.searchTerm()) {
+      return;
+    }
+    this.searchTerm.set(term);
+    this.writeUrlParam('q', term === '' ? null : term);
+    await this.loadOverview();
+  }
+
+  /** Clears the box and restores the full list once. */
+  protected clearSearch(): void {
+    if (this.searchTimer !== null) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+    if (this.searchInput() === '' && this.searchTerm() === '') {
+      return;
+    }
+    this.searchInput.set('');
+    this.searchTerm.set('');
+    this.writeUrlParam('q', null);
+    void this.loadOverview();
+  }
+
+  /** `/` focuses the search box unless a field or a dialog already has focus. */
+  protected onDocumentKeydown(event: KeyboardEvent): void {
+    if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof HTMLElement) {
+      const tag = target.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || target.isContentEditable) {
+        return;
+      }
+    }
+    const input = this.searchControl()?.nativeElement.querySelector('input');
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    event.preventDefault();
+    input.focus();
   }
 
   // --- price basis (D34) ---------------------------------------------------
@@ -472,11 +590,23 @@ export class Models {
     }
   }
 
-  /** Writes `?mix=` while keeping the provider filter and the current path. */
+  /** Writes `?mix=` while keeping the provider filter, search, and path. */
   private syncUrl(value: string): void {
+    this.writeUrlParam('mix', value);
+  }
+
+  /**
+   * Sets, replaces, or removes one query parameter and keeps the rest. Used
+   * for `q`, `provider`, and `mix` so a reload or Back restores page state.
+   */
+  private writeUrlParam(key: string, value: string | null): void {
     const [pathname, query = ''] = this.location.path().split('?');
     const params = new URLSearchParams(query);
-    params.set('mix', value);
+    if (value === null || value === '') {
+      params.delete(key);
+    } else {
+      params.set(key, value);
+    }
     this.location.replaceState(pathname === '' ? '/' : pathname, params.toString());
   }
 
@@ -1094,9 +1224,7 @@ export class Models {
 
   private async loadOverviewQuietly(): Promise<void> {
     try {
-      this.overview.set(
-        await this.catalog.modelsOverview(this.selectedProvider(), this.mixQuery()),
-      );
+      await this.loadOverviewData();
     } catch {
       // A stale table is better than blanking the page after a successful sync.
     }

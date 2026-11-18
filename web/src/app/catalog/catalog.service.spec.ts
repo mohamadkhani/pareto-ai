@@ -309,6 +309,19 @@ describe('CatalogService', () => {
     expect(fetchMock.requests[0].url).toBe('/api/models/overview?provider=all&mix=mix-chat');
   });
 
+  it('trims the overview search term and omits a blank one', async () => {
+    const mix = { profile_id: 'mix-code-agent', profile_name: 'code-agent' };
+    fetchMock.respond(jsonResponse(200, { scope: 'all', provider_id: null, mix, rows: [] }));
+    fetchMock.respond(jsonResponse(200, { scope: 'all', provider_id: null, mix, rows: [] }));
+    const catalog = TestBed.inject(CatalogService);
+
+    await catalog.modelsOverview('p1', null, '  deepseek  ');
+    await catalog.modelsOverview('p1', null, '   ');
+
+    expect(fetchMock.requests[0].url).toBe('/api/models/overview?provider=p1&q=deepseek');
+    expect(fetchMock.requests[1].url).toBe('/api/models/overview?provider=p1');
+  });
+
   it('discovers a provider’s models with a CSRF-protected POST', async () => {
     const summary = {
       dry_run: false,

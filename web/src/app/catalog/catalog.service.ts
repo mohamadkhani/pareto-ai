@@ -229,12 +229,21 @@ export class CatalogService {
    * The merged models overview: per-offering rows for one provider, or one
    * aggregated row per model when `providerId` is null (D31). `mixId` selects
    * the token-mix profile for every `mix_price`; null uses the resolved
-   * default (D34).
+   * default (D34). `search` is a case-insensitive substring over model name,
+   * family, upstream id, and provider name; null or blank applies no filter.
    */
-  modelsOverview(providerId: string | null, mixId: string | null = null): Promise<ModelsOverview> {
+  modelsOverview(
+    providerId: string | null,
+    mixId: string | null = null,
+    search: string | null = null,
+  ): Promise<ModelsOverview> {
     const params = new URLSearchParams({ provider: providerId ?? 'all' });
     if (mixId !== null && mixId !== '') {
       params.set('mix', mixId);
+    }
+    const term = search?.trim() ?? '';
+    if (term !== '') {
+      params.set('q', term);
     }
     return requestJson<ModelsOverview>(`/api/models/overview?${params.toString()}`);
   }
