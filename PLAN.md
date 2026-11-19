@@ -36,9 +36,10 @@ with fallback, per-user budgets, and admin oversight.
 | SQLite performance (D36) | **Done**: WAL + `synchronous=NORMAL`, 22 → 17 statements, ~1.9k req/s at c1 | 2026-11-17 |
 | Live provider verification | **Done**: OpenRouter discovery/prices/chat (`:free`), SailResearch discovery/chat, budgets/caps; findings fixed | 2026-11-17 |
 
-Environment note: crates.io is unreachable from this network, so dependency
-commands run with `--offline` against the local cargo cache; `pnpm` works
-normally (it replaced npm per D21). Details in [`README.md`](README.md).
+Environment note: this project's tests run offline by design (fixtures and a
+scripted upstream). Local network conditions are dated notes in
+[`docs/research/09-environment.md`](docs/research/09-environment.md), never
+project rules.
 
 ## Non-goals (v1)
 

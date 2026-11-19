@@ -237,7 +237,8 @@ the offline gate keeps working.
 `main` is always releasable and every change lands through a short-lived branch
 and a pull request that passes CI. The workflow, branch names, commit format and
 release process are in [`CONTRIBUTING.md`](CONTRIBUTING.md); the engineering
-rules are in [`AGENTS.md`](AGENTS.md).
+rules are in [`AGENTS.md`](AGENTS.md). Current state, open items and the reading
+order for a new session are in [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 ## License
 
