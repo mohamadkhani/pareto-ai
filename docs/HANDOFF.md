@@ -40,26 +40,21 @@ just dev        # gateway + Angular dev server
 just bench      # SQLite/request-latency harness (release)
 ```
 
-## Open items (in rough priority order)
+## Open items (tracked as GitHub issues)
 
-1. **macOS desktop builds** are disabled in CI: a private repo in the current
-   plan gets no macOS runner (the job is cancelled in ~2 s). Options in
-   `docs/desktop.md`: make the repo public, enable paid macOS minutes, or build
-   on a Mac.
-2. **Live TLS is unverified** (needs a public domain and ports 80/443). Step by
-   step in `README.md` and D54; the failure path (port 80 denied) is tested.
-3. **BenchmarkList ingestion** still fails while reading the body from some
-   hosts; the error names the layer. Arena and BenchLM work.
-4. **Connector header values are stored plaintext** in `config_json` (D42 says
-   templates, but a literal key typed there would be stored). Either seal them
-   like credential headers (D17) or document the restriction in the UI.
-5. **Non-USD balances/prices** need a static `fx_to_usd`; there is no live FX.
-6. **Only three provider presets**; adding Together/DeepInfra/Fireworks is one
-   registry entry each.
-7. **No Sass formatter** (Prettier cannot parse indented syntax): the build and
-   `style-extension.spec.ts` are the checks.
-8. Documentation drift: `PLAN.md` and the milestone log are close but not
-   perfectly current; fix opportunistically.
+| # | Item |
+| --- | --- |
+| 1 | [Enable macOS desktop builds in CI](https://github.com/mohamadkhani/pareto-ai/issues/1) |
+| 2 | [Verify automatic TLS on a public domain](https://github.com/mohamadkhani/pareto-ai/issues/2) |
+| 3 | [BenchmarkList: body decode fails from some hosts](https://github.com/mohamadkhani/pareto-ai/issues/3) |
+| 4 | [Seal connector header values at rest](https://github.com/mohamadkhani/pareto-ai/issues/4) |
+| 5 | [Currency support beyond USD](https://github.com/mohamadkhani/pareto-ai/issues/5) |
+| 6 | [Add provider presets: Together, DeepInfra, Fireworks](https://github.com/mohamadkhani/pareto-ai/issues/6) |
+| 7 | [Decide on a Sass formatter or stylelint](https://github.com/mohamadkhani/pareto-ai/issues/7) |
+| 8 | [Docs drift sweep: PLAN and milestone log](https://github.com/mohamadkhani/pareto-ai/issues/8) |
+
+Details, acceptance notes and constraints are in each issue; this page only
+links them so the list cannot drift.
 
 ## Session hygiene
 

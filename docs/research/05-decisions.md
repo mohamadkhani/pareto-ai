@@ -1,5 +1,22 @@
 # Decisions, open questions, next actions
 
+## How decisions are recorded
+
+- One numbered entry per **hard-to-reverse** choice (schema, protocol, security,
+  licensing, product shape). Ordinary implementation details do not need one.
+- Numbering is append-only: **never renumber and never rewrite an accepted
+  entry**. To change course, add a new entry and mark the old one
+  `Superseded by Dnn` in its heading.
+- Every entry has: **Decision**, **Why**, **Consequence** (what becomes harder
+  or impossible), and links to the spec, review, or commit it came from. Add a
+  date for anything that can age.
+- The PR that implements a decision links its number; the code comment or spec
+  that depends on it cites the number too.
+- Research and evidence live beside it in dated pages under `docs/research/`;
+  the decision only summarises and points.
+- Open work is **not** a decision: it belongs in GitHub Issues, linked from
+  [`docs/HANDOFF.md`](../HANDOFF.md).
+
 ## Decisions taken
 
 ### D1. Build a new service; do not fork OmniRoute

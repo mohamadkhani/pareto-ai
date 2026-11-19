@@ -47,7 +47,8 @@ attached to the PR). Servers started for a test must be stopped afterwards.
   (commands and results), and any risk or follow-up.
 - A design change is recorded as a numbered decision in
   [`docs/research/05-decisions.md`](docs/research/05-decisions.md) in the same
-  PR.
+  PR; the entry is append-only and the PR links its number (or the issue it
+  closes).
 
 ## Code standards
 
@@ -74,5 +75,6 @@ same review, the same checks and the same CI gate as any other change.
 | `docs/research/` | dated research notes and the numbered decisions (D1…) |
 | `docs/specs/` | feature specifications |
 | `docs/reviews/` | review records, kept as sources |
+| GitHub Issues | open work, linked from `docs/HANDOFF.md` |
 | `docs/desktop.md` | Tauri packaging, CI matrix, signing |
 | `docs/live-verification.md` | how to verify real providers on a networked host |
