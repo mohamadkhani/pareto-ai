@@ -992,6 +992,23 @@ no ports 80/443); the decision matrix, challenge endpoint, redirect handler,
 store, renewal math, status shape, and fake-provider outcomes are covered by
 tests, and the README documents the live procedure and the staging directory.
 
+### D55. Trunk-based development with short-lived branches and PRs
+
+**Decision (user, 2026-11-19):** `main` is always releasable. Every change lands
+through a short-lived branch (`feat/…`, `fix/…`, `chore/…`), a pull request, and
+a green `CI` run before a squash merge. Documentation-only changes may go
+straight to `main`. Releases are tags (`vX.Y.Z`) on `main`; hotfixes branch from
+the tag. `main` is protected: no force-push, CI required.
+
+**Why:** the repository is public, CI already runs on pull requests, and desktop
+/ AUR / release workflows trigger from tags. Direct pushes to `main` bypass the
+only check that exists.
+
+**Consequence:** process rules live in [`CONTRIBUTING.md`](../../CONTRIBUTING.md)
+for humans; [`AGENTS.md`](../../AGENTS.md) keeps the engineering rules and points
+there, without assistant-specific phrasing. GitHub is the canonical remote (it
+hosts CI and releases); Gitea remains a mirror.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

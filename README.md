@@ -232,6 +232,13 @@ cache is enough to build, which keeps the gate reproducible and network-free.
 Add a dependency with one online `cargo add`, commit the updated lockfile, and
 the offline gate keeps working.
 
+## Contributing
+
+`main` is always releasable and every change lands through a short-lived branch
+and a pull request that passes CI. The workflow, branch names, commit format and
+release process are in [`CONTRIBUTING.md`](CONTRIBUTING.md); the engineering
+rules are in [`AGENTS.md`](AGENTS.md).
+
 ## License
 
 **MIT** — see [`LICENSE`](LICENSE). Third-party notices (fonts under OFL,
