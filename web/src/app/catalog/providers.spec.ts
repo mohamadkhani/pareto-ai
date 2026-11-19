@@ -17,7 +17,7 @@ import type {
   Provider,
   ProviderPreset,
 } from './catalog.types';
-import { Providers } from './providers';
+import { Providers, balanceNeedsSetup } from './providers';
 
 function authStub(role: 'admin' | 'user'): object {
   return {
@@ -78,6 +78,12 @@ function credentialFixture(overrides: Partial<Credential> = {}): Credential {
     ...overrides,
   };
 }
+
+const balanceConnector = {
+  kind: 'balance' as const,
+  enabled: true,
+  updated_at: '2026-01-01T00:00:00.000Z',
+};
 
 function offeringFixture(overrides: Partial<Offering> = {}): Offering {
   return {
@@ -871,5 +877,46 @@ describe('Providers', () => {
     cta.click();
     await waitForText(fixture, root, 'Provider setup — openrouter');
     expect(tabByLabel(root, 'Balance').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('offers Set up balance when a provider has no balance connector', () => {
+    expect(
+      balanceNeedsSetup({ connectors: [] }, [{ balance_error: null, balance_available: true }]),
+    ).toBe(true);
+  });
+
+  it('hides Set up balance when the balance connector is healthy', () => {
+    expect(
+      balanceNeedsSetup({ connectors: [balanceConnector] }, [
+        { balance_error: null, balance_available: true },
+      ]),
+    ).toBe(false);
+  });
+
+  it('hides Set up balance when balance_error is absent from the payload', () => {
+    expect(
+      balanceNeedsSetup({ connectors: [balanceConnector] }, [{ balance_available: true }]),
+    ).toBe(false);
+  });
+
+  it('offers Set up balance when the balance fetch failed or is unavailable', () => {
+    expect(
+      balanceNeedsSetup({ connectors: [balanceConnector] }, [
+        { balance_error: 'connect: unreachable', balance_available: null },
+      ]),
+    ).toBe(true);
+    expect(
+      balanceNeedsSetup({ connectors: [balanceConnector] }, [
+        { balance_error: null, balance_available: false },
+      ]),
+    ).toBe(true);
+  });
+
+  it('ignores a disabled balance connector', () => {
+    expect(
+      balanceNeedsSetup({ connectors: [{ ...balanceConnector, enabled: false }] }, [
+        { balance_error: null, balance_available: true },
+      ]),
+    ).toBe(true);
   });
 });

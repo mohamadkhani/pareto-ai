@@ -107,6 +107,31 @@ function setupTabParam(tab: SetupTab): string {
  * shows counts and the last applied discovery so the catalogue state is
  * visible without opening a provider.
  */
+/**
+ * Pure decision behind the provider row's balance call to action.
+ *
+ * Returns true when the provider has no enabled balance connector, or when a
+ * credential reports a fetch error or an explicitly unavailable balance. A
+ * configured, healthy balance returns false — the CTA must never appear there.
+ */
+export function balanceNeedsSetup(
+  provider: Pick<Provider, 'connectors'>,
+  credentials: readonly {
+    balance_error?: string | null;
+    balance_available?: boolean | null;
+  }[],
+): boolean {
+  const hasConnector = provider.connectors.some(
+    (connector) => connector.kind === 'balance' && connector.enabled,
+  );
+  if (!hasConnector) {
+    return true;
+  }
+  return credentials.some(
+    (credential) => credential.balance_error != null || credential.balance_available === false,
+  );
+}
+
 @Component({
   selector: 'app-providers',
   imports: [
@@ -380,18 +405,9 @@ export class Providers {
     this.openConnectors(provider, badge.tab);
   }
 
-  /** True when the provider has a balance connector that needs attention. */
+  /** True when the provider's balance is missing, failing or unavailable. */
   protected needsBalanceSetup(provider: Provider): boolean {
-    const hasConnector = provider.connectors.some(
-      (connector) => connector.kind === 'balance' && connector.enabled,
-    );
-    if (!hasConnector) {
-      return false;
-    }
-    const credentials = this.credentialsByProvider().get(provider.id) ?? [];
-    return credentials.some(
-      (credential) => credential.balance_error !== null || credential.balance_available === false,
-    );
+    return balanceNeedsSetup(provider, this.credentialsByProvider().get(provider.id) ?? []);
   }
 
   protected async onConnectorsChanged(): Promise<void> {
