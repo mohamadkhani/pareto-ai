@@ -127,7 +127,7 @@ describe('Shell', () => {
     expect(hrefs).not.toContain('/setup');
   });
 
-  it('shows the calm local banner while unprotected on this machine', async () => {
+  it('hides the banner while unprotected on this machine', async () => {
     const fixture = await create(admin);
     TestBed.inject(SetupService).status.set({
       ...protectedStatus,
@@ -136,11 +136,8 @@ describe('Shell', () => {
       warning: 'Running without a password on this machine.',
     });
     fixture.detectChanges();
-    const banner = (fixture.nativeElement as HTMLElement).querySelector('ui-banner');
 
-    expect(banner?.textContent).toContain('Running without a password on this machine.');
-    expect(banner?.classList).toContain('tone-info');
-    expect(banner?.querySelector('button')?.textContent).toContain('Open Settings');
+    expect((fixture.nativeElement as HTMLElement).querySelector('ui-banner')).toBeNull();
   });
 
   it('shows the red banner when a network peer is unprotected', async () => {

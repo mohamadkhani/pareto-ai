@@ -120,9 +120,10 @@ export class Shell {
   protected readonly menuOpen = signal(false);
 
   /**
-   * The persistent security banner: a calm `info` note on a local machine, a
-   * red `danger` banner when the gateway is reachable from the network without
-   * a password. `null` once protected, or before the status has loaded.
+   * The persistent security banner. It only appears for a real exposure: a
+   * gateway reachable from the network without a password, or a failed
+   * automatic HTTPS. A password-less localhost is the expected desktop/local
+   * mode, so it stays quiet; Settings still reports the mode.
    */
   protected readonly exposure = computed<ExposureNote | null>(() => {
     const status = this.setup.status();
@@ -130,9 +131,12 @@ export class Shell {
       return null;
     }
     if (status.mode === 'unprotected') {
+      if (status.is_local) {
+        return null;
+      }
       return {
-        tone: status.is_local ? 'info' : 'danger',
-        text: status.warning ?? 'This gateway is running without a password.',
+        tone: 'danger',
+        text: status.warning ?? 'This gateway is reachable from the network without a password.',
       };
     }
     const tls = status.tls;
