@@ -7,11 +7,11 @@ not pass it is not done. Branching, PRs and releases are described in
 
 ## Environment
 
-- **Network access is intermittent.** crates.io and provider hosts
-  (openrouter.ai, benchmarklist.com, huggingface, …) are sometimes reachable and
-  sometimes blocked. Try online first; if the index or a host is unreachable,
-  fall back to `--offline` (cached crates) or the fixture-based tests. Never
-  hard-code a "network is blocked" assumption into code or docs without a date.
+- **Tests must not depend on the network.** Provider, price and benchmark
+  behaviour is covered by fixtures and a scripted upstream; live checks are a
+  separate, documented procedure in `docs/live-verification.md`. Local network
+  conditions are recorded — dated — in `docs/research/09-environment.md`, never
+  as a project rule.
 - **JavaScript tooling is `pnpm`**, not npm. `cd web && pnpm install`,
   `pnpm run build`, `pnpm test`. If a scaffold resets `packageManager` to npm,
   change it back in `web/package.json`.
