@@ -1,0 +1,24 @@
+:host
+  display: inline-flex
+.ui-chip
+  display: inline-flex
+  align-items: center
+  padding: 0 var(--space-2)
+  border: 1px solid var(--chip-border)
+  border-radius: var(--radius-full)
+  background: var(--chip-bg)
+  color: var(--text)
+  font-family: var(--font-body)
+  font-size: var(--text-badge)
+  line-height: 1.6
+  white-space: nowrap
+  cursor: pointer
+  transition: border-color var(--duration-fast) var(--ease-standard)
+.ui-chip:hover
+  border-color: var(--border-hover)
+.ui-chip:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: var(--focus-ring-offset)
+.ui-chip.is-mono
+  font-family: var(--font-mono)
+  color: var(--text-muted)

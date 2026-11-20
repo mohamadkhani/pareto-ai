@@ -118,6 +118,10 @@ function allRow(overrides: Partial<ModelOverviewRow> = {}): ModelOverviewRow {
     modalities_output: ['text'],
     context_length: 400000,
     max_output_tokens: 128000,
+    providers: [
+      { id: 'p1', name: 'openrouter' },
+      { id: 'p2', name: 'deepinfra' },
+    ],
     providers_count: 2,
     offerings_count: 3,
     unpriced_offerings: 1,
@@ -380,7 +384,8 @@ describe('Models', () => {
     const text = root.textContent ?? '';
 
     expect(text).toContain('openai/gpt-5');
-    expect(text).toContain('2 providers');
+    expect(text).toContain('openrouter');
+    expect(text).toContain('deepinfra');
     expect(text).toContain('avg');
     // The default profile is preselected: one mix column, not three components.
     expect(text).toContain('Mix price $/M');
@@ -395,6 +400,77 @@ describe('Models', () => {
     expect(text).toContain('unpriced');
     expect(text).not.toContain('$0.00');
     expect(fetchMock.requests[3].url).toBe('/api/models/overview?provider=all');
+  });
+
+  it('shows provider chips and collapses the overflow into a "+N" chip', async () => {
+    const names = ['openrouter', 'deepinfra', 'together', 'fireworks', 'novita'];
+    queueReload(fetchMock, {
+      ...allOverview,
+      rows: [
+        allRow({
+          providers: names.map((name, index) => ({ id: `p${index}`, name })),
+          providers_count: names.length,
+        }),
+      ],
+    });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const chips = (): string[] =>
+      Array.from(root.querySelectorAll('ui-chip')).map((chip) => chip.textContent?.trim() ?? '');
+
+    expect(chips()).toEqual(['openrouter', 'deepinfra', 'together', '+2']);
+
+    root.querySelector<HTMLButtonElement>('ui-chip.provider-chip--more button')?.click();
+    fixture.detectChanges();
+    expect(chips()).toEqual([...names, 'less']);
+
+    root.querySelector<HTMLButtonElement>('ui-chip.provider-chip--more button')?.click();
+    fixture.detectChanges();
+    expect(chips()).toEqual(['openrouter', 'deepinfra', 'together', '+2']);
+  });
+
+  it('omits a minimum price when it equals the shown average', async () => {
+    queueReload(fetchMock, {
+      ...allOverview,
+      rows: [
+        allRow({
+          price_avg: { input_per_m: 1, output_per_m: 2, cache_read_per_m: null },
+          price_min: { input_per_m: 1, output_per_m: 2, cache_read_per_m: null },
+          mix_price: {
+            per_m: 0.5,
+            profile_id: 'mix-code-agent',
+            profile_name: 'code-agent',
+            basis: 'blended',
+          },
+          mix_price_min: {
+            per_m: 0.5,
+            profile_id: 'mix-code-agent',
+            profile_name: 'code-agent',
+            basis: 'blended',
+          },
+        }),
+      ],
+    });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('$0.5');
+    expect(root.querySelectorAll('.price-min')).toHaveLength(0);
+  });
+
+  it('filters to one provider when its chip is clicked', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, providerOverview));
+    root.querySelector<HTMLButtonElement>('ui-chip button')?.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fetchMock.requests.at(-1)?.url).toBe(
+      '/api/models/overview?provider=p1&mix=mix-code-agent',
+    );
   });
 
   it('shows "variable" instead of a number for a sentinel-priced model', async () => {
@@ -521,7 +597,7 @@ describe('Models', () => {
     expect(text).toContain('openrouter');
     expect(text).toContain('enabled');
     expect(text).toContain('$1.26');
-    expect(text).not.toContain('2 providers');
+    expect(text).not.toContain('deepinfra');
   });
 
   it('sorts by a header with ascending, descending, and stable name tie-breaks', async () => {
@@ -754,6 +830,65 @@ describe('Models', () => {
       'a[href="https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset"]',
     );
     expect(attribution?.textContent?.trim()).toBe('attribution');
+    // The counts stay on one scannable line instead of a raw key/value dump.
+    expect(root.textContent).toContain('0/157 matched');
+    expect(root.textContent).toContain('157 unknown');
+  });
+
+  it('collapses the sync details behind a summary and remembers the choice', async () => {
+    window.localStorage.removeItem('pareto.models.syncDetails');
+    queueReload(fetchMock, allOverview, {
+      benchmark: {
+        sources: [
+          {
+            source: 'arena',
+            status: 'success',
+            counts: { published: 10, matched: 8 },
+            error: null,
+            finished_at: '2026-11-16T18:47:14.675Z',
+            source_url: null,
+            license: 'CC BY 4.0',
+            attribution_url: null,
+            fresh: true,
+          },
+          {
+            source: 'benchlm',
+            status: 'error',
+            counts: null,
+            error: 'fetch failed',
+            finished_at: '2026-11-16T18:40:00.000Z',
+            source_url: null,
+            license: null,
+            attribution_url: null,
+            fresh: false,
+          },
+        ],
+      },
+    });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const toggle = root.querySelector<HTMLButtonElement>('.sync-toggle');
+    const details = root.querySelector<HTMLElement>('#sync-details');
+
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(details?.hidden).toBe(true);
+    expect(root.textContent).toContain('Sync status');
+    // The worst source state and the failing source stay visible without
+    // expanding.
+    expect(
+      Array.from(root.querySelectorAll('.sync-summary ui-badge')).some(
+        (badge) => badge.textContent?.trim() === '1 error',
+      ),
+    ).toBe(true);
+    expect(root.querySelector('.sync-summary')?.textContent).toContain('benchlm');
+
+    toggle?.click();
+    fixture.detectChanges();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(details?.hidden).toBe(false);
+    expect(window.localStorage.getItem('pareto.models.syncDetails')).toBe('open');
+
+    window.localStorage.removeItem('pareto.models.syncDetails');
   });
 
   it('sends the benchmark sync POST with CSRF when available', async () => {
@@ -937,7 +1072,7 @@ describe('Models', () => {
     const root = fixture.nativeElement as HTMLElement;
 
     expect(root.textContent).toContain('Prices need setup for this provider.');
-    const button = root.querySelector('.sync-status button');
+    const button = root.querySelector('.sync-details button');
     expect(button).not.toBeNull();
     (button as HTMLElement).click();
     const router = TestBed.inject(Router);

@@ -19,8 +19,8 @@ pub(crate) mod types;
 
 pub use discovery::{DiscoveryInput, DiscoverySummary};
 pub use overview::{
-    AggregatePrice, AllModelsRow, ModelsOverview, OverviewPrice, OverviewQuality, OverviewQuery,
-    OverviewRow, ProviderModelRow,
+    AggregatePrice, AllModelsRow, ModelsOverview, OverviewPrice, OverviewProvider, OverviewQuality,
+    OverviewQuery, OverviewRow, ProviderModelRow,
 };
 pub use types::*;
 

@@ -54,6 +54,11 @@ export function formatPricePerM(value: number | null): string {
   return `$${trimmed}`;
 }
 
+/** Groups a count (tokens, models) for display; unknown stays '—'. */
+export function formatCount(value: number | null): string {
+  return value === null ? '—' : value.toLocaleString('en-US');
+}
+
 /** Splits a comma-separated tag field into trimmed, non-empty tags. */
 export function parseTags(value: string): string[] {
   return value

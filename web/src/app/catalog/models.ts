@@ -21,12 +21,13 @@ import type {
   OfferingPatch,
   PriceInput,
   Provider,
+  SyncRun,
   SyncStatus,
 } from './catalog.types';
 import { runError } from './catalog.types';
 import { CatalogService } from './catalog.service';
 import { describeError, isForbidden } from './errors';
-import { formatAge, formatPricePerM, formatTime, parseTags } from './format';
+import { formatAge, formatCount, formatPricePerM, formatTime, parseTags } from './format';
 import { type HeaderRow, HeadersEditor, headerMapOf } from './headers-editor';
 import { MixProfiles } from './mix-profiles';
 import { MixService } from './mix.service';
@@ -44,6 +45,7 @@ import {
   type AggregatePrice,
   type ModelsOverview,
   type OverviewPrice,
+  type OverviewProvider,
   type OverviewQuality,
   type OverviewRow,
   isProviderRow,
@@ -52,6 +54,7 @@ import {
 import { UiBadge, type BadgeTone } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
+import { UiChip } from '../ui/chip';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -66,8 +69,20 @@ type SortKey = 'name' | 'context' | 'mix' | 'input' | 'output' | 'cache' | 'qual
 /** The persisted price-basis choice (`localStorage`); the URL wins on load. */
 const PRICE_BASIS_STORAGE_KEY = 'pareto.models.priceBasis';
 
+/** Whether the sync details were expanded last time (`localStorage`). */
+const SYNC_DETAILS_STORAGE_KEY = 'pareto.models.syncDetails';
+
 /** How long typing must pause before the search hits the API. */
 const SEARCH_DEBOUNCE_MS = 250;
+
+/** Provider chips a row shows before the rest collapse into "+N". */
+const MAX_PROVIDER_CHIPS = 3;
+
+/** One number in a benchmark sync row, e.g. `112/161` matched. */
+interface SyncMetric {
+  value: string;
+  label: string;
+}
 
 /** `components`, `default` (resolved server-side), or a profile id/name. */
 const COMPONENTS_BASIS = 'components';
@@ -178,6 +193,7 @@ function emptyPriceDraft(): PriceDraft {
     UiBadge,
     UiBanner,
     UiButton,
+    UiChip,
     UiDialog,
     UiEmpty,
     UiField,
@@ -227,6 +243,8 @@ export class Models {
 
   protected readonly sortKey = signal<SortKey>('name');
   protected readonly sortDirection = signal<'asc' | 'desc'>('asc');
+  /** Rows whose provider chips are expanded past the "+N" collapse. */
+  protected readonly expandedProviderRows = signal<ReadonlySet<string>>(new Set());
 
   protected readonly detailKey = signal<string | null>(null);
   protected readonly detailOpen = signal(false);
@@ -257,12 +275,15 @@ export class Models {
 
   protected readonly syncStatus = signal<SyncStatus | null>(null);
   protected readonly benchmarkStatus = signal<BenchmarkSyncStatus | null>(null);
+  /** The sync detail rows; the summary line is always visible. */
+  protected readonly syncDetailsOpen = signal(false);
   protected readonly benchmarkSyncAvailable = signal(true);
   protected readonly syncingPrices = signal(false);
   protected readonly syncingBenchmarks = signal(false);
 
   protected readonly priceFields = PRICE_FIELDS;
   protected readonly formatPrice = formatPricePerM;
+  protected readonly formatCount = formatCount;
   protected readonly formatAge = formatAge;
   protected readonly formatTime = formatTime;
   protected readonly runError = runError;
@@ -382,6 +403,7 @@ export class Models {
     const term = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
     this.searchInput.set(term);
     this.searchTerm.set(term);
+    this.syncDetailsOpen.set(this.storedSyncDetails());
     this.destroyRef.onDestroy(() => {
       if (this.searchTimer !== null) {
         clearTimeout(this.searchTimer);
@@ -720,11 +742,54 @@ export class Models {
 
   // --- row display ---------------------------------------------------------
 
-  protected providerLabel(row: OverviewRow): string {
-    if (isProviderRow(row)) {
-      return this.providerById().get(this.overview()?.provider_id ?? '')?.name ?? 'Provider';
+  /** Every provider behind a row; the provider scope has exactly one. */
+  private rowProviders(row: OverviewRow): OverviewProvider[] {
+    if (!isProviderRow(row)) {
+      // A gateway older than this build sends no provider list; render the
+      // row without chips instead of failing the page during an upgrade.
+      return row.providers ?? [];
     }
-    return `${row.providers_count} provider${row.providers_count === 1 ? '' : 's'}`;
+    const provider = this.providerById().get(this.overview()?.provider_id ?? '');
+    return provider === undefined ? [] : [{ id: provider.id, name: provider.name }];
+  }
+
+  /** Chips to render: all providers, or the first few plus the "+N" chip. */
+  protected visibleProviders(row: OverviewRow): OverviewProvider[] {
+    const providers = this.rowProviders(row);
+    if (providers.length <= MAX_PROVIDER_CHIPS || this.providerRowExpanded(row)) {
+      return providers;
+    }
+    return providers.slice(0, MAX_PROVIDER_CHIPS);
+  }
+
+  /** Providers hidden behind the "+N" chip. */
+  protected hiddenProviders(row: OverviewRow): OverviewProvider[] {
+    const visible = this.visibleProviders(row).length;
+    return this.rowProviders(row).slice(visible);
+  }
+
+  /** Tooltip naming the providers the "+N" chip hides. */
+  protected hiddenChipTitle(row: OverviewRow): string {
+    const hidden = this.hiddenProviders(row);
+    return `Show ${hidden.length} more provider${hidden.length === 1 ? '' : 's'}: ${hidden
+      .map((provider) => provider.name)
+      .join(', ')}`;
+  }
+
+  protected providerRowExpanded(row: OverviewRow): boolean {
+    return this.expandedProviderRows().has(this.rowKey(row));
+  }
+
+  /** Expands or collapses a row's provider chips without touching the filter. */
+  protected toggleProviderChips(row: OverviewRow): void {
+    const key = this.rowKey(row);
+    this.expandedProviderRows.update((keys) => {
+      const next = new Set(keys);
+      if (!next.delete(key)) {
+        next.add(key);
+      }
+      return next;
+    });
   }
 
   protected statusTone(row: OverviewRow): BadgeTone {
@@ -884,16 +949,98 @@ export class Models {
     return isProviderRow(row) ? null : (row.price_min?.[component] ?? null);
   }
 
+  /**
+   * True when a minimum differs from the shown average. A model with one
+   * priced offering would otherwise repeat the same number twice in one cell.
+   */
+  protected minimumAddsInformation(shown: number | null, minimum: number | null): boolean {
+    return shown !== null && minimum !== null && Math.abs(shown - minimum) > 1e-9;
+  }
+
   protected detailProviderName(): string {
     const id = this.overview()?.provider_id;
     return id === null || id === undefined ? '' : (this.providerById().get(id)?.name ?? id);
   }
 
-  protected lastRunLabel(): string {
-    const run = this.syncStatus()?.last_run;
-    return run === null || run === undefined
-      ? 'never synced'
-      : `${run.status} · ${formatAge(run.finished_at)}`;
+  /** The last price-sync run, or null before the first one. */
+  protected priceRun(): SyncRun | null {
+    return this.syncStatus()?.last_run ?? null;
+  }
+
+  private storedSyncDetails(): boolean {
+    try {
+      return window.localStorage.getItem(SYNC_DETAILS_STORAGE_KEY) === 'open';
+    } catch {
+      return false;
+    }
+  }
+
+  /** Expands or collapses the sync rows and remembers the choice. */
+  protected toggleSyncDetails(): void {
+    const open = !this.syncDetailsOpen();
+    this.syncDetailsOpen.set(open);
+    try {
+      window.localStorage.setItem(SYNC_DETAILS_STORAGE_KEY, open ? 'open' : 'closed');
+    } catch {
+      // A blocked localStorage only costs persistence, never the page.
+    }
+  }
+
+  /**
+   * The worst state across the benchmark sources: an error outranks a stale
+   * source, which outranks a source that never ran.
+   */
+  protected benchmarkSummaryLabel(): string {
+    const runs = this.benchmarkRuns();
+    const errors = runs.filter((run) => run.status === 'error').length;
+    if (errors > 0) {
+      return `${errors} error${errors === 1 ? '' : 's'}`;
+    }
+    if (runs.some((run) => run.fresh === false && run.status !== 'never')) {
+      return 'stale';
+    }
+    if (runs.every((run) => run.status === 'never')) {
+      return 'never';
+    }
+    return 'success';
+  }
+
+  protected benchmarkSummaryTone(): BadgeTone {
+    switch (this.benchmarkSummaryLabel()) {
+      case 'stale':
+        return 'warning';
+      case 'never':
+        return 'neutral';
+      case 'success':
+        return 'success';
+      default:
+        return 'danger';
+    }
+  }
+
+  /**
+   * The summary line beside the benchmark badge: the failing or stale sources
+   * by name, the source count, and the newest run's age. Naming the problem
+   * sources keeps a partial failure visible while the details are collapsed.
+   */
+  protected benchmarkSummaryMeta(): string {
+    const runs = this.benchmarkRuns();
+    const parts: string[] = [];
+    const problems = runs
+      .filter((run) => run.status === 'error' || (run.fresh === false && run.status !== 'never'))
+      .map((run) => run.source);
+    if (problems.length > 0) {
+      parts.push(problems.join(', '));
+    }
+    parts.push(`${runs.length} source${runs.length === 1 ? '' : 's'}`);
+    const finished = runs
+      .map((run) => run.finished_at)
+      .filter((value): value is string => value !== null);
+    if (finished.length > 0) {
+      const latest = finished.reduce((newest, value) => (value > newest ? value : newest));
+      parts.push(`latest ${formatAge(latest)}`);
+    }
+    return parts.join(' · ');
   }
 
   protected benchmarkRuns(): readonly BenchmarkSyncRun[] {
@@ -910,10 +1057,37 @@ export class Models {
     return status === 'never' ? 'neutral' : 'warning';
   }
 
-  protected benchmarkCounts(run: BenchmarkSyncRun): string {
-    return Object.entries(run.counts ?? {})
-      .map(([key, value]) => `${key} ${value}`)
-      .join(', ');
+  /**
+   * The numbers a benchmark run's sync row shows: the matched ratio, then only
+   * the non-zero changes and skips, so a healthy run stays short.
+   */
+  protected benchmarkMetrics(run: BenchmarkSyncRun): SyncMetric[] {
+    const counts = run.counts ?? {};
+    const metrics: SyncMetric[] = [];
+    const matched = counts['matched'];
+    const published = counts['published'];
+    if (matched !== undefined) {
+      metrics.push({
+        value: published === undefined ? String(matched) : `${matched}/${published}`,
+        label: 'matched',
+      });
+    } else if (published !== undefined) {
+      metrics.push({ value: String(published), label: 'published' });
+    }
+    const optional: ReadonlyArray<[string, string]> = [
+      ['inserted', 'new'],
+      ['updated', 'updated'],
+      ['skipped_unknown', 'unknown'],
+      ['ambiguous', 'ambiguous'],
+      ['failed_pages', 'failed pages'],
+    ];
+    for (const [key, label] of optional) {
+      const value = counts[key];
+      if (value !== undefined && value !== 0) {
+        metrics.push({ value: String(value), label });
+      }
+    }
+    return metrics;
   }
 
   // --- detail dialog -------------------------------------------------------

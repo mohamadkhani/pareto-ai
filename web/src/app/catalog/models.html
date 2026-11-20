@@ -27,114 +27,170 @@
     <p class="result-count" aria-live="polite">{{ resultSummary() }}</p>
 
     <div class="models-toolbar">
-      <ui-field label="Search models">
-        <ui-input
-          id="models-search"
-          type="search"
-          placeholder="name, family, upstream id, or provider"
-          [value]="searchInput()"
-          (valueChange)="onSearchInput($event)"
-        />
-      </ui-field>
-      @if (searchInput() !== '') {
-        <ui-button size="sm" variant="ghost" (clicked)="clearSearch()">Clear</ui-button>
-      }
+      <div class="toolbar-group">
+        <ui-field label="Search models">
+          <ui-input
+            id="models-search"
+            type="search"
+            placeholder="name, family, upstream id, or provider"
+            [value]="searchInput()"
+            (valueChange)="onSearchInput($event)"
+          />
+        </ui-field>
+        @if (searchInput() !== '') {
+          <ui-button size="sm" variant="ghost" (clicked)="clearSearch()">Clear</ui-button>
+        }
 
-      <ui-field label="Provider">
-        <ui-select
-          [id]="'models-provider-filter'"
-          [value]="providerId()"
-          (valueChange)="onProviderFilter($event)"
-        >
-          <option value="all">All providers</option>
-          @for (provider of providers(); track provider.id) {
-            <option [value]="provider.id">{{ provider.name }}</option>
-          }
-        </ui-select>
-      </ui-field>
-
-      <ui-field label="Price basis">
-        <ui-select
-          [id]="'models-price-basis'"
-          [value]="priceBasis()"
-          (valueChange)="onBasisChange($event)"
-        >
-          <option value="components">Component prices</option>
-          @for (profile of profiles(); track profile.id) {
-            <option [value]="profile.id">{{ profileOptionLabel(profile) }}</option>
-          }
-        </ui-select>
-      </ui-field>
-
-      <ui-button (clicked)="openProfiles()">Manage profiles</ui-button>
-
-      <span class="toolbar-spacer"></span>
-
-      <ui-button variant="primary" (clicked)="openModelForm()">New model</ui-button>
-      <ui-button [loading]="syncingPrices()" (clicked)="syncPrices()">Sync prices</ui-button>
-      <ui-button
-        [disabled]="!benchmarkSyncAvailable()"
-        [loading]="syncingBenchmarks()"
-        [attr.title]="
-          benchmarkSyncAvailable()
-            ? 'Fetch the configured benchmark sources'
-            : 'Benchmark sync is not available in this build'
-        "
-        (clicked)="syncBenchmarks()"
-      >
-        Sync benchmarks
-      </ui-button>
-      <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
-    </div>
-
-    <div class="sync-status" aria-live="polite">
-      <span class="sync-status__item">
-        <span class="sync-status__label">Prices</span>
-        <span class="sync-status__value">{{ lastRunLabel() }}</span>
-      </span>
-      @for (run of benchmarkRuns(); track run.source) {
-        <span class="sync-status__item">
-          <span class="sync-status__label">{{ run.source }}</span>
-          <ui-badge [tone]="syncTone(run.status)">{{ run.status }}</ui-badge>
-          @if (run.fresh === false && run.status !== 'never') {
-            <ui-badge tone="warning">stale</ui-badge>
-          }
-          <span class="sync-status__value">
-            {{ benchmarkCounts(run) || 'no counts' }}
-            @if (run.finished_at !== null) {
-              · {{ formatAge(run.finished_at) }}
+        <ui-field label="Provider">
+          <ui-select
+            [id]="'models-provider-filter'"
+            [value]="providerId()"
+            (valueChange)="onProviderFilter($event)"
+          >
+            <option value="all">All providers</option>
+            @for (provider of providers(); track provider.id) {
+              <option [value]="provider.id">{{ provider.name }}</option>
             }
-          </span>
-          @if (run.license !== null) {
-            <span class="sync-status__license">{{ run.license }}</span>
-          }
-          @if (run.attribution_url !== null) {
-            <a [href]="run.attribution_url" target="_blank" rel="noopener noreferrer">
-              attribution
-            </a>
-          } @else if (run.source_url !== null) {
-            <a [href]="run.source_url" target="_blank" rel="noopener noreferrer">source</a>
-          }
-          @if (run.error !== null) {
-            <span class="sync-status__error">{{ run.error }}</span>
-            <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
-              Fix in provider setup
-            </ui-button>
-          }
-        </span>
-      }
-      @if (!benchmarkSyncAvailable()) {
-        <span class="sync-status__item">Benchmark sync is not available in this build.</span>
-      }
-      @if (missingCatalogConnector()) {
-        <span class="sync-status__item sync-status__connector-hint">
-          Prices need setup for this provider.
-          <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
-            Set up prices
-          </ui-button>
-        </span>
-      }
+          </ui-select>
+        </ui-field>
+
+        <ui-field label="Price basis">
+          <ui-select
+            [id]="'models-price-basis'"
+            [value]="priceBasis()"
+            (valueChange)="onBasisChange($event)"
+          >
+            <option value="components">Component prices</option>
+            @for (profile of profiles(); track profile.id) {
+              <option [value]="profile.id">{{ profileOptionLabel(profile) }}</option>
+            }
+          </ui-select>
+        </ui-field>
+      </div>
+
+      <div class="toolbar-group toolbar-group--actions">
+        <ui-button (clicked)="openProfiles()">Manage profiles</ui-button>
+        <ui-button [loading]="syncingPrices()" (clicked)="syncPrices()">Sync prices</ui-button>
+        <ui-button
+          [disabled]="!benchmarkSyncAvailable()"
+          [loading]="syncingBenchmarks()"
+          [attr.title]="
+            benchmarkSyncAvailable()
+              ? 'Fetch the configured benchmark sources'
+              : 'Benchmark sync is not available in this build'
+          "
+          (clicked)="syncBenchmarks()"
+        >
+          Sync benchmarks
+        </ui-button>
+        <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
+        <ui-button variant="primary" (clicked)="openModelForm()">New model</ui-button>
+      </div>
     </div>
+
+    <section class="sync-panel" aria-label="Sync status">
+      <div class="sync-summary">
+        <span class="sync-summary__title">Sync status</span>
+        <span class="sync-summary__item">
+          <span class="sync-summary__label">Prices</span>
+          @if (priceRun(); as run) {
+            <ui-badge [tone]="syncTone(run.status)">{{ run.status }}</ui-badge>
+            <span class="sync-summary__meta">{{ formatAge(run.finished_at) }}</span>
+          } @else {
+            <ui-badge tone="neutral">never</ui-badge>
+          }
+          @if (missingCatalogConnector()) {
+            <ui-badge tone="warning">needs setup</ui-badge>
+          }
+        </span>
+        @if (!benchmarkSyncAvailable()) {
+          <span class="sync-summary__item">
+            <span class="sync-summary__label">Benchmarks</span>
+            <ui-badge tone="neutral">unavailable</ui-badge>
+          </span>
+        } @else if (benchmarkRuns().length > 0) {
+          <span class="sync-summary__item">
+            <span class="sync-summary__label">Benchmarks</span>
+            <ui-badge [tone]="benchmarkSummaryTone()">{{ benchmarkSummaryLabel() }}</ui-badge>
+            <span class="sync-summary__meta">{{ benchmarkSummaryMeta() }}</span>
+          </span>
+        }
+        <span class="sync-summary__spacer"></span>
+        <button
+          type="button"
+          class="sync-toggle"
+          aria-controls="sync-details"
+          [attr.aria-expanded]="syncDetailsOpen()"
+          (click)="toggleSyncDetails()"
+        >
+          {{ syncDetailsOpen() ? 'Hide details' : 'Show details' }}
+          <span aria-hidden="true">{{ syncDetailsOpen() ? '▲' : '▼' }}</span>
+        </button>
+      </div>
+      <div id="sync-details" class="sync-details" [hidden]="!syncDetailsOpen()">
+        <div class="sync-row">
+          <span class="sync-row__name">Prices</span>
+          @if (priceRun(); as run) {
+            <ui-badge [tone]="syncTone(run.status)">{{ run.status }}</ui-badge>
+            <span class="sync-row__age">{{ formatAge(run.finished_at) }}</span>
+          } @else {
+            <ui-badge tone="neutral">never</ui-badge>
+          }
+          <span class="sync-row__spacer"></span>
+        </div>
+        @for (run of benchmarkRuns(); track run.source) {
+          <div class="sync-row">
+            <span class="sync-row__name">{{ run.source }}</span>
+            <ui-badge [tone]="syncTone(run.status)">{{ run.status }}</ui-badge>
+            @if (run.fresh === false && run.status !== 'never') {
+              <ui-badge tone="warning">stale</ui-badge>
+            }
+            @if (run.finished_at !== null) {
+              <span class="sync-row__age">{{ formatAge(run.finished_at) }}</span>
+            }
+            <span class="sync-metrics">
+              @for (metric of benchmarkMetrics(run); track metric.label; let last = $last) {
+                <span class="sync-metric"
+                  ><span class="sync-metric__value">{{ metric.value }}</span>
+                  {{ metric.label }}</span
+                >
+                @if (!last) {
+                  <span class="sync-metric__sep">·</span>
+                }
+              }
+            </span>
+            <span class="sync-row__spacer"></span>
+            @if (run.license !== null) {
+              <span class="sync-row__license">{{ run.license }}</span>
+            }
+            @if (run.attribution_url !== null) {
+              <a [href]="run.attribution_url" target="_blank" rel="noopener noreferrer">
+                attribution
+              </a>
+            } @else if (run.source_url !== null) {
+              <a [href]="run.source_url" target="_blank" rel="noopener noreferrer">source</a>
+            }
+            @if (run.error !== null) {
+              <span class="sync-row__error">{{ run.error }}</span>
+              <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
+                Fix in provider setup
+              </ui-button>
+            }
+          </div>
+        }
+        @if (!benchmarkSyncAvailable()) {
+          <div class="sync-row">Benchmark sync is not available in this build.</div>
+        }
+        @if (missingCatalogConnector()) {
+          <div class="sync-row sync-row--hint">
+            <span>Prices need setup for this provider.</span>
+            <ui-button size="sm" variant="ghost" (clicked)="openPriceSetup()">
+              Set up prices
+            </ui-button>
+          </div>
+        }
+      </div>
+    </section>
 
     @if (loadError()) {
       <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
@@ -198,7 +254,16 @@
                   <span class="sort-indicator" aria-hidden="true">{{ sortIndicator('name') }}</span>
                 </button>
               </th>
-              <th scope="col">Provider</th>
+              <th scope="col">
+                Providers
+                @if (scope() === 'all') {
+                  <span
+                    class="th-hint"
+                    title="Prices and quality are aggregated across this model's offerings"
+                    >(avg)</span
+                  >
+                }
+              </th>
               <th scope="col" [attr.aria-sort]="sortAria('context')">
                 <button type="button" class="sort-button" (click)="setSort('context')">
                   Context
@@ -260,22 +325,51 @@
               <tr>
                 <td>
                   <span class="model-name">{{ row.canonical_name }}</span>
-                  <span class="model-family">{{ row.family ?? '—' }}</span>
-                </td>
-                <td>
-                  <span>{{ providerLabel(row) }}</span>
-                  @if (scope() === 'all') {
-                    <ui-badge tone="info">avg</ui-badge>
+                  @if (row.family !== null) {
+                    <span class="model-family">{{ row.family }}</span>
                   }
                 </td>
-                <td class="num">{{ row.context_length ?? '—' }}</td>
+                <td class="provider-cell">
+                  <span class="provider-chips">
+                    @for (provider of visibleProviders(row); track provider.id) {
+                      <ui-chip
+                        [label]="'Show only ' + provider.name"
+                        (clicked)="onProviderFilter(provider.id)"
+                      >
+                        {{ provider.name }}
+                      </ui-chip>
+                    }
+                    @if (hiddenProviders(row).length > 0) {
+                      <ui-chip
+                        class="provider-chip--more"
+                        [mono]="true"
+                        [label]="hiddenChipTitle(row)"
+                        (clicked)="toggleProviderChips(row)"
+                      >
+                        +{{ hiddenProviders(row).length }}
+                      </ui-chip>
+                    } @else if (providerRowExpanded(row)) {
+                      <ui-chip
+                        class="provider-chip--more"
+                        [mono]="true"
+                        label="Show fewer providers"
+                        (clicked)="toggleProviderChips(row)"
+                      >
+                        less
+                      </ui-chip>
+                    }
+                  </span>
+                </td>
+                <td class="num">{{ formatCount(row.context_length) }}</td>
                 <td class="num price-cell">
                   @if (mixSelected()) {
                     @if (mixPrice(row); as mix) {
                       <span class="price">{{ formatPrice(mix.per_m) }}</span>
                       <ui-badge [tone]="basisTone(mix)">{{ mix.basis }}</ui-badge>
                       @if (mixPriceMin(row); as min) {
-                        <span class="price-min">min {{ formatPrice(min.per_m) }}</span>
+                        @if (minimumAddsInformation(mix.per_m, min.per_m)) {
+                          <span class="price-min">min {{ formatPrice(min.per_m) }}</span>
+                        }
                       }
                     } @else if (rowVariable(row)) {
                       <ui-badge tone="warning" [title]="variableTooltip">variable</ui-badge>
@@ -289,7 +383,9 @@
                   } @else if (inputPrice(row) !== null) {
                     <span class="price">{{ formatPrice(inputPrice(row)) }}</span>
                     @if (minPrice(row, 'input_per_m'); as min) {
-                      <span class="price-min">min {{ formatPrice(min) }}</span>
+                      @if (minimumAddsInformation(inputPrice(row), min)) {
+                        <span class="price-min">min {{ formatPrice(min) }}</span>
+                      }
                     }
                     @if (rowVariable(row)) {
                       <ui-badge tone="warning" [title]="variableTooltip">variable</ui-badge>
@@ -305,7 +401,9 @@
                     @if (outputPrice(row) !== null) {
                       <span class="price">{{ formatPrice(outputPrice(row)) }}</span>
                       @if (minPrice(row, 'output_per_m'); as min) {
-                        <span class="price-min">min {{ formatPrice(min) }}</span>
+                        @if (minimumAddsInformation(outputPrice(row), min)) {
+                          <span class="price-min">min {{ formatPrice(min) }}</span>
+                        }
                       }
                     } @else {
                       <ui-badge tone="warning">unpriced</ui-badge>
@@ -315,7 +413,9 @@
                     @if (cachePrice(row) !== null) {
                       <span class="price">{{ formatPrice(cachePrice(row)) }}</span>
                       @if (minPrice(row, 'cache_read_per_m'); as min) {
-                        <span class="price-min">min {{ formatPrice(min) }}</span>
+                        @if (minimumAddsInformation(cachePrice(row), min)) {
+                          <span class="price-min">min {{ formatPrice(min) }}</span>
+                        }
                       }
                     } @else {
                       <span class="price-missing">—</span>
@@ -373,11 +473,11 @@
           </div>
           <div>
             <dt>Context (effective)</dt>
-            <dd>{{ row.context_length ?? '—' }}</dd>
+            <dd>{{ formatCount(row.context_length) }}</dd>
           </div>
           <div>
             <dt>Max output (effective)</dt>
-            <dd>{{ row.max_output_tokens ?? '—' }}</dd>
+            <dd>{{ formatCount(row.max_output_tokens) }}</dd>
           </div>
           @if (scope() === 'provider') {
             <div>

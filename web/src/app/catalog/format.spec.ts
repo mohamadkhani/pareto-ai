@@ -1,4 +1,12 @@
-import { formatAge, formatPricePerM, formatTime, formatUsd, joinTags, parseTags } from './format';
+import {
+  formatAge,
+  formatCount,
+  formatPricePerM,
+  formatTime,
+  formatUsd,
+  joinTags,
+  parseTags,
+} from './format';
 
 describe('catalog format helpers', () => {
   it('formatAge renders seconds, minutes, hours and days ago', () => {
@@ -23,6 +31,11 @@ describe('catalog format helpers', () => {
     expect(formatPricePerM(1.25)).toBe('$1.25');
     expect(formatPricePerM(5)).toBe('$5.00');
     expect(formatPricePerM(0.00015)).toBe('$0.00015');
+  });
+
+  it('formatCount groups thousands and keeps unknown as missing', () => {
+    expect(formatCount(null)).toBe('—');
+    expect(formatCount(1048576)).toBe('1,048,576');
   });
 
   it('formatTime falls back to the raw value for invalid timestamps', () => {

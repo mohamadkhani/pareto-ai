@@ -59,7 +59,7 @@
 //! model id. One joined query feeds both scopes (no N+1), and the quality
 //! lookup is a fixed number of set queries.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -142,6 +142,9 @@ pub struct AllModelsRow {
     pub context_length: Option<i64>,
     /// Largest effective max output across the model's offerings.
     pub max_output_tokens: Option<i64>,
+    /// Every provider that offers the model, ordered by provider name, so the
+    /// page can show one chip per provider instead of a bare count.
+    pub providers: Vec<OverviewProvider>,
     pub providers_count: usize,
     pub offerings_count: usize,
     /// Offerings with no price row or an all-null price row (never averaged).
@@ -161,6 +164,13 @@ pub struct AllModelsRow {
     pub mix_price_min: Option<MixPriceView>,
     /// Always present for a catalog model; the neutral default is imputed.
     pub quality: Option<OverviewQuality>,
+}
+
+/// One provider that offers a model (`scope=all`).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct OverviewProvider {
+    pub id: String,
+    pub name: String,
 }
 
 /// A single offering's price row (`scope=provider`).
@@ -214,6 +224,7 @@ struct OverviewRowRaw {
     context_length: Option<i64>,
     max_output_tokens: Option<i64>,
     provider_id: String,
+    provider_name: String,
     offering_id: String,
     upstream_model_id: String,
     context_override: Option<i64>,
@@ -366,7 +377,7 @@ async fn fetch_rows(
     let rows = sqlx::query_as::<_, OverviewRowRaw>(
         "SELECT m.id AS model_id, m.canonical_name, m.family, m.modalities_input, \
                 m.modalities_output, m.context_length, m.max_output_tokens, \
-                o.provider_id, o.id AS offering_id, o.upstream_model_id, \
+                o.provider_id, pr.name AS provider_name, o.id AS offering_id, o.upstream_model_id, \
                 o.context_override, max_output_override, o.enabled, \
                 p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m, \
                 p.reasoning_per_m, p.request_fee, p.variable_price, p.currency, p.source, p.fetched_at \
@@ -476,10 +487,20 @@ fn aggregate(
             let first = offerings.first()?;
             let priced: Vec<&OverviewRowRaw> =
                 offerings.iter().filter(|row| row.is_priced()).collect();
-            let providers: HashSet<&str> = offerings
-                .iter()
-                .map(|row| row.provider_id.as_str())
-                .collect();
+            let mut providers: Vec<OverviewProvider> = Vec::new();
+            for row in &offerings {
+                if providers
+                    .iter()
+                    .all(|provider| provider.id != row.provider_id)
+                {
+                    providers.push(OverviewProvider {
+                        id: row.provider_id.clone(),
+                        name: row.provider_name.clone(),
+                    });
+                }
+            }
+            providers.sort_by_key(|provider| provider.name.to_lowercase());
+            let providers_count = providers.len();
             let context_length = offerings
                 .iter()
                 .filter_map(|row| row.context_override.or(row.context_length))
@@ -501,7 +522,8 @@ fn aggregate(
                 modalities_output: parse_modalities(first.modalities_output.as_deref()),
                 context_length,
                 max_output_tokens,
-                providers_count: providers.len(),
+                providers,
+                providers_count,
                 offerings_count: offerings.len(),
                 unpriced_offerings: offerings.len() - priced.len(),
                 variable_offerings: offerings
@@ -709,6 +731,14 @@ mod tests {
         assert_eq!(a.context_length, Some(200_000), "max effective context");
         assert_eq!(a.max_output_tokens, Some(8_192));
         assert_eq!(a.providers_count, 2);
+        assert_eq!(
+            a.providers
+                .iter()
+                .map(|provider| provider.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"],
+            "one provider entry per provider, ordered by name"
+        );
         assert_eq!(a.offerings_count, 3);
         assert_eq!(a.unpriced_offerings, 1);
         let avg = a.price_avg.as_ref().expect("average");
@@ -1101,6 +1131,7 @@ mod tests {
             "modalities_output",
             "context_length",
             "max_output_tokens",
+            "providers",
             "providers_count",
             "offerings_count",
             "unpriced_offerings",
