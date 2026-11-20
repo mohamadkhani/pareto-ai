@@ -1718,7 +1718,7 @@ pub fn extract_balance(
     if routable
         && multiplier_ok
         && let Some(value) = usd
-        && (value < 0.0 || value > IMPLAUSIBLE_BALANCE_USD)
+        && !(0.0..=IMPLAUSIBLE_BALANCE_USD).contains(&value)
     {
         let display = &config.unit.display;
         warnings.push(format!(
