@@ -89,6 +89,12 @@ export interface ProviderOverviewRow {
   quality: OverviewQuality | null;
 }
 
+/** One provider that offers a model, ordered by name (`scope = "all"`). */
+export interface OverviewProvider {
+  id: string;
+  name: string;
+}
+
 /** One model aggregated across providers (`scope = "all"`). */
 export interface ModelOverviewRow {
   model_id: string;
@@ -100,6 +106,8 @@ export interface ModelOverviewRow {
   context_length: number | null;
   /** Largest effective max output across the model's offerings. */
   max_output_tokens: number | null;
+  /** Every provider that offers the model, ordered by name. */
+  providers: OverviewProvider[];
   providers_count: number;
   offerings_count: number;
   /** Offerings with no price row or an all-null price row (never averaged). */

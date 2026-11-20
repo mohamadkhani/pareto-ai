@@ -182,6 +182,7 @@ use utoipa::OpenApi;
         crate::catalog::OverviewRow,
         crate::catalog::ProviderModelRow,
         crate::catalog::AllModelsRow,
+        crate::catalog::OverviewProvider,
         crate::catalog::OverviewPrice,
         crate::catalog::AggregatePrice,
         crate::catalog::OverviewQuality,

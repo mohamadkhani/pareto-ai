@@ -7,6 +7,7 @@ import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
 import { UiCheckbox } from '../ui/checkbox';
+import { UiChip } from '../ui/chip';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -42,6 +43,7 @@ interface TokenSwatch {
     UiButton,
     UiCard,
     UiCheckbox,
+    UiChip,
     UiDialog,
     UiEmpty,
     UiField,

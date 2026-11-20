@@ -44,7 +44,9 @@
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "4kB",
+                  // 6 kB: the Models page alone carries the provider chips, the
+                  // collapsible sync panel, the sortable table, and three dialogs.
+                  "maximumWarning": "6kB",
                   "maximumError": "8kB"
                 }
               ],
