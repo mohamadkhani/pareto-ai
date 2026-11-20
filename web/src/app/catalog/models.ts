@@ -225,6 +225,10 @@ export class Models {
   protected readonly searchInput = signal('');
   /** The debounced, trimmed term the overview was last filtered with. */
   protected readonly searchTerm = signal('');
+  /** The maximum price the table shows, on the column named by `maxPriceLabel`. */
+  protected readonly maxPriceInput = signal('');
+  /** The minimum quality score a row must reach. */
+  protected readonly minQualityInput = signal('');
   /** Rows before the search filter, for the "N of M models" count. */
   protected readonly totalModels = signal<number | null>(null);
   protected readonly loading = signal(false);
@@ -306,10 +310,15 @@ export class Models {
   });
 
   protected readonly scope = computed(() => this.overview()?.scope ?? 'all');
-  protected readonly rows = computed<OverviewRow[]>(() => {
-    const rows = this.overview()?.rows ?? [];
-    return [...rows].sort((a, b) => this.compareRows(a, b));
-  });
+  /** Every row the overview returned, before the client-side filters. */
+  private readonly overviewRows = computed<OverviewRow[]>(() => this.overview()?.rows ?? []);
+  protected readonly maxPrice = computed(() => parseOptionalNumber(this.maxPriceInput()));
+  protected readonly minQuality = computed(() => parseOptionalNumber(this.minQualityInput()));
+  protected readonly rows = computed<OverviewRow[]>(() =>
+    this.overviewRows()
+      .filter((row) => this.matchesRefinements(row))
+      .sort((a, b) => this.compareRows(a, b)),
+  );
   protected readonly detailRow = computed<OverviewRow | null>(() => {
     const key = this.detailKey();
     if (key === null) {
@@ -374,11 +383,22 @@ export class Models {
   protected readonly allUnpriced = computed(() => this.rows().length > 0 && !this.anyPriced());
   /** True while a non-empty search term filters the list. */
   protected readonly filterActive = computed(() => this.searchTerm() !== '');
+  /** True while a price or quality cap narrows the rows client-side. */
+  protected readonly refinementActive = computed(
+    () => this.maxPrice() !== null || this.minQuality() !== null,
+  );
+  protected readonly anyFilterActive = computed(
+    () => this.filterActive() || this.refinementActive(),
+  );
+  /** The price column the maximum applies to. */
+  protected readonly maxPriceLabel = computed(() =>
+    this.mixSelected() ? 'Max mix price $/M' : 'Max input $/M',
+  );
   /** "N of M models" while filtering, otherwise "N models". */
   protected readonly resultSummary = computed(() => {
     const shown = this.rows().length;
-    const total = this.totalModels();
-    if (this.filterActive() && total !== null) {
+    const total = this.totalModels() ?? this.overviewRows().length;
+    if (this.anyFilterActive()) {
       return `${shown} of ${total} model${total === 1 ? '' : 's'}`;
     }
     return `${shown} model${shown === 1 ? '' : 's'}`;
@@ -403,6 +423,8 @@ export class Models {
     const term = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
     this.searchInput.set(term);
     this.searchTerm.set(term);
+    this.maxPriceInput.set(this.route.snapshot.queryParamMap.get('max_price')?.trim() ?? '');
+    this.minQualityInput.set(this.route.snapshot.queryParamMap.get('min_quality')?.trim() ?? '');
     this.syncDetailsOpen.set(this.storedSyncDetails());
     this.destroyRef.onDestroy(() => {
       if (this.searchTimer !== null) {
@@ -519,6 +541,60 @@ export class Models {
     this.searchTerm.set('');
     this.writeUrlParam('q', null);
     void this.loadOverview();
+  }
+
+  // --- price and quality refinements --------------------------------------
+
+  /** Narrows by the shown price column; the API payload stays whole. */
+  protected onMaxPriceInput(value: string): void {
+    this.maxPriceInput.set(value);
+    this.writeUrlParam('max_price', value.trim() === '' ? null : value.trim());
+  }
+
+  protected onMinQualityInput(value: string): void {
+    this.minQualityInput.set(value);
+    this.writeUrlParam('min_quality', value.trim() === '' ? null : value.trim());
+  }
+
+  /** Clears the price and quality caps without touching the search. */
+  protected clearRefinements(): void {
+    this.maxPriceInput.set('');
+    this.minQualityInput.set('');
+    this.writeUrlParam('max_price', null);
+    this.writeUrlParam('min_quality', null);
+  }
+
+  /** Resets every filter, reloading only when the search changed. */
+  protected clearAllFilters(): void {
+    this.clearRefinements();
+    this.clearSearch();
+  }
+
+  /**
+   * True when a row satisfies both caps. An unknown value never passes a cap:
+   * an unpriced or unranked row is not "cheap" or "low quality", it is unknown.
+   */
+  private matchesRefinements(row: OverviewRow): boolean {
+    const maxPrice = this.maxPrice();
+    if (maxPrice !== null) {
+      const price = this.shownPrice(row);
+      if (price === null || price > maxPrice) {
+        return false;
+      }
+    }
+    const minQuality = this.minQuality();
+    if (minQuality !== null) {
+      const score = row.quality?.score ?? null;
+      if (score === null || score < minQuality) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** The number the table shows in its price column: mix or input. */
+  private shownPrice(row: OverviewRow): number | null {
+    return this.mixSelected() ? (row.mix_price?.per_m ?? null) : this.inputPrice(row);
   }
 
   /** `/` focuses the search box unless a field or a dialog already has focus. */
@@ -1450,6 +1526,16 @@ export class Models {
     }
     this.loadError.set(describeError(err, 'Loading models failed.'));
   }
+}
+
+/** An empty or non-numeric filter box means "no cap". */
+function parseOptionalNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') {
+    return null;
+  }
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
 }
 
 function priceValue(
