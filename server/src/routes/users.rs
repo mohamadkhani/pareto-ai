@@ -50,7 +50,9 @@ pub async fn list_users(
 
 /// Creates an account with role and initial password. Admin only, audited as
 /// `user.create`. The account is flagged `must_change_password` unless the
-/// input waives it: an admin-set password must be rotated first.
+/// input waives it: an admin-set password must be rotated first. Refused while
+/// the gateway is `unprotected` (D58): without a password, a real account would
+/// make the next restart `protected` with no administrator.
 #[utoipa::path(
     post,
     path = "/api/users",
@@ -61,7 +63,7 @@ pub async fn list_users(
         (status = 400, description = "invalid request body", body = ErrorBody),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
-        (status = 409, description = "email already exists", body = ErrorBody)
+        (status = 409, description = "email already exists, or setup is not complete (set a password first)", body = ErrorBody)
     )
 )]
 pub async fn create_user(
@@ -72,6 +74,20 @@ pub async fn create_user(
     body: Result<Json<UserInput>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UserView>), ApiError> {
     let rid = error::request_id(&headers);
+    // Unprotected mode is a local convenience, not an account directory. The
+    // mode, not the admin count, is the gate: a count check would race with a
+    // concurrent first-admin creation and could still let an account through
+    // with no administrator to own it. The mode only moves forward from
+    // Unprotected within a process, and Settings (`/api/setup/admin`) is the
+    // one path that does it.
+    if state.setup.mode() == crate::setup::Mode::Unprotected {
+        return Err(ApiError::custom(
+            StatusCode::CONFLICT,
+            "setup_incomplete",
+            "set a password for the local administrator in Settings before creating accounts",
+        )
+        .with_request_id(rid));
+    }
     let Json(input) = bad_body(body, "user create", &rid)?;
     let actor = Actor {
         user_id: &admin.user_id,
@@ -96,7 +112,8 @@ pub async fn create_user(
         (status = 400, description = "invalid request body", body = ErrorBody),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
-        (status = 404, description = "no such user", body = ErrorBody)
+        (status = 404, description = "no such user", body = ErrorBody),
+        (status = 409, description = "refusing to remove the last active administrator", body = ErrorBody)
     )
 )]
 pub async fn update_user(
@@ -294,7 +311,7 @@ async fn ensure_key_owner(
 mod tests {
     use super::*;
     use crate::auth::Role;
-    use crate::test_support::{self, TestApp, api_request, send};
+    use crate::test_support::{self, TestApp, api_request, api_request_from, send};
     use axum::body::Body;
     use axum::http::Method;
 
@@ -401,6 +418,75 @@ mod tests {
         assert!(text.contains("api_key.create"), "{text}");
         assert!(text.contains("api_key.revoke"), "{text}");
         assert!(!text.contains(&key), "audit rows never carry the key");
+    }
+
+    #[tokio::test]
+    async fn unprotected_mode_refuses_account_creation_until_the_first_password() {
+        let app = TestApp::unprotected().await;
+        let router = app.router();
+
+        let refused = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "plain@example.com",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "setup_incomplete");
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("users");
+        assert_eq!(users, 0, "the refused request created no account");
+
+        // Setting the first password promotes the local operator and opens
+        // account creation for the rest of the process.
+        let set = send(
+            router.clone(),
+            api_request_from(
+                Method::POST,
+                "/api/setup/admin",
+                Some(serde_json::json!({
+                    "email": "admin@example.com",
+                    "password": "first-admin-password",
+                })),
+                None,
+                None,
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+        let cookie = test_support::session_cookie_from(&set.headers);
+        let csrf = set.body["csrf_token"].as_str().expect("csrf token");
+
+        let created = send(
+            router,
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "plain@example.com",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                Some(&cookie),
+                Some(csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
     }
 
     #[tokio::test]

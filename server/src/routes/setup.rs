@@ -122,8 +122,7 @@ pub async fn create_admin(
         tracing::debug!(error = %e, "setup admin body rejected");
         ApiError::bad_request("invalid request body").with_request_id(rid.clone())
     })?;
-    ensure_setup_open(&state, &rid).await?;
-
+    ensure_first_admin_open(&state, &rid).await?;
     setup::create_first_admin(&state.pool, &request.email, &request.password, &ip.0)
         .await
         .map_err(|e| match e {
@@ -230,6 +229,23 @@ async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(),
         .await
         .map_err(|e| ApiError::internal("counting users", e).with_request_id(rid.clone()))?;
     if users > 0 {
+        return Err(already_complete(rid.clone()));
+    }
+    Ok(())
+}
+
+/// Rejects the first-admin mutation once an active real administrator exists
+/// or the mode moved on. A non-admin account deliberately keeps this path open:
+/// creating a user before setting a password must not strand the gateway with
+/// no administrator (D57).
+async fn ensure_first_admin_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
+    if state.setup.mode().is_protected() {
+        return Err(already_complete(rid.clone()));
+    }
+    let admins = setup::real_admin_count(&state.pool).await.map_err(|e| {
+        ApiError::internal("counting administrators", e).with_request_id(rid.clone())
+    })?;
+    if admins > 0 {
         return Err(already_complete(rid.clone()));
     }
     Ok(())
@@ -609,6 +625,47 @@ mod tests {
         )
         .await;
         assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_account_does_not_close_the_first_admin_path() {
+        let app = TestApp::unprotected().await;
+        let router = app.router();
+        app.create_user("plain@example.com", crate::auth::Role::User, true)
+            .await;
+
+        let created = send(
+            router.clone(),
+            post_local(
+                "/api/setup/admin",
+                serde_json::json!({
+                    "email": "later@example.com",
+                    "password": "later-admin-password",
+                }),
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        assert_eq!(created.body["user"]["email"], "later@example.com");
+        assert_eq!(created.body["user"]["role"], "admin");
+        assert_eq!(app.state.setup.mode(), Mode::Protected);
+
+        // The placeholder is promoted in place and the normal account stays.
+        let real: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("users");
+        assert_eq!(real, 2);
+        let promoted: String = sqlx::query_scalar("SELECT email FROM users WHERE id = ?")
+            .bind(crate::auth::LOCAL_OPERATOR_ID)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("promoted row");
+        assert_eq!(
+            promoted, "later@example.com",
+            "the placeholder became the administrator"
+        );
     }
 
     #[tokio::test]

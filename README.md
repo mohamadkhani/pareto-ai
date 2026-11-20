@@ -61,7 +61,7 @@ Authentication modes:
 | Mode | Meaning | How it ends |
 | --- | --- | --- |
 | `setup` | No account exists; only the wizard and login routes answer. | Create the first admin. |
-| `unprotected` | Setup was explicitly skipped. `/api/*` and `/v1/*` act as a trusted local operator; sessions stay off. | Set a password (wizard or Settings) — creates the first admin. |
+| `unprotected` | Setup was explicitly skipped. `/api/*` and `/v1/*` act as a trusted local operator; sessions stay off. Account creation is blocked in this mode. | Set a password (wizard or Settings) — creates the first admin. |
 | `protected` | At least one account exists; session auth and CSRF apply as usual. | — |
 
 Exposure rule: binding a **non-loopback** address while in `setup` or
@@ -74,6 +74,26 @@ banner. With the override, setup still has to be finished **locally** (or with
 the `GATEWAY_ADMIN_*` shortcut): the wizard's writes are loopback-only, and a
 cross-site `Origin` is refused so a random web page cannot claim the first
 account.
+
+### Locked out as the only admin
+
+Password resets are an admin action (D2), so there is no email flow. If the last
+admin has forgotten the password, reset it on the host that holds the database:
+
+```bash
+./server/target/release/gateway reset-password --email admin@example.com
+# when the database has exactly one account, the email can be omitted:
+./server/target/release/gateway reset-password --data-dir /srv/pareto/data
+```
+
+The command prompts for the new password twice (`stdin` provides one line when
+it is not a terminal, for containers). It deletes the account's sessions,
+revokes its live API keys, and forces a new password at the next sign-in (D56).
+The password is never accepted as an argument, so it cannot leak through shell
+history or `ps`. Run the binary from the same release as the server, because
+opening the database applies migrations. The desktop build keeps its data under
+the OS application-data directory listed in [`docs/desktop.md`](docs/desktop.md);
+point `--data-dir` there to reset the sidecar's database.
 
 ### HTTPS on a domain
 
