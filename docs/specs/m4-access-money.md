@@ -74,9 +74,11 @@ usage_daily(day TEXT NOT NULL, user_id TEXT NOT NULL, offering_id TEXT NOT NULL,
   `Retry-After`.
 - `last_used_at` updated on use (cheap write; batch if needed).
 
-### Access control (D9)
+### Access control (D9, D59)
 
-- Effective access = intersection of user grants and key grants; `deny` beats
+- Effective access = the owner's grant verdict; when the key has grant rows of
+  its own, it intersects with the key's verdict (a key may narrow the account,
+  never widen it). A key with no grants inherits its owner. `deny` beats
   `allow`; no grants at all means "everything" for admins and "nothing" for
   users? **No:** default is allow for `admin`, deny-unless-granted for `user`.
 - Admin screens/API for grants; every change audited.
