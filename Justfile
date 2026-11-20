@@ -104,6 +104,11 @@ dev *args:
     fi
     exit "$status"
 
+# reset a dev password in server/data (pass an email if there are several)
+# Prompts twice for the new password: `just reset-password admin@example.com`
+reset-password email="":
+    cd server && cargo run --offline -- reset-password {{ if email != "" { "--email " + quote(email) } else { "" } }}
+
 # api-only binary, no embedded UI
 build-api:
     cd server && cargo build --release --offline --no-default-features

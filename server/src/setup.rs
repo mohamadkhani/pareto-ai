@@ -131,6 +131,17 @@ pub async fn real_user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
         .await
 }
 
+/// Number of active, real administrators. Setup stays open until one exists:
+/// a non-admin account does not make the gateway administrable (D57).
+pub async fn real_admin_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users \
+         WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Seeds the local-operator placeholder account (migration 0016): the row
 /// behind the synthetic [`crate::auth::local_operator`] identity, so every
 /// audit and `*_updated_by` write during unprotected mode satisfies its
@@ -189,15 +200,16 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
 /// `*_updated_by` reference to it stays valid — instead of a second row
 /// appearing.
 ///
-/// Failure mode: [`SetupError::AlreadyComplete`] when a real account exists,
-/// [`SetupError::Invalid`] for a bad email or a too-short password.
+/// Failure mode: [`SetupError::AlreadyComplete`] when an active real
+/// administrator exists, [`SetupError::Invalid`] for a bad email or a
+/// too-short password.
 pub async fn create_first_admin(
     pool: &SqlitePool,
     email: &str,
     password: &str,
     ip: &str,
 ) -> Result<String, SetupError> {
-    if real_user_count(pool).await? > 0 {
+    if real_admin_count(pool).await? > 0 {
         return Err(SetupError::AlreadyComplete);
     }
     let email =
@@ -424,6 +436,54 @@ mod tests {
             .await
             .expect("audit");
         assert_eq!(actions, ["setup.skipped"]);
+    }
+
+    #[tokio::test]
+    async fn only_active_real_admins_close_setup() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "no users"
+        );
+
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip");
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "the placeholder is not a real administrator"
+        );
+
+        app.create_user("plain@example.com", crate::auth::Role::User, true)
+            .await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "a non-admin account does not make the gateway administrable"
+        );
+
+        let admin = app
+            .create_user("boss@example.com", crate::auth::Role::Admin, true)
+            .await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            1,
+            "an active real administrator closes setup"
+        );
+
+        sqlx::query("UPDATE users SET is_active = 0 WHERE id = ?")
+            .bind(&admin)
+            .execute(&app.state.pool)
+            .await
+            .expect("deactivate");
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "a deactivated administrator does not count"
+        );
     }
 
     #[tokio::test]

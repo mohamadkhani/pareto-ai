@@ -9,6 +9,7 @@ mod bootstrap;
 mod breaker;
 mod catalog;
 mod chat;
+mod cli;
 mod combos;
 mod config;
 mod connectors;
@@ -105,20 +106,29 @@ async fn main() -> Result<()> {
     let config = Arc::new(Config::from_env().context("reading configuration")?);
 
     // Operator commands run without serving (no master key needed: rollups
-    // hold no secrets). `gateway rebuild-rollups` re-derives `usage_daily`
-    // from `usage_events` and exits.
-    if std::env::args().nth(1).as_deref() == Some("rebuild-rollups") {
-        let pool = db::open(&config.database_path())
-            .await
-            .context("starting database")?;
-        let stats = reports::rebuild_rollups(&pool, config.tz)
-            .await
-            .context("rebuilding usage rollups")?;
-        println!(
-            "rebuilt usage_daily: {} rows from {} usage_events",
-            stats.rows, stats.events
-        );
-        return Ok(());
+    // hold no secrets, and the password reset only needs the database).
+    // `gateway rebuild-rollups` re-derives `usage_daily` from `usage_events`;
+    // `gateway reset-password` is the recovery path for a lost admin password
+    // (D56). Both exit without starting the server.
+    match std::env::args().nth(1).as_deref() {
+        Some("rebuild-rollups") => {
+            let pool = db::open(&config.database_path())
+                .await
+                .context("starting database")?;
+            let stats = reports::rebuild_rollups(&pool, config.tz)
+                .await
+                .context("rebuilding usage rollups")?;
+            println!(
+                "rebuilt usage_daily: {} rows from {} usage_events",
+                stats.rows, stats.events
+            );
+            return Ok(());
+        }
+        Some("reset-password") => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            return cli::run_reset_password(&config, &args).await;
+        }
+        _ => {}
     }
     // Credential encryption needs a key from the very first request. An
     // explicit `GATEWAY_MASTER_KEY` wins; otherwise the key is read from (or

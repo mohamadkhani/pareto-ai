@@ -1026,6 +1026,81 @@ for humans; [`AGENTS.md`](../../AGENTS.md) keeps the engineering rules and point
 there, without assistant-specific phrasing. GitHub is the canonical remote (it
 hosts CI and releases); Gitea remains a mirror.
 
+### D56. A forgotten admin password is reset by a local operator command
+
+**Decision (2026-11-20):** `gateway reset-password [--email <address>]
+[--data-dir <path>]` resets one account's password directly against the SQLite
+file. It reads the new password from a hidden terminal prompt (or one line on
+`stdin` when it is not a terminal), never from an argument or environment
+variable. In one transaction it deletes the account's sessions, revokes its
+live API keys, flags forced rotation, and writes an `auth.password_reset_cli`
+audit row with a `NULL` actor.
+
+**Why:** with no public signup and no email delivery (D2), the last admin
+forgetting the password is the remaining hard lockout. Filesystem access to the
+data directory already implies control of `gateway.db` and `master.key`, so a
+local command adds no trust boundary, while any remote recovery path would.
+Reusing the admin-reset rules (D23) keeps revocation consistent. Alternatives
+rejected: a loopback HTTP reset endpoint (any local process or web page could
+reach it), extending `GATEWAY_ADMIN_PASSWORD` to update existing accounts
+(persists in service configuration and would reset on restart), a
+recovery-token file (same trust as the CLI with more moving parts), and deleting
+the user row (loses audit attribution and account data).
+
+**Consequence:** recovery requires filesystem access on the host and the binary
+from the same release, because opening the database applies migrations. The
+desktop app's data directory must be passed explicitly. The command does not
+reactivate a deactivated account; that still needs an admin.
+
+### D57. Setup closes at the first active administrator, and the last one cannot be removed
+
+**Decision (2026-11-20):** the first-admin/setup path is refused only when an
+**active real administrator** exists (`is_placeholder = 0`, `role = 'admin'`,
+`is_active = 1`), not when any account exists. `PATCH /api/users/{id}` likewise
+refuses to deactivate or demote the last active real administrator with
+`409 last_active_admin`.
+
+**Why:** skipping setup leaves the gateway as a trusted local operator, and the
+console lets that operator create accounts before setting a password. With the
+old "any account" gate, creating a normal user closed the first-admin path in
+the same process; after the next restart the database was `protected` with no
+administrator, and neither Settings nor the CLI could restore one. Checking the
+same invariant from the other side exposed a second route to zero
+administrators: an admin demoting or deactivating themselves.
+
+**Consequence:** a non-admin account no longer closes setup, so Settings can
+still promote the local-operator placeholder and set the first password.
+Removing the last active administrator is a `409`; promote or activate another
+administrator first. A process already in `protected` mode still refuses setup
+mutations, so this does not reopen a finished installation. Databases that
+already contain accounts but no administrator are not repaired automatically:
+their mode is `protected`, and they need a manual role change to recover.
+
+### D58. Accounts cannot be created while the gateway is unprotected
+
+**Decision (2026-11-21):** `POST /api/users` is refused with
+`409 setup_incomplete` while the gateway is in `unprotected` mode. The only way
+out of that mode is the first admin/password (`/api/setup/admin`, exposed as
+Settings), which promotes the local operator.
+
+**Why:** skipping setup lets the local operator use the console without a
+password. Creating any real account in that state flips `resolve_mode` to
+`protected` on the next restart (`real_user_count > 0`), and without an
+administrator the instance has no way in: setup mutations are closed in
+`protected`, the local operator has no password, and the CLI only resets
+existing passwords. Blocking creation is the smallest rule that removes the
+trap without weakening the mode: `protected` still cannot silently fall back to
+`unprotected` when an administrator disappears, and no normal user is promoted
+to administrator against their will.
+
+**Consequence:** the order is fixed: skip setup (optional) → set the first
+password → create accounts. The API answers the Users page with the
+`setup_incomplete` message. The check uses the in-memory mode, not an
+administrator count, so it cannot race with a concurrent first-admin creation:
+an account can never commit while the process still considers itself
+unprotected. Databases that already contain accounts but no administrator
+predate this rule and are not repaired by it.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or
