@@ -6794,8 +6794,9 @@ mod tests {
         assert_eq!(over.body["error"]["code"], "rate_limited");
     }
 
-    /// The grant matrix on the data plane: default deny for users, allow on
-    /// both subjects to pass, deny beats allow.
+    /// The grant matrix on the data plane: default deny for users, a key
+    /// without grants inheriting its owner (D56), explicit key scopes
+    /// intersecting, and deny beating allow.
     #[tokio::test]
     async fn grants_gate_the_data_plane_with_deny_precedence() {
         let stub = Stub::spawn(vec![
@@ -6866,29 +6867,43 @@ mod tests {
         assert_eq!(empty.status, StatusCode::OK);
         assert_eq!(empty.body["data"].as_array().expect("data").len(), 0);
 
-        // Grants on both subjects (the intersection) let the request through.
-        for (subject_type, subject_id) in [
-            ("user", owner.clone()),
-            ("api_key", created.view.id.clone()),
-        ] {
-            crate::access::create_grant(
-                &s.app.state.pool,
-                &actor,
-                &crate::access::GrantInput {
-                    subject_type: subject_type.to_string(),
-                    subject_id,
-                    resource_type: "model".to_string(),
-                    resource_id: model_id.clone(),
-                    mode: "allow".to_string(),
-                },
-            )
-            .await
-            .expect("grant");
-        }
-        let allowed = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
-        assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
+        // Granting the account is enough: a key with no grants of its own
+        // inherits its owner's access (D56).
+        crate::access::create_grant(
+            &s.app.state.pool,
+            &actor,
+            &crate::access::GrantInput {
+                subject_type: "user".to_string(),
+                subject_id: owner.clone(),
+                resource_type: "model".to_string(),
+                resource_id: model_id.clone(),
+                mode: "allow".to_string(),
+            },
+        )
+        .await
+        .expect("user grant");
+        let inherited = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(inherited.status, StatusCode::OK, "{}", inherited.body);
         let visible = send(s.app.router(), listing(&created.key)).await;
         assert_eq!(visible.body["data"].as_array().expect("data").len(), 1);
+
+        // An explicit key grant turns the key into a scope; owner and key both
+        // allowing still passes.
+        crate::access::create_grant(
+            &s.app.state.pool,
+            &actor,
+            &crate::access::GrantInput {
+                subject_type: "api_key".to_string(),
+                subject_id: created.view.id.clone(),
+                resource_type: "model".to_string(),
+                resource_id: model_id.clone(),
+                mode: "allow".to_string(),
+            },
+        )
+        .await
+        .expect("key grant");
+        let allowed = send(s.app.router(), bearer(&created.key, chat_body("m", false))).await;
+        assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.body);
 
         // A deny on the credential beats the model allow.
         crate::access::create_grant(
@@ -7076,8 +7091,9 @@ mod tests {
         .await;
         assert_eq!(ok.status, StatusCode::OK, "{}", ok.body);
 
-        // ...and one refused before anything is sent: a non-admin key with no
-        // grants may not use the only offering (403 access_denied).
+        // ...and one refused before anything is sent: a non-admin account with
+        // no grants may not use the only offering (403 access_denied). Its key
+        // has no grants either, so it inherits the account's deny (D56).
         let denied_user = s
             .app
             .create_user("denied@example.test", Role::User, true)
