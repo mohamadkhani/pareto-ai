@@ -89,11 +89,14 @@ admin has forgotten the password, reset it on the host that holds the database:
 The command prompts for the new password twice (`stdin` provides one line when
 it is not a terminal, for containers). It deletes the account's sessions,
 revokes its live API keys, and forces a new password at the next sign-in (D56).
-The password is never accepted as an argument, so it cannot leak through shell
-history or `ps`. Run the binary from the same release as the server, because
-opening the database applies migrations. The desktop build keeps its data under
-the OS application-data directory listed in [`docs/desktop.md`](docs/desktop.md);
-point `--data-dir` there to reset the sidecar's database.
+The password is never accepted as an argument, so the gateway's own command line
+cannot leak it through `ps` or shell history. When stdin is a pipe, read the
+value from a file or a secret mount: a literal such as `echo '…' | gateway
+reset-password` is recorded by the shell that runs it. Run the binary from the
+same release as the server, because opening the database applies migrations. The
+desktop build keeps its data under the OS application-data directory listed in
+[`docs/desktop.md`](docs/desktop.md); point `--data-dir` there to reset the
+sidecar's database.
 
 ### HTTPS on a domain
 

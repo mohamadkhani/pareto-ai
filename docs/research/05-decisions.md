@@ -1050,15 +1050,21 @@ the user row (loses audit attribution and account data).
 **Consequence:** recovery requires filesystem access on the host and the binary
 from the same release, because opening the database applies migrations. The
 desktop app's data directory must be passed explicitly. The command does not
-reactivate a deactivated account; that still needs an admin.
+reactivate a deactivated account; that still needs an admin. Its audit row has a
+`NULL` actor and `insecure = 0`, because the target is always a real account
+(so the database resolves to `protected`) and the offline process cannot know
+the live mode; `detail.source = "cli"` identifies the row.
 
 ### D57. Setup closes at the first active administrator, and the last one cannot be removed
 
-**Decision (2026-11-20):** the first-admin/setup path is refused only when an
-**active real administrator** exists (`is_placeholder = 0`, `role = 'admin'`,
-`is_active = 1`), not when any account exists. `PATCH /api/users/{id}` likewise
-refuses to deactivate or demote the last active real administrator with
-`409 last_active_admin`.
+**Decision (2026-11-20):** while the process is not already `protected`, the
+first-admin/setup path is refused when an **active real administrator** exists
+(`is_placeholder = 0`, `role = 'admin'`, `is_active = 1`), not when any account
+exists; a process already in `protected` still refuses every setup mutation.
+The administrator guard is repeated inside the promoting and inserting
+statements, so two concurrent wizard requests cannot both create an
+administrator. `PATCH /api/users/{id}` likewise refuses to deactivate or demote
+the last active real administrator with `409 last_active_admin`.
 
 **Why:** skipping setup leaves the gateway as a trusted local operator, and the
 console lets that operator create accounts before setting a password. With the
@@ -1079,9 +1085,10 @@ their mode is `protected`, and they need a manual role change to recover.
 ### D58. Accounts cannot be created while the gateway is unprotected
 
 **Decision (2026-11-21):** `POST /api/users` is refused with
-`409 setup_incomplete` while the gateway is in `unprotected` mode. The only way
-out of that mode is the first admin/password (`/api/setup/admin`, exposed as
-Settings), which promotes the local operator.
+`409 setup_incomplete` while the gateway is in `unprotected` mode. The rule
+lives in `users::create_user`, so every caller inherits it. The only way out of
+that mode is the first admin/password (`/api/setup/admin`, exposed as Settings),
+which promotes the local operator.
 
 **Why:** skipping setup lets the local operator use the console without a
 password. Creating any real account in that state flips `resolve_mode` to
@@ -1094,12 +1101,13 @@ trap without weakening the mode: `protected` still cannot silently fall back to
 to administrator against their will.
 
 **Consequence:** the order is fixed: skip setup (optional) → set the first
-password → create accounts. The API answers the Users page with the
-`setup_incomplete` message. The check uses the in-memory mode, not an
-administrator count, so it cannot race with a concurrent first-admin creation:
-an account can never commit while the process still considers itself
-unprotected. Databases that already contain accounts but no administrator
-predate this rule and are not repaired by it.
+password → create accounts. While unprotected, the Users page disables
+**New user** and points at Settings; the API answers `409 setup_incomplete` if
+it is called anyway. The check uses the in-memory mode, not an administrator
+count, so it cannot race with a concurrent first-admin creation: an account can
+never commit while the process still considers itself unprotected. Databases
+that already contain accounts but no administrator predate this rule and are not
+repaired by it.
 
 ## Open questions
 

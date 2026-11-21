@@ -286,6 +286,10 @@ pub async fn update_user(
         .as_deref()
         .map(validate_password)
         .transpose()?;
+    // Hashed before the transaction, which must stay write-first (review m3):
+    // a patch the D57 guard later refuses with `409` still pays one hash. The
+    // alternative — a read before the `UPDATE` — is the snapshot upgrade that
+    // order exists to avoid.
     let password_hash = match (&patch.password, password_hash) {
         (Some(password), _) => Some(password::hash_password_offload(password.clone()).await?),
         (None, _) => None,
