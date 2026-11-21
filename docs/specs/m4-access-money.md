@@ -78,9 +78,9 @@ usage_daily(day TEXT NOT NULL, user_id TEXT NOT NULL, offering_id TEXT NOT NULL,
 
 - Effective access = the owner's grant verdict; when the key has grant rows of
   its own, it intersects with the key's verdict (a key may narrow the account,
-  never widen it). A key with no grants inherits its owner. `deny` beats
-  `allow`; no grants at all means "everything" for admins and "nothing" for
-  users? **No:** default is allow for `admin`, deny-unless-granted for `user`.
+  never widen it). A key with no grants inherits its owner (D59). `deny` beats
+  `allow`; with no matching rows the role default applies: allow for `admin`,
+  deny-unless-granted for `user`.
 - Admin screens/API for grants; every change audited.
 
 ### Money (D7, D8)

@@ -1156,10 +1156,27 @@ console's create-key flow has no grant step, so requiring a separate grant set
 for every key produced keys that were denied on arrival until an admin
 duplicated the account's grants by hand.
 
-**Consequence:** granting an account covers every key it creates. To scope one
-key (for example, a CI key limited to a single model), add grant rows for that
-key; that turns it into an explicit scope. A key with only `deny` rows denies
-everything, matching the previous explicit-set behaviour. Key-level scoping is
+**Consequence:** granting an account covers every key it creates. This includes
+keys that already existed with no grants: a zero-grant key that was inert
+before this change becomes live with its owner's access. Before deploying, list
+them:
+
+```sql
+SELECT k.id, k.prefix, k.user_id, k.last_used_at
+FROM api_keys k
+WHERE k.revoked_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM grants g
+                  WHERE g.subject_type = 'api_key' AND g.subject_id = k.id);
+```
+
+To scope one key (for example, a CI key limited to a single model), add grant
+rows for that key; it then becomes an explicit scope. For a `user` account the
+first key grant replaces inheritance for every resource, so a key that must keep
+the account's other models needs `allow` rows for them too. An admin's key is
+already allowed by default, so only `deny` rows restrict it and `allow` rows
+change nothing. A `user`-owned key with only `deny` rows therefore denies
+everything, matching the previous explicit-set behaviour; an admin-owned key
+with a `deny` row allows everything except that resource. Key-level scoping is
 not a security boundary while users may create their own keys: a user can
 always mint a key without grants. It limits blast radius for admin-issued keys.
 This supersedes the "effective access = user verdict AND key verdict" sentence

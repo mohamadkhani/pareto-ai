@@ -9,11 +9,11 @@
 //! 2. else any `allow` row matching one of them allows,
 //! 3. else the subject's role default: **allow for `admin`, deny for `user`**.
 //!
-//! The effective verdict is the intersection over subjects: the user must be
-//! allowed **and**, when the request authenticated with an API key, the key
-//! must be allowed too. A key of a `user` therefore needs explicit grants on
-//! both subjects; an admin's requests are allowed by default and only a
-//! `deny` row can restrict them.
+//! The effective verdict: the owner's verdict always applies. A key with no
+//! grant rows of its own inherits the owner's verdict (D59), so granting the
+//! account covers every key it creates. A key with at least one row is an
+//! explicit scope and intersects with the owner: it can narrow the account but
+//! never widen it, and a `deny` row on either subject still wins.
 //!
 //! Every mutation writes its `audit_log` row in the same transaction
 //! (`grant.create` / `grant.delete`).
