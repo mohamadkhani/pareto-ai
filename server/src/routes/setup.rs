@@ -126,7 +126,7 @@ pub async fn create_admin(
     setup::create_first_admin(&state.pool, &request.email, &request.password, &ip.0)
         .await
         .map_err(|e| match e {
-            SetupError::AlreadyComplete => already_complete(rid.clone()),
+            SetupError::AlreadyComplete => already_complete(rid.clone(), FIRST_ADMIN_EXISTS),
             SetupError::Invalid(message) => {
                 ApiError::bad_request(message).with_request_id(rid.clone())
             }
@@ -209,7 +209,7 @@ pub async fn skip(
     setup::mark_skipped(&state.pool, &ip.0)
         .await
         .map_err(|e| match e {
-            SetupError::AlreadyComplete => already_complete(rid.clone()),
+            SetupError::AlreadyComplete => already_complete(rid.clone(), ANY_ACCOUNT_EXISTS),
             other => ApiError::internal("recording the setup skip", other).with_request_id(rid),
         })?;
     state.setup.set_mode(Mode::Unprotected);
@@ -223,13 +223,19 @@ pub async fn skip(
 /// Rejects a setup mutation once any account exists or the mode moved on.
 async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
     if state.setup.mode().is_protected() {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(
+            rid.clone(),
+            "an account already exists; sign in instead",
+        ));
     }
     let users = setup::real_user_count(&state.pool)
         .await
         .map_err(|e| ApiError::internal("counting users", e).with_request_id(rid.clone()))?;
     if users > 0 {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(
+            rid.clone(),
+            "an account already exists; sign in instead",
+        ));
     }
     Ok(())
 }
@@ -240,24 +246,26 @@ async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(),
 /// no administrator (D57).
 async fn ensure_first_admin_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
     if state.setup.mode().is_protected() {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(rid.clone(), FIRST_ADMIN_EXISTS));
     }
     let admins = setup::real_admin_count(&state.pool).await.map_err(|e| {
         ApiError::internal("counting administrators", e).with_request_id(rid.clone())
     })?;
     if admins > 0 {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(rid.clone(), FIRST_ADMIN_EXISTS));
     }
     Ok(())
 }
 
-fn already_complete(rid: Option<String>) -> ApiError {
-    ApiError::custom(
-        StatusCode::CONFLICT,
-        "setup_already_complete",
-        "an account already exists; sign in instead",
-    )
-    .with_request_id(rid)
+/// The `409` message for the first-admin path: unlike `skip`, a non-admin
+/// account does not close it, so naming "an account" would be wrong.
+const FIRST_ADMIN_EXISTS: &str = "an active administrator already exists; sign in instead";
+
+/// The `409` message for `skip`, which is closed by any real account.
+const ANY_ACCOUNT_EXISTS: &str = "an account already exists; sign in instead";
+
+fn already_complete(rid: Option<String>, message: &'static str) -> ApiError {
+    ApiError::custom(StatusCode::CONFLICT, "setup_already_complete", message).with_request_id(rid)
 }
 
 /// The status body for one request's locality.
@@ -374,6 +382,14 @@ mod tests {
         .await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         assert_eq!(again.body["error"]["code"], "setup_already_complete");
+        assert!(
+            again.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active administrator"),
+            "the first-admin path names an administrator, not any account: {}",
+            again.body
+        );
     }
 
     #[tokio::test]
@@ -686,6 +702,14 @@ mod tests {
         .await;
         assert_eq!(skipped.status, StatusCode::CONFLICT);
         assert_eq!(skipped.body["error"]["code"], "setup_already_complete");
+        assert!(
+            skipped.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("an account already exists"),
+            "skip is closed by any account: {}",
+            skipped.body
+        );
 
         let created = send(
             router.clone(),

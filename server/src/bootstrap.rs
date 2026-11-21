@@ -136,16 +136,9 @@ pub async fn ensure_admin_with(
     // Keys minted while the gateway had no password belong to the promoted row
     // and must not inherit the administrator's `/v1` access (D23).
     let api_keys_revoked = if promoted {
-        sqlx::query(
-            "UPDATE api_keys SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
-               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-             WHERE user_id = ? AND revoked_at IS NULL",
-        )
-        .bind(&user_id)
-        .execute(&mut *tx)
-        .await
-        .context("revoking the local operator API keys")?
-        .rows_affected()
+        crate::users::revoke_live_api_keys(&mut *tx, &user_id)
+            .await
+            .context("revoking the local operator API keys")?
     } else {
         0
     };

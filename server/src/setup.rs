@@ -133,6 +133,8 @@ pub async fn real_user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
 
 /// Number of active, real administrators. Setup stays open until one exists:
 /// a non-admin account does not make the gateway administrable (D57).
+///
+/// Failure mode: [`sqlx::Error`] when the count query fails.
 pub async fn real_admin_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM users \
@@ -279,15 +281,7 @@ pub async fn create_first_admin(
     // and would otherwise inherit the new administrator's `/v1` access (D23).
     // The insert path has no keys by construction.
     let api_keys_revoked = if promoted {
-        sqlx::query(
-            "UPDATE api_keys SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
-               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
-             WHERE user_id = ? AND revoked_at IS NULL",
-        )
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
+        crate::users::revoke_live_api_keys(&mut *tx, &id).await?
     } else {
         0
     };
