@@ -21,11 +21,10 @@
 //!   ([`crate::breaker`], per (credential, offering)) excludes an open pair
 //!   entirely; see its module docs for how it layers with the M3 cooldown.
 //!   Access grants (M4, decisions D9 and D59) then filter the candidates: the
-//!   user's verdict always applies, and the key's own verdict applies too when
-//!   the key has grant rows of its own — a key without grants inherits the
-//!   user's verdict, so it can narrow that verdict but never widen it. Before
-//!   forwarding, the request's estimate is reserved against the user's budgets
-//!   and token caps (decision D7).
+//!   user's verdict always applies. A key without grants inherits it; a key
+//!   with its own grants applies on top and can narrow that verdict but never
+//!   widen it. Before forwarding, the request's estimate is reserved against
+//!   the user's budgets and token caps (decision D7).
 //! * **Failover**: only before the first byte reaches the client — before the
 //!   first upstream chunk is forwarded for streams, before the response is
 //!   returned for buffered calls. `400`/`422` never fail over. A failure
