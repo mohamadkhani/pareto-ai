@@ -117,7 +117,9 @@ systemctl start pareto-gateway
 
 Stop the gateway first so this write does not race the server's own connection.
 The account then signs in with the password from the reset; forced rotation is
-still set, so it chooses a new password at sign-in.
+still set, so it chooses a new password at sign-in. Packaged Arch installs keep
+the database under `/var/lib/pareto-gateway` (the unit sets
+`GATEWAY_DATA_DIR`), so use that directory instead of `/srv/pareto/data`.
 
 ### HTTPS on a domain
 

@@ -100,6 +100,8 @@ pub enum SetupError {
     Invalid(String),
     #[error("the first admin account already exists")]
     AlreadyComplete,
+    #[error("an account with this email already exists")]
+    EmailTaken,
     #[error("audit write failed: {0}")]
     Audit(#[from] crate::auth::AuthError),
     #[error("password hashing failed: {0}")]
@@ -208,7 +210,8 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
 /// no password must not inherit the administrator's `/v1` access (D23).
 ///
 /// Failure mode: [`SetupError::AlreadyComplete`] when an active real
-/// administrator exists, [`SetupError::Invalid`] for a bad email or a
+/// administrator exists, [`SetupError::EmailTaken`] when the email already
+/// belongs to an account, [`SetupError::Invalid`] for a bad email or a
 /// too-short password.
 pub async fn create_first_admin(
     pool: &SqlitePool,
@@ -254,7 +257,16 @@ pub async fn create_first_admin(
     .bind(&password_hash)
     .bind(crate::auth::LOCAL_OPERATOR_ID)
     .fetch_optional(&mut *tx)
-    .await?;
+    .await;
+    let promoted = match promoted {
+        Ok(row) => row,
+        // The new email can belong to an existing real account; the unique
+        // constraint then fires on this promotion, not just the insert below.
+        Err(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
+            return Err(SetupError::EmailTaken);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let (id, promoted) = match promoted {
         Some((id,)) => (id, true),
         None => {
@@ -273,7 +285,14 @@ pub async fn create_first_admin(
             .bind(&email)
             .bind(&password_hash)
             .execute(&mut *tx)
-            .await?;
+            .await;
+            let inserted = match inserted {
+                Ok(result) => result,
+                Err(sqlx::Error::Database(ref db)) if db.is_unique_violation() => {
+                    return Err(SetupError::EmailTaken);
+                }
+                Err(error) => return Err(error.into()),
+            };
             if inserted.rows_affected() == 0 {
                 return Err(SetupError::AlreadyComplete);
             }

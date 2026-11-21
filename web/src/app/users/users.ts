@@ -160,11 +160,6 @@ export class Users {
   protected async reload(): Promise<void> {
     this.loading.set(true);
     this.loadError.set(null);
-    // The constructor reads the status once; a failed load leaves it null, so
-    // Refresh is also the retry for it.
-    if (this.setup.status() === null) {
-      void this.setup.load().catch(() => undefined);
-    }
     try {
       this.users.set(await this.usersService.list());
     } catch (err) {
@@ -172,6 +167,16 @@ export class Users {
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /**
+   * The Refresh button: re-reads the setup status as well, because it can move
+   * outside this tab (the CLI bootstrap, another tab, or a failed first load)
+   * and a stale `unprotected` keeps creation disabled.
+   */
+  protected async refresh(): Promise<void> {
+    void this.setup.load(true).catch(() => undefined);
+    await this.reload();
   }
 
   protected openCreate(): void {

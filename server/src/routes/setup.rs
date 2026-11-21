@@ -108,7 +108,7 @@ pub async fn status(State(state): State<AppState>, request: Request) -> Json<Set
         (status = 200, description = "first admin created; sets the gateway_session cookie", body = LoginResponse),
         (status = 400, description = "invalid email, too-short password, or malformed body", body = ErrorBody),
         (status = 403, description = "not a local request", body = ErrorBody),
-        (status = 409, description = "an active real administrator already exists; sign in instead", body = ErrorBody)
+        (status = 409, description = "an active real administrator or an account with this email already exists", body = ErrorBody)
     )
 )]
 pub async fn create_admin(
@@ -128,6 +128,9 @@ pub async fn create_admin(
         .await
         .map_err(|e| match e {
             SetupError::AlreadyComplete => already_complete(rid.clone(), FIRST_ADMIN_EXISTS),
+            SetupError::EmailTaken => {
+                crate::users::UserError::EmailTaken.into_api_error(rid.clone())
+            }
             SetupError::Invalid(message) => {
                 ApiError::bad_request(message).with_request_id(rid.clone())
             }
@@ -224,19 +227,13 @@ pub async fn skip(
 /// Rejects a setup mutation once any account exists or the mode moved on.
 async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
     if state.setup.mode().is_protected() {
-        return Err(already_complete(
-            rid.clone(),
-            "an account already exists; sign in instead",
-        ));
+        return Err(already_complete(rid.clone(), ANY_ACCOUNT_EXISTS));
     }
     let users = setup::real_user_count(&state.pool)
         .await
         .map_err(|e| ApiError::internal("counting users", e).with_request_id(rid.clone()))?;
     if users > 0 {
-        return Err(already_complete(
-            rid.clone(),
-            "an account already exists; sign in instead",
-        ));
+        return Err(already_complete(rid.clone(), ANY_ACCOUNT_EXISTS));
     }
     Ok(())
 }
@@ -722,6 +719,41 @@ mod tests {
         )
         .await;
         assert_eq!(created.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_taken_first_admin_email_is_a_409_not_a_500() {
+        let app = TestApp::unprotected().await;
+        app.create_user("taken@example.com", crate::auth::Role::User, true)
+            .await;
+
+        let refused = send(
+            app.router(),
+            post_local(
+                "/api/setup/admin",
+                serde_json::json!({
+                    "email": "taken@example.com",
+                    "password": "first-admin-password",
+                }),
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "conflict");
+        assert_eq!(app.state.setup.mode(), Mode::Unprotected);
+        assert_eq!(
+            crate::setup::real_admin_count(&app.state.pool)
+                .await
+                .expect("count"),
+            0
+        );
+        let placeholder: i64 = sqlx::query_scalar("SELECT is_placeholder FROM users WHERE id = ?")
+            .bind(crate::auth::LOCAL_OPERATOR_ID)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("placeholder");
+        assert_eq!(placeholder, 1, "the failed promotion rolled back");
     }
 
     #[tokio::test]

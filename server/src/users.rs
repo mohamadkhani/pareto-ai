@@ -392,9 +392,9 @@ pub async fn update_user(
     .fetch_optional(&mut *tx)
     .await?;
     if updated.is_none() {
-        // The guard and the existence check share one statement; a miss means
-        // "no such row", "the local operator", or "refused to remove the last
-        // administrator".
+        // The write's `WHERE` is `id = ? AND is_placeholder = 0` plus the guard,
+        // so a real row can only miss because the guard refused: `LastAdmin` is
+        // exact here, not a fallback for any other zero-row outcome.
         let row: Option<(String, i64)> =
             sqlx::query_as("SELECT id, is_placeholder FROM users WHERE id = ?")
                 .bind(user_id)

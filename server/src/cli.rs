@@ -90,8 +90,10 @@ async fn run_reset_password_with(
         println!(
             "The account is deactivated: it still cannot sign in until an admin activates it."
         );
+        println!("After activation it must choose a new password at its next sign-in.");
+    } else {
+        println!("The account must choose a new password at its next sign-in.");
     }
-    println!("The account must choose a new password at its next sign-in.");
     Ok(())
 }
 

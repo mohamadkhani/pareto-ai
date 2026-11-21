@@ -189,6 +189,23 @@ describe('Users', () => {
     expect(root.querySelector('ui-dialog')).toBeNull();
   });
 
+  it('refreshes the setup status from the Refresh button', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create('admin', 'unprotected');
+    const root = fixture.nativeElement as HTMLElement;
+    expect(buttonByText(root, 'New user').disabled).toBe(true);
+
+    // The status moved in another tab or through the CLI bootstrap.
+    fetchMock.respond(jsonResponse(200, { ...setupStatus, mode: 'protected' }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    buttonByText(root, 'Refresh').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(buttonByText(root, 'New user').disabled).toBe(false);
+    expect(root.textContent).not.toContain('Account creation is off');
+  });
+
   it('lists accounts with role, status, and rotation badges', async () => {
     fetchMock.respond(
       jsonResponse(200, [
