@@ -204,11 +204,9 @@ export class Settings {
     try {
       await this.setup.createAdmin(this.firstEmail().trim(), this.firstPassword());
     } catch (err) {
-      this.errorMessage.set(
-        err instanceof ApiError && err.code === 'setup_already_complete'
-          ? 'An account already exists. Reload the page to see the current state.'
-          : describeError(err),
-      );
+      // The server names the reason (`setup_already_complete` now means an
+      // active administrator exists); show it instead of a stale copy.
+      this.errorMessage.set(describeError(err));
       this.settingPassword.set(false);
       return;
     }

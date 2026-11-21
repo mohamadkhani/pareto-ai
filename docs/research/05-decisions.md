@@ -1026,6 +1026,120 @@ for humans; [`AGENTS.md`](../../AGENTS.md) keeps the engineering rules and point
 there, without assistant-specific phrasing. GitHub is the canonical remote (it
 hosts CI and releases); Gitea remains a mirror.
 
+### D56. A forgotten admin password is reset by a local operator command
+
+**Decision (2026-11-20):** `gateway reset-password [--email <address>]
+[--data-dir <path>]` resets one account's password directly against the SQLite
+file. It reads the new password from a hidden terminal prompt (or one line on
+`stdin` when it is not a terminal), never from an argument or environment
+variable. In one transaction it deletes the account's sessions, revokes its
+live API keys, flags forced rotation, and writes an `auth.password_reset_cli`
+audit row with a `NULL` actor.
+
+**Why:** with no public signup and no email delivery (D2), the last admin
+forgetting the password is the remaining hard lockout. Filesystem access to the
+data directory already implies control of `gateway.db` and `master.key`, so a
+local command adds no trust boundary, while any remote recovery path would.
+Reusing the admin-reset rules (D23) keeps revocation consistent. Alternatives
+rejected: a loopback HTTP reset endpoint (any local process or web page could
+reach it), extending `GATEWAY_ADMIN_PASSWORD` to update existing accounts
+(persists in service configuration and would reset on restart), a
+recovery-token file (same trust as the CLI with more moving parts), and deleting
+the user row (loses audit attribution and account data).
+
+**Consequence:** recovery requires filesystem access on the host and the binary
+from the same release, because opening the database applies migrations. The
+command resolves only `GATEWAY_DATA_DIR` (or `--data-dir`) and runs before the
+rest of the configuration is parsed, so a malformed timezone, timeout, or master
+key cannot block recovery. The desktop app's data directory must be passed
+explicitly. The command does not reactivate a deactivated account; that still
+needs an admin. Its audit row has a `NULL` actor, and `insecure = 0` because
+`auth::audit` derives that column from the actor row with
+`COALESCE((SELECT is_placeholder FROM users WHERE id = ?), 0)`, which a `NULL`
+actor leaves at `0`; `detail.source = "cli"` identifies the row.
+
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa).
+
+### D57. Setup closes at the first active administrator, and the last one cannot be removed
+
+**Decision (2026-11-20):** while the process is not already `protected`, the
+first-admin/setup path is refused when an **active real administrator** exists
+(`is_placeholder = 0`, `role = 'admin'`, `is_active = 1`), not when any account
+exists; a process already in `protected` still refuses every setup mutation.
+The administrator guard is repeated inside the promoting and inserting
+statements, so two concurrent wizard requests cannot both create an
+administrator. The promotion forces `role = 'admin'` and `is_active = 1` and
+revokes the local operator's live API keys, so the first password always yields
+exactly one active administrator and no credential minted without a password
+survives it. `PATCH /api/users/{id}` refuses a valid patch to the placeholder
+with `409 local_operator` (invalid input is a `400` first), and refuses to
+deactivate or demote the last active real administrator with
+`409 last_active_admin`.
+
+**Why:** skipping setup leaves the gateway as a trusted local operator, and the
+console lets that operator create accounts before setting a password. With the
+old "any account" gate, creating a normal user closed the first-admin path in
+the same process; after the next restart the database was `protected` with no
+administrator, and neither Settings nor the CLI could restore one. Checking the
+same invariant from the other side exposed a second route to zero
+administrators: an admin demoting or deactivating themselves.
+
+**Consequence:** within one process, a non-admin account no longer closes
+setup, so Settings can still promote the local-operator placeholder and set the
+first password. After a restart `resolve_mode` sees any real account and reports
+`protected`, so a database with only non-admin accounts cannot reach that path;
+recover it with `gateway reset-password` and a direct role change (README).
+Removing the last active administrator is a `409`; promote or activate another
+administrator first. The placeholder is also filtered out of `GET /api/users`,
+so the console never offers Edit or Deactivate for the one row the API refuses
+to patch. A process already in `protected` mode still refuses setup mutations,
+so this does not reopen a finished installation. The promotion repairs a
+placeholder that an older build (or direct database access) demoted or
+deactivated: role and status are forced. API keys minted while the gateway had no
+password are revoked in the same transaction — after promotion they would act
+with the administrator's `/v1` access (D23), so create new keys after setting the
+password. Databases that already contain accounts but no administrator are not
+repaired automatically: their mode is `protected`, and they need a manual role
+change to recover.
+
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa)
+and tightened by [`eb2ae47`](https://github.com/mohamadkhani/pareto-ai/commit/eb2ae473f4facf451dde5da7e68fb8542f7416ee).
+
+### D58. Accounts cannot be created while the gateway is unprotected
+
+**Decision (2026-11-21):** `POST /api/users` is refused with
+`409 setup_incomplete` while the gateway is in `unprotected` mode. The rule
+lives in `users::create_user`, so every caller inherits it. The only console or
+HTTP way out of that mode is the first admin/password (`/api/setup/admin`,
+exposed as Settings), which promotes the local operator;
+`GATEWAY_ADMIN_EMAIL` plus `GATEWAY_ADMIN_PASSWORD` also promote the placeholder
+during startup (`bootstrap::ensure_admin`, before `resolve_mode`).
+
+**Why:** skipping setup lets the local operator use the console without a
+password. Creating any real account in that state flips `resolve_mode` to
+`protected` on the next restart (`real_user_count > 0`), and without an
+administrator the instance has no way in: setup mutations are closed in
+`protected`, the local operator has no password, and the CLI only resets
+existing passwords. Blocking creation is the smallest rule that removes the
+trap without weakening the mode: `protected` still cannot silently fall back to
+`unprotected` when an administrator disappears, and no normal user is promoted
+to administrator against their will.
+
+**Consequence:** the order is fixed: skip setup (optional) → set the first
+password → create accounts. While unprotected, the Users page disables
+**New user** and points at Settings; the API answers `409 setup_incomplete` if
+it is called anyway. The check uses the in-memory mode, not an administrator
+count, so it cannot race with a concurrent first-admin creation: an account can
+never commit while the process still considers itself unprotected. Databases
+that already contain accounts but no administrator predate this rule and are not
+repaired by it.
+
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa);
+the service-level gate is [`4d0a14f`](https://github.com/mohamadkhani/pareto-ai/commit/4d0a14fcbbbe3fe1cb1f826200129f0e148f5d02).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

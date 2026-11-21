@@ -3,10 +3,11 @@
 //! These routes are unauthenticated by necessity (there is no account yet).
 //! `GET /api/setup/status` is readable from anywhere: the console needs it to
 //! render the exposure banner, and it carries no secrets. The two mutations are
-//! **loopback-only** (desktop-wrapper origins count as local) and only work
-//! while no user exists; a request from the network gets `403
-//! setup_local_only`, a second attempt after the admin exists gets `409
-//! setup_already_complete`.
+//! **loopback-only** (desktop-wrapper origins count as local). `skip` only works
+//! while no real account exists; `admin` works while no **active real
+//! administrator** exists, so a non-admin account does not close that path
+//! (D57). A request from the network gets `403 setup_local_only`; a mutation the
+//! current state does not allow gets `409 setup_already_complete`.
 //!
 //! `POST /api/setup/admin` is also the "set a password" action of the Settings
 //! page while the gateway is unprotected. It creates the first admin, logs the
@@ -106,8 +107,8 @@ pub async fn status(State(state): State<AppState>, request: Request) -> Json<Set
     responses(
         (status = 200, description = "first admin created; sets the gateway_session cookie", body = LoginResponse),
         (status = 400, description = "invalid email, too-short password, or malformed body", body = ErrorBody),
-        (status = 403, description = "not a local request, or setup already skipped and no local admin exists", body = ErrorBody),
-        (status = 409, description = "an account already exists", body = ErrorBody)
+        (status = 403, description = "not a local request", body = ErrorBody),
+        (status = 409, description = "an active real administrator already exists; sign in instead", body = ErrorBody)
     )
 )]
 pub async fn create_admin(
@@ -122,12 +123,11 @@ pub async fn create_admin(
         tracing::debug!(error = %e, "setup admin body rejected");
         ApiError::bad_request("invalid request body").with_request_id(rid.clone())
     })?;
-    ensure_setup_open(&state, &rid).await?;
-
+    ensure_first_admin_open(&state, &rid).await?;
     setup::create_first_admin(&state.pool, &request.email, &request.password, &ip.0)
         .await
         .map_err(|e| match e {
-            SetupError::AlreadyComplete => already_complete(rid.clone()),
+            SetupError::AlreadyComplete => already_complete(rid.clone(), FIRST_ADMIN_EXISTS),
             SetupError::Invalid(message) => {
                 ApiError::bad_request(message).with_request_id(rid.clone())
             }
@@ -210,7 +210,7 @@ pub async fn skip(
     setup::mark_skipped(&state.pool, &ip.0)
         .await
         .map_err(|e| match e {
-            SetupError::AlreadyComplete => already_complete(rid.clone()),
+            SetupError::AlreadyComplete => already_complete(rid.clone(), ANY_ACCOUNT_EXISTS),
             other => ApiError::internal("recording the setup skip", other).with_request_id(rid),
         })?;
     state.setup.set_mode(Mode::Unprotected);
@@ -224,24 +224,49 @@ pub async fn skip(
 /// Rejects a setup mutation once any account exists or the mode moved on.
 async fn ensure_setup_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
     if state.setup.mode().is_protected() {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(
+            rid.clone(),
+            "an account already exists; sign in instead",
+        ));
     }
     let users = setup::real_user_count(&state.pool)
         .await
         .map_err(|e| ApiError::internal("counting users", e).with_request_id(rid.clone()))?;
     if users > 0 {
-        return Err(already_complete(rid.clone()));
+        return Err(already_complete(
+            rid.clone(),
+            "an account already exists; sign in instead",
+        ));
     }
     Ok(())
 }
 
-fn already_complete(rid: Option<String>) -> ApiError {
-    ApiError::custom(
-        StatusCode::CONFLICT,
-        "setup_already_complete",
-        "an account already exists; sign in instead",
-    )
-    .with_request_id(rid)
+/// Rejects the first-admin mutation once an active real administrator exists
+/// or the mode moved on. A non-admin account deliberately keeps this path open:
+/// creating a user before setting a password must not strand the gateway with
+/// no administrator (D57).
+async fn ensure_first_admin_open(state: &AppState, rid: &Option<String>) -> Result<(), ApiError> {
+    if state.setup.mode().is_protected() {
+        return Err(already_complete(rid.clone(), FIRST_ADMIN_EXISTS));
+    }
+    let admins = setup::real_admin_count(&state.pool).await.map_err(|e| {
+        ApiError::internal("counting administrators", e).with_request_id(rid.clone())
+    })?;
+    if admins > 0 {
+        return Err(already_complete(rid.clone(), FIRST_ADMIN_EXISTS));
+    }
+    Ok(())
+}
+
+/// The `409` message for the first-admin path: unlike `skip`, a non-admin
+/// account does not close it, so naming "an account" would be wrong.
+const FIRST_ADMIN_EXISTS: &str = "an active administrator already exists; sign in instead";
+
+/// The `409` message for `skip`, which is closed by any real account.
+const ANY_ACCOUNT_EXISTS: &str = "an account already exists; sign in instead";
+
+fn already_complete(rid: Option<String>, message: &'static str) -> ApiError {
+    ApiError::custom(StatusCode::CONFLICT, "setup_already_complete", message).with_request_id(rid)
 }
 
 /// The status body for one request's locality.
@@ -358,6 +383,14 @@ mod tests {
         .await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         assert_eq!(again.body["error"]["code"], "setup_already_complete");
+        assert!(
+            again.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("active administrator"),
+            "the first-admin path names an administrator, not any account: {}",
+            again.body
+        );
     }
 
     #[tokio::test]
@@ -612,6 +645,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_non_admin_account_does_not_close_the_first_admin_path() {
+        let app = TestApp::unprotected().await;
+        let router = app.router();
+        app.create_user("plain@example.com", crate::auth::Role::User, true)
+            .await;
+
+        let created = send(
+            router.clone(),
+            post_local(
+                "/api/setup/admin",
+                serde_json::json!({
+                    "email": "later@example.com",
+                    "password": "later-admin-password",
+                }),
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        assert_eq!(created.body["user"]["email"], "later@example.com");
+        assert_eq!(created.body["user"]["role"], "admin");
+        assert_eq!(app.state.setup.mode(), Mode::Protected);
+
+        // The placeholder is promoted in place and the normal account stays.
+        let real: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("users");
+        assert_eq!(real, 2);
+        let promoted: String = sqlx::query_scalar("SELECT email FROM users WHERE id = ?")
+            .bind(crate::auth::LOCAL_OPERATOR_ID)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("promoted row");
+        assert_eq!(
+            promoted, "later@example.com",
+            "the placeholder became the administrator"
+        );
+    }
+
+    #[tokio::test]
     async fn skip_is_refused_once_a_user_exists() {
         let app = TestApp::new().await;
         app.create_user("admin@example.com", crate::auth::Role::Admin, true)
@@ -629,6 +703,14 @@ mod tests {
         .await;
         assert_eq!(skipped.status, StatusCode::CONFLICT);
         assert_eq!(skipped.body["error"]["code"], "setup_already_complete");
+        assert!(
+            skipped.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("an account already exists"),
+            "skip is closed by any account: {}",
+            skipped.body
+        );
 
         let created = send(
             router.clone(),
@@ -665,5 +747,100 @@ mod tests {
             assert_eq!(response.body["error"]["code"], "invalid_request");
             assert!(response.body["error"].get("request_id").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn the_first_password_repairs_a_demoted_or_deactivated_placeholder() {
+        // An older build (or direct database access) could leave the placeholder
+        // non-admin or inactive. The promotion must yield an active
+        // administrator regardless; a PATCH cannot reach this state any more.
+        for (role, active) in [("user", 1), ("admin", 0)] {
+            let app = TestApp::unprotected().await;
+            sqlx::query("UPDATE users SET role = ?, is_active = ? WHERE id = ?")
+                .bind(role)
+                .bind(active)
+                .bind(crate::auth::LOCAL_OPERATOR_ID)
+                .execute(&app.state.pool)
+                .await
+                .expect("corrupt the placeholder");
+
+            let created = send(
+                app.router(),
+                post_local(
+                    "/api/setup/admin",
+                    serde_json::json!({
+                        "email": "recovered@example.com",
+                        "password": "recovered-admin-password",
+                    }),
+                    Some("127.0.0.1:5000"),
+                ),
+            )
+            .await;
+            assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+            assert_eq!(
+                created.body["user"]["role"], "admin",
+                "the first password must produce an administrator (role {role}, active {active})"
+            );
+            // `UserSummary` omits `is_active`, so read the stored row.
+            let (stored_role, stored_active): (String, i64) =
+                sqlx::query_as("SELECT role, is_active FROM users WHERE id = ?")
+                    .bind(crate::auth::LOCAL_OPERATOR_ID)
+                    .fetch_one(&app.state.pool)
+                    .await
+                    .expect("promoted row");
+            assert_eq!((stored_role.as_str(), stored_active), ("admin", 1));
+            assert_eq!(
+                crate::setup::real_admin_count(&app.state.pool)
+                    .await
+                    .expect("count"),
+                1
+            );
+            assert_eq!(app.state.setup.mode(), Mode::Protected);
+        }
+    }
+
+    #[tokio::test]
+    async fn promotion_revokes_the_local_operator_api_keys() {
+        let app = TestApp::unprotected().await;
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, name, prefix, key_hash, created_at, updated_at) \
+             VALUES ('k1', ?, 'minted without a password', 'pk_live_ab12', 'hash', \
+                     '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(crate::auth::LOCAL_OPERATOR_ID)
+        .execute(&app.state.pool)
+        .await
+        .expect("placeholder key");
+
+        let created = send(
+            app.router(),
+            post_local(
+                "/api/setup/admin",
+                serde_json::json!({
+                    "email": "admin@example.com",
+                    "password": "first-admin-password",
+                }),
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+
+        let revoked: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM api_keys WHERE id = 'k1'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("key");
+        assert!(
+            revoked.is_some(),
+            "a key minted without a password must not inherit the administrator's access"
+        );
+        let detail: String = sqlx::query_scalar(
+            "SELECT detail_json FROM audit_log WHERE action = 'auth.bootstrap_admin_created'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("audit");
+        assert!(detail.contains("\"api_keys_revoked\":1"), "{detail}");
     }
 }

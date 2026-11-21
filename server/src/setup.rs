@@ -131,6 +131,22 @@ pub async fn real_user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
         .await
 }
 
+/// Number of active, real administrators. Setup stays open until one exists
+/// within the current process: a non-admin account does not make the gateway
+/// administrable (D57). After a restart `resolve_mode` reports `protected` for
+/// any real account, so a database with only non-admin accounts needs the
+/// manual recovery path in the README.
+///
+/// Failure mode: [`sqlx::Error`] when the count query fails.
+pub async fn real_admin_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users \
+         WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Seeds the local-operator placeholder account (migration 0016): the row
 /// behind the synthetic [`crate::auth::local_operator`] identity, so every
 /// audit and `*_updated_by` write during unprotected mode satisfies its
@@ -187,17 +203,23 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
 /// When the local-operator placeholder exists (setup was skipped earlier) it
 /// is promoted to that admin **in place** — same row, so every audit and
 /// `*_updated_by` reference to it stays valid — instead of a second row
-/// appearing.
+/// appearing. The promotion forces `role = 'admin'` and `is_active = 1` and
+/// revokes the placeholder's live API keys: keys minted while the gateway had
+/// no password must not inherit the administrator's `/v1` access (D23).
 ///
-/// Failure mode: [`SetupError::AlreadyComplete`] when a real account exists,
-/// [`SetupError::Invalid`] for a bad email or a too-short password.
+/// Failure mode: [`SetupError::AlreadyComplete`] when an active real
+/// administrator exists, [`SetupError::Invalid`] for a bad email or a
+/// too-short password.
 pub async fn create_first_admin(
     pool: &SqlitePool,
     email: &str,
     password: &str,
     ip: &str,
 ) -> Result<String, SetupError> {
-    if real_user_count(pool).await? > 0 {
+    // Fast path: refuse before hashing the password. The authoritative check
+    // is repeated in the same statements as the writes below, so two concurrent
+    // wizard requests cannot both create an administrator.
+    if real_admin_count(pool).await? > 0 {
         return Err(SetupError::AlreadyComplete);
     }
     let email =
@@ -207,11 +229,24 @@ pub async fn create_first_admin(
     let password_hash = crate::password::hash_password_offload(password).await?;
 
     let mut tx = pool.begin().await?;
+    // Write-first: both statements carry the "no active real administrator"
+    // guard, and SQLite serialises writers, so the count cannot change between
+    // them and a commit from another wizard request.
+    //
+    // The promotion forces `role` and `is_active`: the local operator row can
+    // have been edited before the password existed (an older build allowed it,
+    // and filesystem access always can), and the first password must yield an
+    // administrator regardless.
     let promoted = sqlx::query_as::<_, (String,)>(
         "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
+           role = 'admin', is_active = 1, \
            must_change_password = 0, is_placeholder = 0, \
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
          WHERE id = ? AND is_placeholder = 1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM users \
+             WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1 \
+           ) \
          RETURNING id",
     )
     .bind(&email)
@@ -224,10 +259,14 @@ pub async fn create_first_admin(
         Some((id,)) => (id, true),
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
+            let inserted = sqlx::query(
                 "INSERT INTO users (id, email, display_name, password_hash, role, is_active, \
                                     must_change_password) \
-                 VALUES (?, ?, ?, ?, 'admin', 1, 0)",
+                 SELECT ?, ?, ?, ?, 'admin', 1, 0 \
+                 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM users \
+                   WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1 \
+                 )",
             )
             .bind(&id)
             .bind(&email)
@@ -235,8 +274,19 @@ pub async fn create_first_admin(
             .bind(&password_hash)
             .execute(&mut *tx)
             .await?;
+            if inserted.rows_affected() == 0 {
+                return Err(SetupError::AlreadyComplete);
+            }
             (id, false)
         }
+    };
+    // API keys minted while the gateway had no password belong to the same row
+    // and would otherwise inherit the new administrator's `/v1` access (D23).
+    // The insert path has no keys by construction.
+    let api_keys_revoked = if promoted {
+        crate::users::revoke_live_api_keys(&mut *tx, &id).await?
+    } else {
+        0
     };
     crate::auth::audit(
         &mut *tx,
@@ -245,14 +295,24 @@ pub async fn create_first_admin(
         Some("user"),
         Some(&id),
         Some(
-            &serde_json::json!({ "email": email, "source": "setup", "promoted_local_operator": promoted })
-                .to_string(),
+            &serde_json::json!({
+                "email": email,
+                "source": "setup",
+                "promoted_local_operator": promoted,
+                "api_keys_revoked": api_keys_revoked,
+            })
+            .to_string(),
         ),
         Some(ip),
     )
     .await?;
     tx.commit().await?;
-    tracing::info!(email = %email, promoted_local_operator = promoted, "created the first admin from the setup wizard");
+    tracing::info!(
+        email = %email,
+        promoted_local_operator = promoted,
+        api_keys_revoked,
+        "created the first admin from the setup wizard"
+    );
     Ok(id)
 }
 
@@ -424,6 +484,54 @@ mod tests {
             .await
             .expect("audit");
         assert_eq!(actions, ["setup.skipped"]);
+    }
+
+    #[tokio::test]
+    async fn only_active_real_admins_close_setup() {
+        use crate::test_support::TestApp;
+        let app = TestApp::new().await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "no users"
+        );
+
+        mark_skipped(&app.state.pool, "127.0.0.1")
+            .await
+            .expect("skip");
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "the placeholder is not a real administrator"
+        );
+
+        app.create_user("plain@example.com", crate::auth::Role::User, true)
+            .await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "a non-admin account does not make the gateway administrable"
+        );
+
+        let admin = app
+            .create_user("boss@example.com", crate::auth::Role::Admin, true)
+            .await;
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            1,
+            "an active real administrator closes setup"
+        );
+
+        sqlx::query("UPDATE users SET is_active = 0 WHERE id = ?")
+            .bind(&admin)
+            .execute(&app.state.pool)
+            .await
+            .expect("deactivate");
+        assert_eq!(
+            real_admin_count(&app.state.pool).await.expect("count"),
+            0,
+            "a deactivated administrator does not count"
+        );
     }
 
     #[tokio::test]

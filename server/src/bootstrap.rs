@@ -98,9 +98,12 @@ pub async fn ensure_admin_with(
         .await
         .context("starting the bootstrap transaction")?;
     // The local-operator placeholder is promoted in place so every existing
-    // audit and `*_updated_by` reference to it stays valid.
+    // audit and `*_updated_by` reference to it stays valid. Role and status are
+    // forced: the placeholder may have been edited before a password existed,
+    // and the bootstrap admin must always be an active administrator.
     let promoted = sqlx::query_as::<_, (String,)>(
         "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
+           role = 'admin', is_active = 1, \
            must_change_password = 1, is_placeholder = 0, \
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
          WHERE id = ? AND is_placeholder = 1 \
@@ -130,6 +133,15 @@ pub async fn ensure_admin_with(
             (user_id, false)
         }
     };
+    // Keys minted while the gateway had no password belong to the promoted row
+    // and must not inherit the administrator's `/v1` access (D23).
+    let api_keys_revoked = if promoted {
+        crate::users::revoke_live_api_keys(&mut *tx, &user_id)
+            .await
+            .context("revoking the local operator API keys")?
+    } else {
+        0
+    };
 
     auth::audit(
         &mut *tx,
@@ -138,9 +150,14 @@ pub async fn ensure_admin_with(
         Some("user"),
         Some(&user_id),
         Some(
-            serde_json::json!({ "email": email, "source": "env", "promoted_local_operator": promoted })
-                .to_string()
-                .as_str(),
+            serde_json::json!({
+                "email": email,
+                "source": "env",
+                "promoted_local_operator": promoted,
+                "api_keys_revoked": api_keys_revoked,
+            })
+            .to_string()
+            .as_str(),
         ),
         None,
     )
@@ -150,7 +167,12 @@ pub async fn ensure_admin_with(
         .await
         .context("committing the bootstrap admin")?;
 
-    tracing::info!(email = %email, promoted_local_operator = promoted, "created bootstrap admin account from the environment");
+    tracing::info!(
+        email = %email,
+        promoted_local_operator = promoted,
+        api_keys_revoked,
+        "created bootstrap admin account from the environment"
+    );
     Ok(BootstrapOutcome::AdminCreated)
 }
 
@@ -240,6 +262,50 @@ mod tests {
                 .expect("second bootstrap must not need credentials"),
             BootstrapOutcome::UsersExist
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn promotion_repairs_a_demoted_placeholder_and_revokes_its_keys() {
+        let (dir, pool) = test_pool().await;
+        crate::setup::ensure_local_operator(&pool)
+            .await
+            .expect("seed the placeholder");
+        // An older build (or direct database access) could leave this state.
+        sqlx::query("UPDATE users SET role = 'user', is_active = 0 WHERE id = ?")
+            .bind(crate::auth::LOCAL_OPERATOR_ID)
+            .execute(&pool)
+            .await
+            .expect("corrupt the placeholder");
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, name, prefix, key_hash, created_at, updated_at) \
+             VALUES ('k1', ?, 'minted without a password', 'pk_live_ab12', 'hash', \
+                     '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(crate::auth::LOCAL_OPERATOR_ID)
+        .execute(&pool)
+        .await
+        .expect("placeholder key");
+
+        ensure_admin_with(
+            &pool,
+            Some("boss@example.com".to_string()),
+            Some("a-long-enough-password".to_string()),
+        )
+        .await
+        .expect("bootstrap must promote the placeholder");
+
+        let (role, active): (String, i64) = sqlx::query_as("SELECT role, is_active FROM users")
+            .fetch_one(&pool)
+            .await
+            .expect("user row");
+        assert_eq!((role.as_str(), active), ("admin", 1));
+        let revoked: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM api_keys WHERE id = 'k1'")
+                .fetch_one(&pool)
+                .await
+                .expect("key");
+        assert!(revoked.is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 

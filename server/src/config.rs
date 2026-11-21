@@ -188,6 +188,27 @@ pub enum ConfigError {
     MasterKey(#[from] secrets::SecretError),
 }
 
+/// Resolves the data directory: `GATEWAY_DATA_DIR` (relative to the working
+/// directory) or `./data`. Shared by [`Config::from_env`] and the operator
+/// commands that must run before the rest of the configuration is parsed.
+///
+/// Failure mode: [`ConfigError::CurrentDir`] when the working directory cannot
+/// be read.
+pub fn data_dir_from_env() -> Result<PathBuf, ConfigError> {
+    let current = env::current_dir()?;
+    Ok(match env::var_os("GATEWAY_DATA_DIR") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                current.join(path)
+            }
+        }
+        None => current.join(DEFAULT_DATA_DIR),
+    })
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let listen = env::var("GATEWAY_LISTEN")
@@ -196,16 +217,7 @@ impl Config {
             .map_err(|e| ConfigError::Listen(e.to_string()))?;
 
         // Defaults to `./data` so a first run works with no environment set.
-        let data_dir = match env::var_os("GATEWAY_DATA_DIR") {
-            Some(value) => {
-                let path = PathBuf::from(value);
-                match path.is_absolute() {
-                    true => path,
-                    false => env::current_dir()?.join(path),
-                }
-            }
-            None => env::current_dir()?.join(DEFAULT_DATA_DIR),
-        };
+        let data_dir = data_dir_from_env()?;
 
         let timezone = env::var("GATEWAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
         let tz = parse_timezone(&timezone)?;
