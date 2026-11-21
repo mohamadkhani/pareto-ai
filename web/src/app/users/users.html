@@ -24,7 +24,7 @@
     }
 
     <div class="toolbar">
-      <ui-button variant="primary" [disabled]="unprotected()" (clicked)="openCreate()">
+      <ui-button variant="primary" [disabled]="!createAllowed()" (clicked)="openCreate()">
         New user
       </ui-button>
       <span class="spacer"></span>
@@ -173,14 +173,16 @@
         [description]="
           unprotected()
             ? 'Account creation is off until this gateway has a password. Set it in Settings.'
-            : 'Create the first account for the console.'
+            : !statusKnown()
+              ? 'Checking whether this gateway has a password…'
+              : 'Create the first account for the console.'
         "
       >
         <span ui-empty-action>
           <ui-button
             size="sm"
             variant="primary"
-            [disabled]="unprotected()"
+            [disabled]="!createAllowed()"
             (clicked)="openCreate()"
           >
             New user

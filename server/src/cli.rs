@@ -131,7 +131,8 @@ fn parse_args(args: &[String]) -> Result<ResetArgs, String> {
 }
 
 /// Resolves `--data-dir` (relative to the working directory) or falls back to
-/// the configured directory, which `Config::from_env` already made absolute.
+/// the configured directory, which `config::data_dir_from_env` already made
+/// absolute (the reset path never runs `Config::from_env`).
 fn resolve_data_dir(flag: Option<&Path>, configured: &Path) -> Result<PathBuf> {
     match flag {
         Some(path) if path.is_absolute() => Ok(path.to_path_buf()),
