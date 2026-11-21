@@ -106,8 +106,9 @@ dev *args:
 
 # reset a dev password in server/data (pass an email if there are several)
 # Prompts twice for the new password: `just reset-password admin@example.com`
+# The command embeds no UI, so it also builds on a checkout without web/dist.
 reset-password email="":
-    cd server && cargo run --offline -- reset-password {{ if email != "" { "--email " + quote(email) } else { "" } }}
+    cd server && cargo run --offline --no-default-features -- reset-password {{ if email != "" { "--email " + quote(email) } else { "" } }}
 
 # api-only binary, no embedded UI
 build-api:
