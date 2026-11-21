@@ -1049,11 +1049,14 @@ the user row (loses audit attribution and account data).
 
 **Consequence:** recovery requires filesystem access on the host and the binary
 from the same release, because opening the database applies migrations. The
-desktop app's data directory must be passed explicitly. The command does not
-reactivate a deactivated account; that still needs an admin. Its audit row has a
-`NULL` actor and `insecure = 0`, because the target is always a real account
-(so the database resolves to `protected`) and the offline process cannot know
-the live mode; `detail.source = "cli"` identifies the row.
+command resolves only `GATEWAY_DATA_DIR` (or `--data-dir`) and runs before the
+rest of the configuration is parsed, so a malformed timezone, timeout, or master
+key cannot block recovery. The desktop app's data directory must be passed
+explicitly. The command does not reactivate a deactivated account; that still
+needs an admin. Its audit row has a `NULL` actor and `insecure = 0`, because the
+target is always a real account (so the database resolves to `protected`) and the
+offline process cannot know the live mode; `detail.source = "cli"` identifies the
+row.
 
 **Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
 introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa).
@@ -1084,9 +1087,11 @@ administrators: an admin demoting or deactivating themselves.
 **Consequence:** a non-admin account no longer closes setup, so Settings can
 still promote the local-operator placeholder and set the first password.
 Removing the last active administrator is a `409`; promote or activate another
-administrator first. A process already in `protected` mode still refuses setup
-mutations, so this does not reopen a finished installation. The promotion
-repairs a placeholder that an older build (or direct database access) demoted or
+administrator first. The placeholder is also filtered out of `GET /api/users`,
+so the console never offers Edit or Deactivate for the one row the API refuses
+to patch. A process already in `protected` mode still refuses setup mutations,
+so this does not reopen a finished installation. The promotion repairs a
+placeholder that an older build (or direct database access) demoted or
 deactivated: role and status are forced. API keys minted while the gateway had no
 password are revoked in the same transaction — after promotion they would act
 with the administrator's `/v1` access (D23), so create new keys after setting the
