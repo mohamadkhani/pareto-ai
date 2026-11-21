@@ -131,8 +131,11 @@ pub async fn real_user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
         .await
 }
 
-/// Number of active, real administrators. Setup stays open until one exists:
-/// a non-admin account does not make the gateway administrable (D57).
+/// Number of active, real administrators. Setup stays open until one exists
+/// within the current process: a non-admin account does not make the gateway
+/// administrable (D57). After a restart `resolve_mode` reports `protected` for
+/// any real account, so a database with only non-admin accounts needs the
+/// manual recovery path in the README.
 ///
 /// Failure mode: [`sqlx::Error`] when the count query fails.
 pub async fn real_admin_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
