@@ -51,8 +51,9 @@ pub async fn list_users(
 /// Creates an account with role and initial password. Admin only, audited as
 /// `user.create`. The account is flagged `must_change_password` unless the
 /// input waives it: an admin-set password must be rotated first. Refused while
-/// the gateway is `unprotected` (D58): without a password, a real account would
-/// make the next restart `protected` with no administrator.
+/// the gateway is `unprotected` (D58, enforced by [`users::create_user`]):
+/// without a password, a real account would make the next restart `protected`
+/// with no administrator.
 #[utoipa::path(
     post,
     path = "/api/users",
@@ -74,26 +75,12 @@ pub async fn create_user(
     body: Result<Json<UserInput>, JsonRejection>,
 ) -> Result<(StatusCode, Json<UserView>), ApiError> {
     let rid = error::request_id(&headers);
-    // Unprotected mode is a local convenience, not an account directory. The
-    // mode, not the admin count, is the gate: a count check would race with a
-    // concurrent first-admin creation and could still let an account through
-    // with no administrator to own it. The mode only moves forward from
-    // Unprotected within a process, and Settings (`/api/setup/admin`) is the
-    // one path that does it.
-    if state.setup.mode() == crate::setup::Mode::Unprotected {
-        return Err(ApiError::custom(
-            StatusCode::CONFLICT,
-            "setup_incomplete",
-            "set a password for the local administrator in Settings before creating accounts",
-        )
-        .with_request_id(rid));
-    }
     let Json(input) = bad_body(body, "user create", &rid)?;
     let actor = Actor {
         user_id: &admin.user_id,
         ip: &ip.0,
     };
-    let view = users::create_user(&state.pool, &actor, &input)
+    let view = users::create_user(&state.pool, &actor, &input, state.setup.mode())
         .await
         .map_err(|e| e.into_api_error(rid))?;
     Ok((StatusCode::CREATED, Json(view)))

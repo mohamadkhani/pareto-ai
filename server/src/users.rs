@@ -29,6 +29,7 @@ use axum::http::StatusCode;
 use crate::auth;
 use crate::catalog::{self, Actor};
 use crate::password::{self, PasswordError};
+use crate::setup::Mode;
 
 /// Shortest accepted password, same policy as the bootstrap admin.
 pub const MIN_PASSWORD_LEN: usize = 12;
@@ -105,6 +106,8 @@ pub enum UserError {
     InvalidCredentials,
     #[error("the last active administrator cannot be deactivated or demoted")]
     LastAdmin,
+    #[error("accounts cannot be created while the gateway is unprotected")]
+    SetupIncomplete,
     #[error("password hashing failed: {0}")]
     Password(#[from] PasswordError),
 }
@@ -124,6 +127,12 @@ impl UserError {
                 StatusCode::CONFLICT,
                 "last_active_admin",
                 "this is the last active administrator; promote or activate another administrator first",
+            )
+            .with_request_id(rid),
+            UserError::SetupIncomplete => ApiError::custom(
+                StatusCode::CONFLICT,
+                "setup_incomplete",
+                "set a password for the local administrator in Settings before creating accounts",
             )
             .with_request_id(rid),
             other => ApiError::internal("users", other).with_request_id(rid),
@@ -181,13 +190,23 @@ pub async fn get_user(pool: &SqlitePool, user_id: &str) -> Result<UserView, User
 
 /// Creates an account, audited as `user.create`.
 ///
+/// While the gateway is `unprotected` (D58) account creation is refused with
+/// [`UserError::SetupIncomplete`]: without a password, one real account would
+/// make the next restart `protected` with no administrator. The rule lives
+/// here, not in the route, so every caller inherits it.
+///
 /// Failure mode: [`UserError::Invalid`] on bad input (email, role, short
-/// password), [`UserError::EmailTaken`] on a duplicate email.
+/// password), [`UserError::EmailTaken`] on a duplicate email,
+/// [`UserError::SetupIncomplete`] before the first password exists.
 pub async fn create_user(
     pool: &SqlitePool,
     actor: &Actor<'_>,
     input: &UserInput,
+    mode: Mode,
 ) -> Result<UserView, UserError> {
+    if mode == Mode::Unprotected {
+        return Err(UserError::SetupIncomplete);
+    }
     let email = validate_email(&input.email)?;
     let role = validate_role(&input.role)?;
     validate_password(&input.password)?;
@@ -565,6 +584,16 @@ mod tests {
         }
     }
 
+    /// Calls the service as a protected gateway; the mode gate has its own
+    /// test below.
+    async fn create(
+        pool: &SqlitePool,
+        actor: &Actor<'_>,
+        input: &UserInput,
+    ) -> Result<UserView, UserError> {
+        create_user(pool, actor, input, Mode::Protected).await
+    }
+
     #[tokio::test]
     async fn created_users_are_flagged_for_rotation_and_audited() {
         password::set_test_cost(8 * 1024, 1, 1);
@@ -579,7 +608,7 @@ mod tests {
         .await
         .expect("admin");
 
-        let created = create_user(&pool, &actor(&admin), &input("new@example.com"))
+        let created = create(&pool, &actor(&admin), &input("new@example.com"))
             .await
             .expect("create");
         assert_eq!(created.role, "user");
@@ -604,18 +633,18 @@ mod tests {
             must_change_password: Some(false),
             ..input("waived@example.com")
         };
-        let waived = create_user(&pool, &actor(&admin), &waived)
+        let waived = create(&pool, &actor(&admin), &waived)
             .await
             .expect("create");
         assert!(!waived.must_change_password);
 
         // Duplicate emails conflict; bad inputs are refused.
-        let err = create_user(&pool, &actor(&admin), &input("new@example.com"))
+        let err = create(&pool, &actor(&admin), &input("new@example.com"))
             .await
             .expect_err("duplicate");
         assert!(matches!(err, UserError::EmailTaken), "{err:?}");
         assert!(
-            create_user(&pool, &actor(&admin), &input("not-an-email"))
+            create(&pool, &actor(&admin), &input("not-an-email"))
                 .await
                 .is_err()
         );
@@ -623,18 +652,44 @@ mod tests {
             password: "short".to_string(),
             ..input("short@example.com")
         };
-        assert!(create_user(&pool, &actor(&admin), &short).await.is_err());
+        assert!(create(&pool, &actor(&admin), &short).await.is_err());
         let bad_role = UserInput {
             role: "root".to_string(),
             ..input("role@example.com")
         };
-        assert!(create_user(&pool, &actor(&admin), &bad_role).await.is_err());
+        assert!(create(&pool, &actor(&admin), &bad_role).await.is_err());
 
         let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM audit_log ORDER BY id")
             .fetch_all(&pool)
             .await
             .expect("audit");
         assert_eq!(actions, ["user.create", "user.create"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn unprotected_mode_refuses_creation_before_any_write() {
+        let (dir, pool) = pool().await;
+
+        let refused = create_user(
+            &pool,
+            &actor("local"),
+            &input("new@example.com"),
+            Mode::Unprotected,
+        )
+        .await
+        .expect_err("unprotected mode refuses creation");
+        assert!(matches!(refused, UserError::SetupIncomplete), "{refused:?}");
+
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&pool)
+            .await
+            .expect("users");
+        let audits: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .expect("audit");
+        assert_eq!((users, audits), (0, 0), "no row and no audit was written");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -651,7 +706,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("admin");
-        let user = create_user(&pool, &actor(&admin), &input("u@example.com"))
+        let user = create(&pool, &actor(&admin), &input("u@example.com"))
             .await
             .expect("create");
 
@@ -866,7 +921,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("admin");
-        let user = create_user(&pool, &actor(&admin), &input("u@example.com"))
+        let user = create(&pool, &actor(&admin), &input("u@example.com"))
             .await
             .expect("create");
 
@@ -976,7 +1031,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("admin");
-        let user = create_user(&pool, &actor(&admin), &input("u@example.com"))
+        let user = create(&pool, &actor(&admin), &input("u@example.com"))
             .await
             .expect("create");
         let created = crate::api_keys::create_key(
