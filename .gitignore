@@ -37,3 +37,6 @@
 
 # Local runtime data (demo/dev databases)
 /.data/
+
+# Process id files written when running the gateway or a mock upstream locally
+*.pid

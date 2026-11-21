@@ -30,7 +30,8 @@ license provided the fonts are not sold on their own and the notice is kept.
 - **OmniRoute** (`cheaper-inference/OmniRoute`, MIT) — product research,
   provider metadata patterns and routing ideas. Where any file or data was
   translated, the MIT notice applies to that material.
-- **llm-leaders** (`/home/mohamad/Projects/llm-leaders`, GPL-3.0) — its README
+- **llm-leaders** (GPL-3.0, kept as a local reference checkout outside this
+  repository) — its README
   documented the public benchmark endpoints and matching approach. **No code
   was copied**; the implementations here are independent.
 
