@@ -3,10 +3,11 @@
 //! These routes are unauthenticated by necessity (there is no account yet).
 //! `GET /api/setup/status` is readable from anywhere: the console needs it to
 //! render the exposure banner, and it carries no secrets. The two mutations are
-//! **loopback-only** (desktop-wrapper origins count as local) and only work
-//! while no user exists; a request from the network gets `403
-//! setup_local_only`, a second attempt after the admin exists gets `409
-//! setup_already_complete`.
+//! **loopback-only** (desktop-wrapper origins count as local). `skip` only works
+//! while no real account exists; `admin` works while no **active real
+//! administrator** exists, so a non-admin account does not close that path
+//! (D57). A request from the network gets `403 setup_local_only`; a mutation the
+//! current state does not allow gets `409 setup_already_complete`.
 //!
 //! `POST /api/setup/admin` is also the "set a password" action of the Settings
 //! page while the gateway is unprotected. It creates the first admin, logs the
@@ -106,7 +107,7 @@ pub async fn status(State(state): State<AppState>, request: Request) -> Json<Set
     responses(
         (status = 200, description = "first admin created; sets the gateway_session cookie", body = LoginResponse),
         (status = 400, description = "invalid email, too-short password, or malformed body", body = ErrorBody),
-        (status = 403, description = "not a local request, or setup already skipped and no local admin exists", body = ErrorBody),
+        (status = 403, description = "not a local request", body = ErrorBody),
         (status = 409, description = "an active real administrator already exists; sign in instead", body = ErrorBody)
     )
 )]

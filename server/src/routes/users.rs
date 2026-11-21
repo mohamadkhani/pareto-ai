@@ -554,6 +554,23 @@ mod tests {
                 "the refused patch changed nothing (patch {patch})"
             );
         }
+
+        // Validation precedes the row rules, so an invalid patch is a `400`
+        // even for the placeholder; `409 local_operator` applies to valid input.
+        let app = TestApp::unprotected().await;
+        let invalid = send(
+            app.router(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{}", crate::auth::LOCAL_OPERATOR_ID),
+                Some(serde_json::json!({ "role": "root" })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST, "{}", invalid.body);
+        assert_eq!(invalid.body["error"]["code"], "invalid_request");
     }
 
     #[tokio::test]

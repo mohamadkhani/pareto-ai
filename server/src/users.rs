@@ -223,7 +223,9 @@ pub async fn get_user(pool: &SqlitePool, user_id: &str) -> Result<UserView, User
 /// While the gateway is `unprotected` (D58) account creation is refused with
 /// [`UserError::SetupIncomplete`]: without a password, one real account would
 /// make the next restart `protected` with no administrator. The rule lives
-/// here, not in the route, so every caller inherits it.
+/// here, not in the route, so every caller inherits it. The caller passes the
+/// live `state.setup.mode()`; the service never reads the mode from the
+/// database, because the in-memory mode is what closes the D58 race.
 ///
 /// Failure mode: [`UserError::Invalid`] on bad input (email, role, short
 /// password), [`UserError::EmailTaken`] on a duplicate email,
@@ -300,7 +302,10 @@ pub async fn create_user(
 /// Failure mode: [`UserError::Invalid`] on an all-null patch or bad values,
 /// [`UserError::NotFound`] for an unknown account, [`UserError::LocalOperator`]
 /// for the local-operator placeholder, [`UserError::LastAdmin`] when the patch
-/// would deactivate or demote the last active administrator.
+/// would deactivate or demote the last active administrator. Validation runs
+/// before the transaction in every mode, so an invalid patch is a `400` even
+/// when the row rules would refuse it; only valid input reaches the `404`/`409`
+/// checks, which stay inside the write.
 pub async fn update_user(
     pool: &SqlitePool,
     actor: &Actor<'_>,
