@@ -16,8 +16,17 @@
       </ui-banner>
     }
 
+    @if (unprotected()) {
+      <ui-banner tone="warning" actionLabel="Open Settings" (actioned)="openSettings()">
+        Account creation is off until this gateway has a password. Set the first administrator
+        password in Settings, then add accounts.
+      </ui-banner>
+    }
+
     <div class="toolbar">
-      <ui-button variant="primary" (clicked)="openCreate()">New user</ui-button>
+      <ui-button variant="primary" [disabled]="unprotected()" (clicked)="openCreate()">
+        New user
+      </ui-button>
       <span class="spacer"></span>
       <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
     </div>

@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { Router } from '@angular/router';
 import {
   AbstractControl,
   FormControl,
@@ -9,6 +10,7 @@ import {
 import { AuthService } from '../auth/auth.service';
 import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime } from '../catalog/format';
+import { SetupService } from '../setup/setup.service';
 import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
@@ -72,6 +74,15 @@ function fieldErrorText(control: AbstractControl, field: string): string {
 export class Users {
   private readonly auth = inject(AuthService);
   private readonly usersService = inject(UsersService);
+  private readonly setup = inject(SetupService);
+  private readonly router = inject(Router);
+
+  /**
+   * True while the gateway has no password (D58): the API refuses account
+   * creation until an administrator exists, so the page points at Settings
+   * instead of offering a form that can only fail.
+   */
+  protected readonly unprotected = computed(() => this.setup.status()?.mode === 'unprotected');
 
   protected readonly users = signal<UserView[]>([]);
   protected readonly loading = signal(false);
@@ -128,6 +139,8 @@ export class Users {
   constructor() {
     // Non-admins never call the API: it would answer 403 and the read is audited.
     if (this.auth.isAdmin()) {
+      // Shared with the shell and Settings; usually already cached.
+      void this.setup.load().catch(() => undefined);
       void this.reload();
     } else {
       this.forbidden.set(true);
@@ -147,6 +160,9 @@ export class Users {
   }
 
   protected openCreate(): void {
+    if (this.unprotected()) {
+      return;
+    }
     this.createForm.reset({
       email: '',
       display_name: '',
@@ -191,6 +207,11 @@ export class Users {
 
   protected closeForm(): void {
     this.formState.set(null);
+  }
+
+  /** Settings holds the first-password form while the gateway is unprotected. */
+  protected openSettings(): void {
+    void this.router.navigateByUrl('/settings');
   }
 
   protected async save(): Promise<void> {
