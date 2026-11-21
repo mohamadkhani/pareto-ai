@@ -2,8 +2,8 @@
   <header class="page-head">
     <h1>Models</h1>
     <p class="hint">
-      One page for the catalog, prices, and quality (D31). Filter by provider for per-offering rows,
-      or stay on all providers for average and minimum prices across the catalog.
+      Choosing a provider shows its own prices; All providers shows averages and minimums across the
+      catalog.
     </p>
   </header>
 
@@ -66,6 +66,37 @@
             }
           </ui-select>
         </ui-field>
+
+        <ui-field [label]="maxPriceLabel()">
+          <ui-input
+            id="models-max-price"
+            type="number"
+            inputmode="decimal"
+            min="0"
+            step="any"
+            placeholder="no limit"
+            [value]="maxPriceInput()"
+            (valueChange)="onMaxPriceInput($event)"
+          />
+        </ui-field>
+
+        <ui-field label="Min quality score">
+          <ui-input
+            id="models-min-quality"
+            type="number"
+            inputmode="decimal"
+            step="any"
+            placeholder="no limit"
+            [value]="minQualityInput()"
+            (valueChange)="onMinQualityInput($event)"
+          />
+        </ui-field>
+
+        @if (refinementActive()) {
+          <ui-button size="sm" variant="ghost" (clicked)="clearRefinements()">
+            Clear limits
+          </ui-button>
+        }
       </div>
 
       <div class="toolbar-group toolbar-group--actions">
@@ -202,10 +233,24 @@
       @if (filterActive()) {
         <ui-empty
           title="No models match “{{ searchTerm() }}”"
-          description="Try a different name, family, upstream id, or provider."
+          [description]="
+            refinementActive()
+              ? 'Try a different term, or adjust the limits.'
+              : 'Try a different name, family, upstream id, or provider.'
+          "
         >
           <span ui-empty-action>
-            <ui-button size="sm" (clicked)="clearSearch()">Clear search</ui-button>
+            @if (refinementActive()) {
+              <ui-button size="sm" (clicked)="clearAllFilters()">Clear all filters</ui-button>
+            } @else {
+              <ui-button size="sm" (clicked)="clearSearch()">Clear search</ui-button>
+            }
+          </span>
+        </ui-empty>
+      } @else if (refinementActive()) {
+        <ui-empty title="No models match these limits">
+          <span ui-empty-action>
+            <ui-button size="sm" (clicked)="clearRefinements()">Clear limits</ui-button>
           </span>
         </ui-empty>
       } @else if (providers().length === 0) {

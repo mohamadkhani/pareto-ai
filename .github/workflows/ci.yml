@@ -6,8 +6,10 @@
 #   just fmt-check  -> cargo fmt --check
 #   just lint       -> cargo clippy --all-targets -- -D warnings
 #   just test       -> cargo test
-#   just build-api  -> cargo build --release --no-default-features
 #   just ui-check   -> pnpm build + pnpm test + prettier --check
+#
+# `just build-api` is covered by the gateway job, which builds the api-only
+# binary for Linux; the Rust gate does not pay for that release build twice.
 #
 # The web work is split in two on purpose: `web` builds the console and uploads
 # `web/dist`, `web-check` runs the UI tests and the formatting check. `rust` and
@@ -23,13 +25,16 @@
 #   (`rust-embed`).
 #
 # The `gateway` job packages the two server binaries (embedded UI and api-only)
-# for Linux and Windows and uploads them as run artifacts on every run. It
-# reuses the web job's `web-dist` artifact instead of rebuilding Angular, and
+# for Linux and, on main and tags, Windows; it uploads them as run artifacts.
+# It reuses the web job's `web-dist` artifact instead of rebuilding Angular, and
 # falls back to a local `pnpm run build` only when the artifact is unavailable
 # (for example a re-run of a single job). On a `v*` tag the release job attaches
 # the artifacts to the GitHub Release — only when web-check, rust and gateway
 # are all green — and `publish-aur` updates the server AUR packages with the
 # AUR_SSH_PRIVATE_KEY secret (desktop packages are published by desktop.yml).
+#
+# A pull request that touches only docs, Markdown or LICENSE keeps the required
+# checks green without paying for the Rust and gateway jobs; see `changes`.
 #
 # No secrets are required. Desktop packaging lives in desktop.yml.
 
@@ -54,6 +59,37 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # A docs-only pull request still runs every job so the required checks keep
+  # reporting, but the two expensive ones (Rust and gateway) stop after this
+  # scope check. `paths-ignore` on the workflow itself would leave those
+  # required checks pending and block the merge.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-22.04
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: scope
+        name: Decide whether code changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          # Conservative two-dot diff: extra files only mean the jobs run.
+          # Written to a file first so `grep -q` cannot close the pipe early
+          # and trip `pipefail`.
+          git diff --name-only FETCH_HEAD HEAD > /tmp/changed-files
+          if grep -qvE '^(docs/|.*\.md$|LICENSE$)' /tmp/changed-files; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Builds the Angular console and publishes web/dist for the Rust jobs. The UI
   # tests live in `web-check` so they cannot block the server binaries.
   web:
@@ -122,8 +158,8 @@ jobs:
         run: pnpm exec prettier --check src/
 
   rust:
-    name: Rust (format, clippy, tests, api-only build)
-    needs: web
+    name: Rust (format, clippy, tests)
+    needs: [web, changes]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -139,47 +175,45 @@ jobs:
       # The embedded-UI feature compiles web/dist into the binary; restores it
       # instead of paying for a second Angular build.
       - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.code == 'true'
         with:
           name: web-dist
           path: web/dist/web/browser
 
       - name: Check formatting
+        if: needs.changes.outputs.code == 'true'
         working-directory: server
         run: cargo fmt --check
 
       - name: Clippy
+        if: needs.changes.outputs.code == 'true'
         working-directory: server
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Tests
+        if: needs.changes.outputs.code == 'true'
         working-directory: server
         run: cargo test --locked
-
-      - name: API-only release build
-        working-directory: server
-        run: cargo build --locked --release --no-default-features
 
   # Builds the shippable server binaries for each platform. Nothing is
   # cross-compiled: the Windows binary comes from windows-latest, the same
   # proven step as the desktop sidecar in desktop.yml.
+  #
+  # Windows is release-only: the installers are attached on a `v*` tag, so a
+  # pull request builds Linux alone. That keeps review feedback around three
+  # minutes instead of six, and the Windows build still runs on main and tags.
   gateway:
     name: Gateway binary (${{ matrix.name }})
     # Only the web *build*, never the UI tests: the server binaries must stay
-    # downloadable from the run even when web-check is red.
-    needs: web
+    # downloadable from the run even when web-check is red. A docs-only change
+    # skips the job; it is not a required check, so nothing waits on it.
+    needs: [web, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-x86_64
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            ext: ""
-          - name: windows-x64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: ".exe"
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"linux-x86_64","os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","ext":""}]' || '[{"name":"linux-x86_64","os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","ext":""},{"name":"windows-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","ext":".exe"}]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -307,34 +341,8 @@ jobs:
           # No retention override: same repository retention as the desktop
           # installers, so the server binaries do not expire earlier.
 
-  # Lints the AUR recipes (missing depends, bad perms, wrong install paths) on
-  # every run; the real build test happens on the first user's makepkg. PLACEHOLDER
-  # sums are swapped for SKIP so namcap's checksum checks pass; CI injects the
-  # real sums only when publishing.
-  aur-lint:
-    name: Lint PKGBUILDs with namcap
-    runs-on: ubuntu-latest
-    container: archlinux:latest
-    steps:
-      - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git namcap
-
-      - uses: actions/checkout@v4
-
-      - name: Lint PKGBUILDs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for pkg in packaging/arch/pareto-ai packaging/arch/pareto-ai-bin \
-                     packaging/arch/pareto-ai-desktop packaging/arch/pareto-ai-desktop-bin; do
-            cp "$pkg/PKGBUILD" /tmp/PKGBUILD
-            sed -i "s/'PLACEHOLDER'/'SKIP'/" /tmp/PKGBUILD
-            echo "::group::namcap $pkg"
-            namcap /tmp/PKGBUILD
-            echo "::endgroup::"
-          done
+  # Lints the AUR recipes moved to packaging.yml: a PKGBUILD cannot be affected
+  # by a UI or server change, so it runs only when packaging/arch changes.
 
   release:
     name: Attach gateway binaries to the GitHub Release

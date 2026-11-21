@@ -304,6 +304,22 @@ function searchBox(root: HTMLElement): HTMLInputElement {
   return input;
 }
 
+function maxPriceBox(root: HTMLElement): HTMLInputElement {
+  const input = root.querySelector<HTMLInputElement>('#models-max-price input');
+  if (input === null) {
+    throw new Error('no max price filter');
+  }
+  return input;
+}
+
+function minQualityBox(root: HTMLElement): HTMLInputElement {
+  const input = root.querySelector<HTMLInputElement>('#models-min-quality input');
+  if (input === null) {
+    throw new Error('no min quality filter');
+  }
+  return input;
+}
+
 /** Queues the filtered response, then the unfiltered one used for the count. */
 function queueSearch(
   fetchMock: FetchMock,
@@ -332,6 +348,8 @@ describe('Models', () => {
     queryProvider: string | null = null,
     queryMix: string | null = null,
     querySearch: string | null = null,
+    queryMaxPrice: string | null = null,
+    queryMinQuality: string | null = null,
   ): Promise<ComponentFixture<Models>> {
     const query: Record<string, string> = {};
     if (queryProvider !== null) {
@@ -342,6 +360,12 @@ describe('Models', () => {
     }
     if (querySearch !== null) {
       query['q'] = querySearch;
+    }
+    if (queryMaxPrice !== null) {
+      query['max_price'] = queryMaxPrice;
+    }
+    if (queryMinQuality !== null) {
+      query['min_quality'] = queryMinQuality;
     }
     TestBed.configureTestingModule({
       imports: [Models],
@@ -1317,6 +1341,123 @@ describe('Models', () => {
 
     expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
     expect(root.textContent).not.toContain('No models match');
+  });
+
+  it('caps the list by the shown mix price without another API call', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Max mix price ($/M)');
+    const callsBefore = fetchMock.requests.length;
+
+    typeInto(root, maxPriceBox(root), '0.9');
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(root.textContent).toContain('1 of 2 models');
+    expect(TestBed.inject(Location).path()).toContain('max_price=0.9');
+    expect(fetchMock.requests).toHaveLength(callsBefore);
+  });
+
+  it('filters by the minimum quality and excludes rows without a score', async () => {
+    queueReload(fetchMock, {
+      ...allOverview,
+      rows: [
+        allRow({ model_id: 'm1', canonical_name: 'a/high' }),
+        allRow({
+          model_id: 'm2',
+          canonical_name: 'b/low',
+          quality: { ...quality, score: 1200, rank: 2 },
+        }),
+        allRow({ model_id: 'm3', canonical_name: 'c/unknown', quality: null }),
+      ],
+    });
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    typeInto(root, minQualityBox(root), '1300');
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['a/high']);
+    expect(root.textContent).toContain('1 of 3 models');
+    expect(TestBed.inject(Location).path()).toContain('min_quality=1300');
+  });
+
+  it('applies the price cap to the input column when component prices are selected', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, 'components');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Max input price ($/M)');
+
+    typeInto(root, maxPriceBox(root), '2');
+    fixture.detectChanges();
+
+    // The priced model averages $1.50 input; the unpriced one never passes.
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(root.textContent).toContain('1 of 2 models');
+  });
+
+  it('restores price and quality filters from the URL', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, '1', '1400');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(maxPriceBox(root).value).toBe('1');
+    expect(minQualityBox(root).value).toBe('1400');
+    // The default row costs $0.84 and scores 1433, so it survives both caps.
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(root.textContent).toContain('1 of 2 models');
+  });
+
+  it('clears both caps from the filtered empty state', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    typeInto(root, minQualityBox(root), '9999');
+    fixture.detectChanges();
+
+    expect(root.textContent).toContain('No models match these limits');
+    const empty = root.querySelector('ui-empty');
+    if (empty === null) {
+      throw new Error('no empty state');
+    }
+    buttonByText(empty as HTMLElement, 'Clear limits').click();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    expect(minQualityBox(root).value).toBe('');
+    expect(TestBed.inject(Location).path()).not.toContain('min_quality=');
+  });
+
+  it('clears the provider, the search, and the limits from the combined empty state', async () => {
+    fetchMock.respond(jsonResponse(200, [provider]));
+    fetchMock.respond(jsonResponse(200, [codeAgent, chatProfile]));
+    fetchMock.respond(jsonResponse(200, pricingSettings()));
+    queueSearch(fetchMock, emptyOverview, allOverview);
+    fetchMock.respond(jsonResponse(200, { last_run: null, snapshot_stale: true, ttl_hours: 24 }));
+    fetchMock.respond(jsonResponse(200, { sources: [] }));
+    const fixture = await create('admin', 'p1', null, 'gpt', '0', null);
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('No models match “gpt”');
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    buttonByText(root, 'Clear all filters').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const providerSelect = root.querySelector('#models-provider-filter');
+    expect(providerSelect instanceof HTMLSelectElement ? providerSelect.value : null).toBe('all');
+    expect(searchBox(root).value).toBe('');
+    expect(maxPriceBox(root).value).toBe('');
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    const path = TestBed.inject(Location).path();
+    expect(path).not.toContain('q=');
+    expect(path).not.toContain('max_price=');
+    expect(path).not.toContain('provider=');
   });
 
   it('combines the search with the provider filter and counts in that scope', async () => {
