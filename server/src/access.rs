@@ -475,6 +475,31 @@ mod tests {
     }
 
     #[test]
+    fn a_deny_only_key_denies_everything_for_a_user_owner() {
+        // A user-owned key with a `deny` row is an explicit scope without
+        // `allow` rows, so it loses the owner's other grants too (D59).
+        let g = grants(&[
+            ("user", "u", "model", "a", "allow"),
+            ("user", "u", "model", "b", "allow"),
+            ("api_key", "k", "model", "b", "deny"),
+        ]);
+        assert!(!g.allows(Role::User, "u", Some("k"), "a", "o", None));
+        assert!(!g.allows(Role::User, "u", Some("k"), "b", "o", None));
+    }
+
+    #[test]
+    fn allow_rows_do_not_narrow_an_admins_key() {
+        // The role default is allow, so an admin-owned key is scoped only by
+        // `deny` rows; `allow` rows change nothing (D59).
+        let g = grants(&[("api_key", "k", "model", "m", "allow")]);
+        assert!(g.allows(Role::Admin, "u", Some("k"), "other", "o", None));
+
+        let g = grants(&[("api_key", "k", "model", "m", "deny")]);
+        assert!(!g.allows(Role::Admin, "u", Some("k"), "m", "o", None));
+        assert!(g.allows(Role::Admin, "u", Some("k"), "other", "o", None));
+    }
+
+    #[test]
     fn resource_types_match_independently() {
         // An offering grant allows that offering regardless of the model and
         // credential rows (allow-by-any, deny-by-any).
