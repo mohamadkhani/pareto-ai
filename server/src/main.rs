@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
         }
         Some("reset-password") => {
             let args: Vec<String> = std::env::args().skip(2).collect();
-            return cli::run_reset_password(&config, &args).await;
+            return cli::run_reset_password(&config.data_dir, &args).await;
         }
         _ => {}
     }

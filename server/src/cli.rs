@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
 
-use crate::config::Config;
 use crate::db;
 use crate::users;
 
@@ -45,23 +44,40 @@ struct Account {
 
 /// Runs `gateway reset-password` with the arguments after the subcommand.
 ///
+/// `configured_data_dir` is the server's data directory from `GATEWAY_DATA_DIR`
+/// (or `./data`); `--data-dir` still overrides it. Only the directory is needed
+/// here, so the command works without the rest of the server configuration.
+///
 /// Failure mode: a bad argument, a missing database, an unknown or ambiguous
 /// account, a too-short password, or a database error. The message always names
 /// what the operator must fix.
-pub async fn run_reset_password(config: &Config, args: &[String]) -> Result<()> {
+pub async fn run_reset_password(configured_data_dir: &Path, args: &[String]) -> Result<()> {
+    run_reset_password_with(configured_data_dir, args, None).await
+}
+
+/// [`run_reset_password`] with an injected password, so tests can cover the
+/// whole path without a terminal. `None` reads from the terminal or stdin.
+async fn run_reset_password_with(
+    configured_data_dir: &Path,
+    args: &[String],
+    password: Option<&str>,
+) -> Result<()> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("{USAGE}");
         return Ok(());
     }
     let parsed = parse_args(args).map_err(|message| anyhow::anyhow!("{message}\n\n{USAGE}"))?;
-    let data_dir = resolve_data_dir(parsed.data_dir.as_deref(), &config.data_dir)?;
+    let data_dir = resolve_data_dir(parsed.data_dir.as_deref(), configured_data_dir)?;
     let database = existing_database(&data_dir)?;
     let pool = db::open(&database)
         .await
         .with_context(|| format!("opening {}", database.display()))?;
 
     let account = select_account(&pool, parsed.email.as_deref()).await?;
-    let password = read_password()?;
+    let password = match password {
+        Some(password) => password.to_string(),
+        None => read_password()?,
+    };
     let outcome = users::reset_password_as_operator(&pool, &account.id, &password)
         .await
         .context("resetting the password")?;
@@ -313,5 +329,67 @@ mod tests {
         assert!(error.to_string().contains("setup wizard"), "{error}");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&other_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn resets_the_only_account_through_the_documented_path() {
+        crate::password::set_test_cost(8 * 1024, 1, 1);
+        let (dir, pool) = test_pool().await;
+        add_user(&pool, "a", "admin@example.com", false).await;
+        sqlx::query(
+            "INSERT INTO sessions (id, token_hash, user_id, csrf_token, expires_at) \
+             VALUES ('s1', 'h1', 'a', 'c', '2999-01-01T00:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("session");
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, name, prefix, key_hash, created_at, updated_at) \
+             VALUES ('k1', 'a', 'key', 'pk_live_ab12', 'hash', '2026-01-01T00:00:00.000Z', \
+                     '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .expect("api key");
+        drop(pool);
+
+        // No flags: the configured data directory and the only account.
+        run_reset_password_with(&dir, &[], Some("new-password-1"))
+            .await
+            .expect("reset through the CLI path");
+
+        let pool = crate::db::open(&dir.join("gateway.db"))
+            .await
+            .expect("reopen");
+        let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'a'")
+            .fetch_one(&pool)
+            .await
+            .expect("hash");
+        assert!(crate::password::verify_password("new-password-1", &hash).expect("verify"));
+        let flagged: i64 =
+            sqlx::query_scalar("SELECT must_change_password FROM users WHERE id = 'a'")
+                .fetch_one(&pool)
+                .await
+                .expect("flag");
+        assert_eq!(flagged, 1, "the operator's password must rotate");
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("sessions");
+        assert_eq!(sessions, 0);
+        let revoked: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM api_keys WHERE id = 'k1'")
+                .fetch_one(&pool)
+                .await
+                .expect("key");
+        assert!(revoked.is_some(), "live API keys are revoked");
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'auth.password_reset_cli'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("audit");
+        assert_eq!(audits, 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
