@@ -1348,7 +1348,7 @@ describe('Models', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.textContent).toContain('Max mix price $/M');
+    expect(root.textContent).toContain('Max mix price ($/M)');
     const callsBefore = fetchMock.requests.length;
 
     typeInto(root, maxPriceBox(root), '0.9');
@@ -1389,7 +1389,7 @@ describe('Models', () => {
     const fixture = await create('admin', null, 'components');
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.textContent).toContain('Max input $/M');
+    expect(root.textContent).toContain('Max input price ($/M)');
 
     typeInto(root, maxPriceBox(root), '2');
     fixture.detectChanges();
@@ -1419,13 +1419,45 @@ describe('Models', () => {
     typeInto(root, minQualityBox(root), '9999');
     fixture.detectChanges();
 
-    expect(root.textContent).toContain('No models match the filters');
-    buttonByText(root, 'Clear filters').click();
+    expect(root.textContent).toContain('No models match these limits');
+    const empty = root.querySelector('ui-empty');
+    if (empty === null) {
+      throw new Error('no empty state');
+    }
+    buttonByText(empty as HTMLElement, 'Clear limits').click();
     fixture.detectChanges();
 
     expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
     expect(minQualityBox(root).value).toBe('');
     expect(TestBed.inject(Location).path()).not.toContain('min_quality=');
+  });
+
+  it('clears the provider, the search, and the limits from the combined empty state', async () => {
+    fetchMock.respond(jsonResponse(200, [provider]));
+    fetchMock.respond(jsonResponse(200, [codeAgent, chatProfile]));
+    fetchMock.respond(jsonResponse(200, pricingSettings()));
+    queueSearch(fetchMock, emptyOverview, allOverview);
+    fetchMock.respond(jsonResponse(200, { last_run: null, snapshot_stale: true, ttl_hours: 24 }));
+    fetchMock.respond(jsonResponse(200, { sources: [] }));
+    const fixture = await create('admin', 'p1', null, 'gpt', '0', null);
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('No models match “gpt”');
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    buttonByText(root, 'Clear all filters').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const providerSelect = root.querySelector('#models-provider-filter');
+    expect(providerSelect instanceof HTMLSelectElement ? providerSelect.value : null).toBe('all');
+    expect(searchBox(root).value).toBe('');
+    expect(maxPriceBox(root).value).toBe('');
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    const path = TestBed.inject(Location).path();
+    expect(path).not.toContain('q=');
+    expect(path).not.toContain('max_price=');
+    expect(path).not.toContain('provider=');
   });
 
   it('combines the search with the provider filter and counts in that scope', async () => {

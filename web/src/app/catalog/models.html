@@ -2,9 +2,8 @@
   <header class="page-head">
     <h1>Models</h1>
     <p class="hint">
-      One page for the catalog, prices, and quality (D31). Filter by provider for per-offering rows,
-      or stay on all providers for average and minimum prices across the catalog. A maximum price
-      applies to the price column on screen; a minimum quality hides rows without a score.
+      Choosing a provider shows its own prices; All providers shows averages and minimums across the
+      catalog.
     </p>
   </header>
 
@@ -75,19 +74,19 @@
             inputmode="decimal"
             min="0"
             step="any"
-            placeholder="any"
+            placeholder="no limit"
             [value]="maxPriceInput()"
             (valueChange)="onMaxPriceInput($event)"
           />
         </ui-field>
 
-        <ui-field label="Min quality">
+        <ui-field label="Min quality score">
           <ui-input
             id="models-min-quality"
             type="number"
             inputmode="decimal"
             step="any"
-            placeholder="any"
+            placeholder="no limit"
             [value]="minQualityInput()"
             (valueChange)="onMinQualityInput($event)"
           />
@@ -95,7 +94,7 @@
 
         @if (refinementActive()) {
           <ui-button size="sm" variant="ghost" (clicked)="clearRefinements()">
-            Clear filters
+            Clear limits
           </ui-button>
         }
       </div>
@@ -236,25 +235,22 @@
           title="No models match “{{ searchTerm() }}”"
           [description]="
             refinementActive()
-              ? 'Try a different term, or relax the price and quality filters.'
+              ? 'Try a different term, or adjust the limits.'
               : 'Try a different name, family, upstream id, or provider.'
           "
         >
           <span ui-empty-action>
             @if (refinementActive()) {
-              <ui-button size="sm" (clicked)="clearAllFilters()">Clear filters</ui-button>
+              <ui-button size="sm" (clicked)="clearAllFilters()">Clear all filters</ui-button>
             } @else {
               <ui-button size="sm" (clicked)="clearSearch()">Clear search</ui-button>
             }
           </span>
         </ui-empty>
       } @else if (refinementActive()) {
-        <ui-empty
-          title="No models match the filters"
-          description="No model has a shown price at or below the maximum and a quality score at or above the minimum. Unpriced and unranked models never pass a cap."
-        >
+        <ui-empty title="No models match these limits">
           <span ui-empty-action>
-            <ui-button size="sm" (clicked)="clearRefinements()">Clear filters</ui-button>
+            <ui-button size="sm" (clicked)="clearRefinements()">Clear limits</ui-button>
           </span>
         </ui-empty>
       } @else if (providers().length === 0) {

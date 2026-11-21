@@ -392,7 +392,7 @@ export class Models {
   );
   /** The price column the maximum applies to. */
   protected readonly maxPriceLabel = computed(() =>
-    this.mixSelected() ? 'Max mix price $/M' : 'Max input $/M',
+    this.mixSelected() ? 'Max mix price ($/M)' : 'Max input price ($/M)',
   );
   /** "N of M models" while filtering, otherwise "N models". */
   protected readonly resultSummary = computed(() => {
@@ -528,18 +528,12 @@ export class Models {
     await this.loadOverview();
   }
 
-  /** Clears the box and restores the full list once. */
+  /** Clears the search box; the provider and the limits stay. */
   protected clearSearch(): void {
-    if (this.searchTimer !== null) {
-      clearTimeout(this.searchTimer);
-      this.searchTimer = null;
-    }
     if (this.searchInput() === '' && this.searchTerm() === '') {
       return;
     }
-    this.searchInput.set('');
-    this.searchTerm.set('');
-    this.writeUrlParam('q', null);
+    this.resetSearch();
     void this.loadOverview();
   }
 
@@ -564,10 +558,24 @@ export class Models {
     this.writeUrlParam('min_quality', null);
   }
 
-  /** Resets every filter, reloading only when the search changed. */
+  /** Clears the provider, the search, and the limits, then reloads once. */
   protected clearAllFilters(): void {
+    this.providerId.set('all');
+    this.writeUrlParam('provider', null);
     this.clearRefinements();
-    this.clearSearch();
+    this.resetSearch();
+    void this.loadOverview();
+  }
+
+  /** Empties the search box and its term without touching the list. */
+  private resetSearch(): void {
+    if (this.searchTimer !== null) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+    this.searchInput.set('');
+    this.searchTerm.set('');
+    this.writeUrlParam('q', null);
   }
 
   /**
