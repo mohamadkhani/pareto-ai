@@ -168,9 +168,23 @@
     } @else if (loading() && users().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (users().length === 0) {
-      <ui-empty title="No users yet" description="Create the first account for the console.">
+      <ui-empty
+        title="No users yet"
+        [description]="
+          unprotected()
+            ? 'Account creation is off until this gateway has a password. Set it in Settings.'
+            : 'Create the first account for the console.'
+        "
+      >
         <span ui-empty-action>
-          <ui-button size="sm" variant="primary" (clicked)="openCreate()">New user</ui-button>
+          <ui-button
+            size="sm"
+            variant="primary"
+            [disabled]="unprotected()"
+            (clicked)="openCreate()"
+          >
+            New user
+          </ui-button>
         </span>
       </ui-empty>
     } @else {
