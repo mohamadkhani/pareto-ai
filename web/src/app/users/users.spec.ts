@@ -133,6 +133,28 @@ describe('Users', () => {
     expect(fetchMock.requests).toHaveLength(1);
   });
 
+  it('disables both create entry points in the empty unprotected state', async () => {
+    // Right after `skip` there are no real accounts: the empty state is the
+    // first thing the operator sees.
+    fetchMock.respond(jsonResponse(200, []));
+    const fixture = await create('admin', 'unprotected');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('No users yet');
+    expect(root.textContent).toContain('Set it in Settings');
+    const buttons = Array.from(root.querySelectorAll('button')).filter(
+      (candidate) => candidate.textContent?.trim() === 'New user',
+    );
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(true);
+    }
+    buttons[1].click();
+    fixture.detectChanges();
+    expect(root.querySelector('ui-dialog')).toBeNull();
+    expect(fetchMock.requests).toHaveLength(1);
+  });
+
   it('lists accounts with role, status, and rotation badges', async () => {
     fetchMock.respond(
       jsonResponse(200, [
