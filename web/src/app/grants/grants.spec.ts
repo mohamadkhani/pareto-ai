@@ -163,6 +163,17 @@ describe('Grants', () => {
     expect(fetchMock.requests).toHaveLength(0);
   });
 
+  it('explains how a key inherits its owner (D59)', async () => {
+    const fixture = await create('user');
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+
+    // The page hint is the only place the console explains the inheritance
+    // rule; it must stay in step with the access decision (D59).
+    expect(text).toContain("inherits its owner's access");
+    expect(text).toContain("The first grant on a user's key replaces that inheritance");
+    expect(text).toContain('only deny rows narrow it');
+  });
+
   it('validates the subject and resource pickers before calling the API', async () => {
     queueLoad(fetchMock);
     const fixture = await create();
