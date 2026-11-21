@@ -198,7 +198,9 @@ pub async fn mark_skipped(pool: &SqlitePool, ip: &str) -> Result<(), SetupError>
 /// When the local-operator placeholder exists (setup was skipped earlier) it
 /// is promoted to that admin **in place** — same row, so every audit and
 /// `*_updated_by` reference to it stays valid — instead of a second row
-/// appearing.
+/// appearing. The promotion forces `role = 'admin'` and `is_active = 1` and
+/// revokes the placeholder's live API keys: keys minted while the gateway had
+/// no password must not inherit the administrator's `/v1` access (D23).
 ///
 /// Failure mode: [`SetupError::AlreadyComplete`] when an active real
 /// administrator exists, [`SetupError::Invalid`] for a bad email or a
@@ -225,8 +227,14 @@ pub async fn create_first_admin(
     // Write-first: both statements carry the "no active real administrator"
     // guard, and SQLite serialises writers, so the count cannot change between
     // them and a commit from another wizard request.
+    //
+    // The promotion forces `role` and `is_active`: the local operator row can
+    // have been edited before the password existed (an older build allowed it,
+    // and filesystem access always can), and the first password must yield an
+    // administrator regardless.
     let promoted = sqlx::query_as::<_, (String,)>(
         "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
+           role = 'admin', is_active = 1, \
            must_change_password = 0, is_placeholder = 0, \
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
          WHERE id = ? AND is_placeholder = 1 \
@@ -267,6 +275,22 @@ pub async fn create_first_admin(
             (id, false)
         }
     };
+    // API keys minted while the gateway had no password belong to the same row
+    // and would otherwise inherit the new administrator's `/v1` access (D23).
+    // The insert path has no keys by construction.
+    let api_keys_revoked = if promoted {
+        sqlx::query(
+            "UPDATE api_keys SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
     crate::auth::audit(
         &mut *tx,
         Some(&id),
@@ -274,14 +298,24 @@ pub async fn create_first_admin(
         Some("user"),
         Some(&id),
         Some(
-            &serde_json::json!({ "email": email, "source": "setup", "promoted_local_operator": promoted })
-                .to_string(),
+            &serde_json::json!({
+                "email": email,
+                "source": "setup",
+                "promoted_local_operator": promoted,
+                "api_keys_revoked": api_keys_revoked,
+            })
+            .to_string(),
         ),
         Some(ip),
     )
     .await?;
     tx.commit().await?;
-    tracing::info!(email = %email, promoted_local_operator = promoted, "created the first admin from the setup wizard");
+    tracing::info!(
+        email = %email,
+        promoted_local_operator = promoted,
+        api_keys_revoked,
+        "created the first admin from the setup wizard"
+    );
     Ok(id)
 }
 

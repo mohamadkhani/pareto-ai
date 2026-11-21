@@ -107,7 +107,7 @@ pub async fn status(State(state): State<AppState>, request: Request) -> Json<Set
         (status = 200, description = "first admin created; sets the gateway_session cookie", body = LoginResponse),
         (status = 400, description = "invalid email, too-short password, or malformed body", body = ErrorBody),
         (status = 403, description = "not a local request, or setup already skipped and no local admin exists", body = ErrorBody),
-        (status = 409, description = "an account already exists", body = ErrorBody)
+        (status = 409, description = "an active real administrator already exists; sign in instead", body = ErrorBody)
     )
 )]
 pub async fn create_admin(
@@ -722,5 +722,100 @@ mod tests {
             assert_eq!(response.body["error"]["code"], "invalid_request");
             assert!(response.body["error"].get("request_id").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn the_first_password_repairs_a_demoted_or_deactivated_placeholder() {
+        // An older build (or direct database access) could leave the placeholder
+        // non-admin or inactive. The promotion must yield an active
+        // administrator regardless; a PATCH cannot reach this state any more.
+        for (role, active) in [("user", 1), ("admin", 0)] {
+            let app = TestApp::unprotected().await;
+            sqlx::query("UPDATE users SET role = ?, is_active = ? WHERE id = ?")
+                .bind(role)
+                .bind(active)
+                .bind(crate::auth::LOCAL_OPERATOR_ID)
+                .execute(&app.state.pool)
+                .await
+                .expect("corrupt the placeholder");
+
+            let created = send(
+                app.router(),
+                post_local(
+                    "/api/setup/admin",
+                    serde_json::json!({
+                        "email": "recovered@example.com",
+                        "password": "recovered-admin-password",
+                    }),
+                    Some("127.0.0.1:5000"),
+                ),
+            )
+            .await;
+            assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+            assert_eq!(
+                created.body["user"]["role"], "admin",
+                "the first password must produce an administrator (role {role}, active {active})"
+            );
+            // `UserSummary` omits `is_active`, so read the stored row.
+            let (stored_role, stored_active): (String, i64) =
+                sqlx::query_as("SELECT role, is_active FROM users WHERE id = ?")
+                    .bind(crate::auth::LOCAL_OPERATOR_ID)
+                    .fetch_one(&app.state.pool)
+                    .await
+                    .expect("promoted row");
+            assert_eq!((stored_role.as_str(), stored_active), ("admin", 1));
+            assert_eq!(
+                crate::setup::real_admin_count(&app.state.pool)
+                    .await
+                    .expect("count"),
+                1
+            );
+            assert_eq!(app.state.setup.mode(), Mode::Protected);
+        }
+    }
+
+    #[tokio::test]
+    async fn promotion_revokes_the_local_operator_api_keys() {
+        let app = TestApp::unprotected().await;
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, name, prefix, key_hash, created_at, updated_at) \
+             VALUES ('k1', ?, 'minted without a password', 'pk_live_ab12', 'hash', \
+                     '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .bind(crate::auth::LOCAL_OPERATOR_ID)
+        .execute(&app.state.pool)
+        .await
+        .expect("placeholder key");
+
+        let created = send(
+            app.router(),
+            post_local(
+                "/api/setup/admin",
+                serde_json::json!({
+                    "email": "admin@example.com",
+                    "password": "first-admin-password",
+                }),
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+
+        let revoked: Option<String> =
+            sqlx::query_scalar("SELECT revoked_at FROM api_keys WHERE id = 'k1'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("key");
+        assert!(
+            revoked.is_some(),
+            "a key minted without a password must not inherit the administrator's access"
+        );
+        let detail: String = sqlx::query_scalar(
+            "SELECT detail_json FROM audit_log WHERE action = 'auth.bootstrap_admin_created'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("audit");
+        assert!(detail.contains("\"api_keys_revoked\":1"), "{detail}");
     }
 }
