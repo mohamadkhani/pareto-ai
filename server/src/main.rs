@@ -103,32 +103,33 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // The password reset is the recovery path for a lost admin password (D56)
+    // and must work when the rest of the configuration cannot be parsed. It
+    // needs only the data directory, so dispatch it before `Config::from_env`
+    // (which validates the timezone, timeouts, and master key).
+    if std::env::args().nth(1).as_deref() == Some("reset-password") {
+        let data_dir = config::data_dir_from_env().context("resolving the data directory")?;
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return cli::run_reset_password(&data_dir, &args).await;
+    }
+
     let config = Arc::new(Config::from_env().context("reading configuration")?);
 
-    // Operator commands run without serving (no master key needed: rollups
-    // hold no secrets, and the password reset only needs the database).
-    // `gateway rebuild-rollups` re-derives `usage_daily` from `usage_events`;
-    // `gateway reset-password` is the recovery path for a lost admin password
-    // (D56). Both exit without starting the server.
-    match std::env::args().nth(1).as_deref() {
-        Some("rebuild-rollups") => {
-            let pool = db::open(&config.database_path())
-                .await
-                .context("starting database")?;
-            let stats = reports::rebuild_rollups(&pool, config.tz)
-                .await
-                .context("rebuilding usage rollups")?;
-            println!(
-                "rebuilt usage_daily: {} rows from {} usage_events",
-                stats.rows, stats.events
-            );
-            return Ok(());
-        }
-        Some("reset-password") => {
-            let args: Vec<String> = std::env::args().skip(2).collect();
-            return cli::run_reset_password(&config.data_dir, &args).await;
-        }
-        _ => {}
+    // The remaining operator command runs without serving (rollups hold no
+    // secrets). `gateway rebuild-rollups` re-derives `usage_daily` from
+    // `usage_events` and exits before the server starts.
+    if std::env::args().nth(1).as_deref() == Some("rebuild-rollups") {
+        let pool = db::open(&config.database_path())
+            .await
+            .context("starting database")?;
+        let stats = reports::rebuild_rollups(&pool, config.tz)
+            .await
+            .context("rebuilding usage rollups")?;
+        println!(
+            "rebuilt usage_daily: {} rows from {} usage_events",
+            stats.rows, stats.events
+        );
+        return Ok(());
     }
     // Credential encryption needs a key from the very first request. An
     // explicit `GATEWAY_MASTER_KEY` wins; otherwise the key is read from (or

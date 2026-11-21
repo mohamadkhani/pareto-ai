@@ -140,14 +140,23 @@ fn resolve_data_dir(flag: Option<&Path>, configured: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Refuses to let a wrong working directory create a fresh database: an
-/// accidental empty file would look like "no accounts" and hide the real one.
+/// Refuses a missing or empty file. A wrong working directory must not open
+/// (and migrate) a fresh database that then looks like "no accounts": that
+/// would create a second gateway.db and hide the real one.
 fn existing_database(data_dir: &Path) -> Result<PathBuf> {
     let path = data_dir.join("gateway.db");
-    if !path.is_file() {
-        bail!(
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => bail!(
             "no database at {}; pass --data-dir or set GATEWAY_DATA_DIR to the directory \
              that holds gateway.db",
+            path.display()
+        ),
+    };
+    if metadata.len() == 0 {
+        bail!(
+            "{} is empty; refusing to open it, because a wrong --data-dir would create a \
+             fresh database and hide the real one",
             path.display()
         );
     }
@@ -251,7 +260,14 @@ mod tests {
         assert!(error.to_string().contains("no database at"), "{error}");
         std::fs::create_dir_all(&dir).expect("data dir");
         assert!(existing_database(&dir).is_err());
-        std::fs::write(dir.join("gateway.db"), b"").expect("database file");
+
+        // A zero-byte file is not a database: opening it would migrate a fresh
+        // one and report "no accounts" instead of naming the wrong directory.
+        std::fs::write(dir.join("gateway.db"), b"").expect("empty file");
+        let error = existing_database(&dir).expect_err("empty database file");
+        assert!(error.to_string().contains("is empty"), "{error}");
+
+        std::fs::write(dir.join("gateway.db"), b"SQLite format 3\0").expect("database file");
         assert_eq!(
             existing_database(&dir).expect("database"),
             dir.join("gateway.db")
