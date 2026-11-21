@@ -21,8 +21,11 @@
 name: Desktop
 
 on:
+  # Installers are consumed by a `v*` tag release, a pull request that touches
+  # the desktop shell, or a manual run. A push to main used to rebuild both
+  # installers (about twelve minutes) even though nothing consumed them; a
+  # desktop regression is still caught by the desktop PR that introduced it.
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
     paths:
