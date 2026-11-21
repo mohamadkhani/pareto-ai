@@ -82,7 +82,8 @@ admin has forgotten the password, reset it on the host that holds the database:
 
 ```bash
 ./server/target/release/gateway reset-password --email admin@example.com
-# when the database has exactly one account, the email can be omitted:
+# when the database has exactly one real account, the email can be omitted
+# (the local-operator placeholder does not count):
 ./server/target/release/gateway reset-password --data-dir /srv/pareto/data
 ```
 

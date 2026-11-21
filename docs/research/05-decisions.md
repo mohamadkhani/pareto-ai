@@ -1055,6 +1055,9 @@ reactivate a deactivated account; that still needs an admin. Its audit row has a
 (so the database resolves to `protected`) and the offline process cannot know
 the live mode; `detail.source = "cli"` identifies the row.
 
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa).
+
 ### D57. Setup closes at the first active administrator, and the last one cannot be removed
 
 **Decision (2026-11-20):** while the process is not already `protected`, the
@@ -1063,8 +1066,12 @@ first-admin/setup path is refused when an **active real administrator** exists
 exists; a process already in `protected` still refuses every setup mutation.
 The administrator guard is repeated inside the promoting and inserting
 statements, so two concurrent wizard requests cannot both create an
-administrator. `PATCH /api/users/{id}` likewise refuses to deactivate or demote
-the last active real administrator with `409 last_active_admin`.
+administrator. The promotion forces `role = 'admin'` and `is_active = 1` and
+revokes the local operator's live API keys, so the first password always yields
+exactly one active administrator and no credential minted without a password
+survives it. `PATCH /api/users/{id}` refuses the placeholder with
+`409 local_operator`, and refuses to deactivate or demote the last active real
+administrator with `409 last_active_admin`.
 
 **Why:** skipping setup leaves the gateway as a trusted local operator, and the
 console lets that operator create accounts before setting a password. With the
@@ -1078,9 +1085,18 @@ administrators: an admin demoting or deactivating themselves.
 still promote the local-operator placeholder and set the first password.
 Removing the last active administrator is a `409`; promote or activate another
 administrator first. A process already in `protected` mode still refuses setup
-mutations, so this does not reopen a finished installation. Databases that
-already contain accounts but no administrator are not repaired automatically:
-their mode is `protected`, and they need a manual role change to recover.
+mutations, so this does not reopen a finished installation. The promotion
+repairs a placeholder that an older build (or direct database access) demoted or
+deactivated: role and status are forced. API keys minted while the gateway had no
+password are revoked in the same transaction — after promotion they would act
+with the administrator's `/v1` access (D23), so create new keys after setting the
+password. Databases that already contain accounts but no administrator are not
+repaired automatically: their mode is `protected`, and they need a manual role
+change to recover.
+
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa)
+and tightened by [`eb2ae47`](https://github.com/mohamadkhani/pareto-ai/commit/eb2ae473f4facf451dde5da7e68fb8542f7416ee).
 
 ### D58. Accounts cannot be created while the gateway is unprotected
 
@@ -1108,6 +1124,10 @@ count, so it cannot race with a concurrent first-admin creation: an account can
 never commit while the process still considers itself unprotected. Databases
 that already contain accounts but no administrator predate this rule and are not
 repaired by it.
+
+**Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
+introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa);
+the service-level gate is [`4d0a14f`](https://github.com/mohamadkhani/pareto-ai/commit/4d0a14fcbbbe3fe1cb1f826200129f0e148f5d02).
 
 ## Open questions
 

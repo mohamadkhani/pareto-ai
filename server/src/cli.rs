@@ -24,7 +24,7 @@ The new password is read from the terminal (or one line on stdin, when
 stdin is not a terminal). Sessions are deleted, live API keys are revoked,
 and the account must choose a new password at its next sign-in.
 
-  --email      account to reset; omit it when the database has one account
+  --email      account to reset; omit it when the database has one real account
   --data-dir   directory holding gateway.db (default: GATEWAY_DATA_DIR or ./data)";
 
 /// The parsed arguments of `gateway reset-password`.
