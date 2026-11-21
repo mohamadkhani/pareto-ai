@@ -209,6 +209,9 @@ pub async fn create_first_admin(
     password: &str,
     ip: &str,
 ) -> Result<String, SetupError> {
+    // Fast path: refuse before hashing the password. The authoritative check
+    // is repeated in the same statements as the writes below, so two concurrent
+    // wizard requests cannot both create an administrator.
     if real_admin_count(pool).await? > 0 {
         return Err(SetupError::AlreadyComplete);
     }
@@ -219,11 +222,18 @@ pub async fn create_first_admin(
     let password_hash = crate::password::hash_password_offload(password).await?;
 
     let mut tx = pool.begin().await?;
+    // Write-first: both statements carry the "no active real administrator"
+    // guard, and SQLite serialises writers, so the count cannot change between
+    // them and a commit from another wizard request.
     let promoted = sqlx::query_as::<_, (String,)>(
         "UPDATE users SET email = ?, display_name = ?, password_hash = ?, \
            must_change_password = 0, is_placeholder = 0, \
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
          WHERE id = ? AND is_placeholder = 1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM users \
+             WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1 \
+           ) \
          RETURNING id",
     )
     .bind(&email)
@@ -236,10 +246,14 @@ pub async fn create_first_admin(
         Some((id,)) => (id, true),
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
+            let inserted = sqlx::query(
                 "INSERT INTO users (id, email, display_name, password_hash, role, is_active, \
                                     must_change_password) \
-                 VALUES (?, ?, ?, ?, 'admin', 1, 0)",
+                 SELECT ?, ?, ?, ?, 'admin', 1, 0 \
+                 WHERE NOT EXISTS ( \
+                   SELECT 1 FROM users \
+                   WHERE is_placeholder = 0 AND role = 'admin' AND is_active = 1 \
+                 )",
             )
             .bind(&id)
             .bind(&email)
@@ -247,6 +261,9 @@ pub async fn create_first_admin(
             .bind(&password_hash)
             .execute(&mut *tx)
             .await?;
+            if inserted.rows_affected() == 0 {
+                return Err(SetupError::AlreadyComplete);
+            }
             (id, false)
         }
     };
