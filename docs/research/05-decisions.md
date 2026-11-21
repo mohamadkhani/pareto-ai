@@ -385,9 +385,9 @@ exist, and it forces the token discipline D28 needs.
 | BenchLM                      | `benchlm.ai/_next/data/{build_id}/models.json`                             | yes              | check; brittle (build id)        |
 | OpenRouter prices/benchmarks | `openrouter.ai/api/...`                                                    | **blocked**      | stays fixture-tested             |
 
-`llm-leaders` (`/home/mohamad/Projects/llm-leaders`) is **GPL-3.0**: use its
-README for the API contracts and matching ideas only — reimplement
-independently, never copy its code into this project.
+`llm-leaders` (a local reference checkout outside this repository) is
+**GPL-3.0**: use its README for the API contracts and matching ideas only —
+reimplement independently, never copy its code into this project.
 
 ### D32. License: MIT
 
