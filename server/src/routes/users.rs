@@ -477,6 +477,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_local_operator_placeholder_cannot_be_patched() {
+        for patch in [
+            serde_json::json!({ "role": "user" }),
+            serde_json::json!({ "is_active": false }),
+            serde_json::json!({ "password": "attacker-password-1" }),
+        ] {
+            let app = TestApp::unprotected().await;
+            let router = app.router();
+
+            let refused = send(
+                router,
+                api_request(
+                    Method::PATCH,
+                    &format!("/api/users/{}", crate::auth::LOCAL_OPERATOR_ID),
+                    Some(patch.clone()),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+            assert_eq!(refused.body["error"]["code"], "local_operator");
+
+            let (role, active, placeholder): (String, i64, i64) =
+                sqlx::query_as("SELECT role, is_active, is_placeholder FROM users WHERE id = ?")
+                    .bind(crate::auth::LOCAL_OPERATOR_ID)
+                    .fetch_one(&app.state.pool)
+                    .await
+                    .expect("placeholder row");
+            assert_eq!(
+                (role.as_str(), active, placeholder),
+                ("admin", 1, 1),
+                "the refused patch changed nothing (patch {patch})"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn users_crud_is_admin_only_and_forced_rotation_survives_a_reset() {
         let app = TestApp::new().await;
         let admin_id = app

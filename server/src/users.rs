@@ -106,6 +106,8 @@ pub enum UserError {
     InvalidCredentials,
     #[error("the last active administrator cannot be deactivated or demoted")]
     LastAdmin,
+    #[error("the local operator account is managed in Settings, not in the user list")]
+    LocalOperator,
     #[error("accounts cannot be created while the gateway is unprotected")]
     SetupIncomplete,
     #[error("password hashing failed: {0}")]
@@ -127,6 +129,12 @@ impl UserError {
                 StatusCode::CONFLICT,
                 "last_active_admin",
                 "this is the last active administrator; promote or activate another administrator first",
+            )
+            .with_request_id(rid),
+            UserError::LocalOperator => ApiError::custom(
+                StatusCode::CONFLICT,
+                "local_operator",
+                "the local operator account is managed in Settings, not in the user list",
             )
             .with_request_id(rid),
             UserError::SetupIncomplete => ApiError::custom(
@@ -266,8 +274,9 @@ pub async fn create_user(
 /// concurrent patches.
 ///
 /// Failure mode: [`UserError::Invalid`] on an all-null patch or bad values,
-/// [`UserError::NotFound`] for an unknown account, [`UserError::LastAdmin`]
-/// when the patch would deactivate or demote the last active administrator.
+/// [`UserError::NotFound`] for an unknown account, [`UserError::LocalOperator`]
+/// for the local-operator placeholder, [`UserError::LastAdmin`] when the patch
+/// would deactivate or demote the last active administrator.
 pub async fn update_user(
     pool: &SqlitePool,
     actor: &Actor<'_>,
@@ -318,7 +327,9 @@ pub async fn update_user(
     // terms enforce D57 in the same statement (no read-then-write race): the
     // patch is allowed when it keeps this account an active administrator,
     // when another active real administrator remains, or when this account was
-    // not one to begin with.
+    // not one to begin with. The local-operator placeholder is excluded
+    // entirely: it is not a managed account, and editing its role or status
+    // before the first password would let the promotion create a non-admin.
     let updated: Option<(String,)> = sqlx::query_as(
         "UPDATE users SET \
            display_name = COALESCE(?, display_name), \
@@ -327,7 +338,7 @@ pub async fn update_user(
            password_hash = COALESCE(?, password_hash), \
            must_change_password = COALESCE(?, must_change_password), \
            updated_at = ? \
-         WHERE id = ? \
+         WHERE id = ? AND is_placeholder = 0 \
            AND ( \
              (COALESCE(?, role) = 'admin' AND COALESCE(?, is_active) = 1) \
              OR EXISTS ( \
@@ -335,7 +346,7 @@ pub async fn update_user(
                WHERE other.id <> ? AND other.role = 'admin' AND other.is_active = 1 \
                  AND other.is_placeholder = 0 \
              ) \
-             OR role <> 'admin' OR is_active <> 1 OR is_placeholder = 1 \
+             OR role <> 'admin' OR is_active <> 1 \
            ) \
          RETURNING id",
     )
@@ -353,12 +364,15 @@ pub async fn update_user(
     .await?;
     if updated.is_none() {
         // The guard and the existence check share one statement; a miss means
-        // either "no such row" or "refused to remove the last administrator".
-        let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE id = ?")
-            .bind(user_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        return match exists {
+        // "no such row", "the local operator", or "refused to remove the last
+        // administrator".
+        let row: Option<(String, i64)> =
+            sqlx::query_as("SELECT id, is_placeholder FROM users WHERE id = ?")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        return match row {
+            Some((_, 1)) => Err(UserError::LocalOperator),
             Some(_) => Err(UserError::LastAdmin),
             None => Err(UserError::NotFound("user")),
         };
