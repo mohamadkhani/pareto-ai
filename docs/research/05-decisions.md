@@ -1182,6 +1182,11 @@ always mint a key without grants. It limits blast radius for admin-issued keys.
 This supersedes the "effective access = user verdict AND key verdict" sentence
 of the D9 note.
 
+**Source:** [PR #12](https://github.com/mohamadkhani/pareto-ai/pull/12), commits
+[`5bdc2d4`](https://github.com/mohamadkhani/pareto-ai/commit/5bdc2d4640ff99b2683b85958de79f72133bfe0b)
+and [`bd7323f`](https://github.com/mohamadkhani/pareto-ai/commit/bd7323f8f5243b99f0eda4976222ea2e69eb379f);
+the M4 spec is [`m4-access-money.md`](../specs/m4-access-money.md).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

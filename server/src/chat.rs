@@ -20,10 +20,12 @@
 //!   recent-failure penalty instead. The M5 circuit breaker
 //!   ([`crate::breaker`], per (credential, offering)) excludes an open pair
 //!   entirely; see its module docs for how it layers with the M3 cooldown.
-//!   Access grants (M4, decision D9) then filter the candidates: every
-//!   subject (the user, and the key when present) must allow the model, the
-//!   offering, and the credential. Before forwarding, the request's estimate
-//!   is reserved against the user's budgets and token caps (decision D7).
+//!   Access grants (M4, decisions D9 and D59) then filter the candidates: the
+//!   user's verdict always applies, and the key's own verdict applies too when
+//!   the key has grant rows of its own — a key without grants inherits the
+//!   user's verdict, so it can narrow that verdict but never widen it. Before
+//!   forwarding, the request's estimate is reserved against the user's budgets
+//!   and token caps (decision D7).
 //! * **Failover**: only before the first byte reaches the client — before the
 //!   first upstream chunk is forwarded for streams, before the response is
 //!   returned for buffered calls. `400`/`422` never fail over. A failure
@@ -1356,10 +1358,11 @@ pub async fn execute(
         return Err(failure);
     }
 
-    // Access control (decision D9): a candidate survives only when every
-    // subject (the user, and the key when present) allows its model, its
-    // offering, and its credential. Admins are allowed by default; a request
-    // whose candidates are all denied is a 403, never a 404.
+    // Access control (decisions D9 and D59): a candidate survives only when
+    // the user's verdict allows its model, offering, and credential, and the
+    // key's verdict allows them too when the key has grants of its own; a key
+    // without grants inherits the user's verdict. Admins are allowed by
+    // default; a request whose candidates are all denied is a 403, never a 404.
     let api_key_id = meta.api_key.as_ref().map(|key| key.key_id.as_str());
     let grants = access::Grants::load(&state.pool, &meta.user_id, api_key_id)
         .await

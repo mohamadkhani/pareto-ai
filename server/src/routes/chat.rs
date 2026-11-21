@@ -77,9 +77,9 @@ pub struct ChatUsage {
 }
 
 /// Handles one chat completion. Auth: `Authorization: Bearer pk_live_...`
-/// (any account, subject to the key's grants and rate limits) or an admin
-/// session (M3 behaviour kept for the dashboard); CSRF-exempt like the rest
-/// of `/v1`.
+/// (any account, subject to the account's effective grants and the key's rate
+/// limits) or an admin session (M3 behaviour kept for the dashboard);
+/// CSRF-exempt like the rest of `/v1`.
 ///
 /// Failover note: the candidate order is resolved once per request, before
 /// the first attempt; a cooldown recorded while attempt 1 is failing (an
