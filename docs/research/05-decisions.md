@@ -1084,8 +1084,11 @@ administrator, and neither Settings nor the CLI could restore one. Checking the
 same invariant from the other side exposed a second route to zero
 administrators: an admin demoting or deactivating themselves.
 
-**Consequence:** a non-admin account no longer closes setup, so Settings can
-still promote the local-operator placeholder and set the first password.
+**Consequence:** within one process, a non-admin account no longer closes
+setup, so Settings can still promote the local-operator placeholder and set the
+first password. After a restart `resolve_mode` sees any real account and reports
+`protected`, so a database with only non-admin accounts cannot reach that path;
+recover it with `gateway reset-password` and a direct role change (README).
 Removing the last active administrator is a `409`; promote or activate another
 administrator first. The placeholder is also filtered out of `GET /api/users`,
 so the console never offers Edit or Deactivate for the one row the API refuses
