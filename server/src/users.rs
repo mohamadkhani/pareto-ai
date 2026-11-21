@@ -38,6 +38,26 @@ fn ts(at: chrono::DateTime<chrono::Utc>) -> String {
     at.format(auth::TS_FMT).to_string()
 }
 
+/// Revokes every live API key of one account and returns how many were
+/// revoked (decision D23). Shared by the admin password reset, the operator
+/// reset, and the first-password promotion, so the rule exists once.
+///
+/// Failure mode: [`sqlx::Error`] when the update fails.
+pub(crate) async fn revoke_live_api_keys<'e, E>(db: E, user_id: &str) -> Result<u64, sqlx::Error>
+where
+    E: sqlx::SqliteExecutor<'e>,
+{
+    Ok(sqlx::query(
+        "UPDATE api_keys SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE user_id = ? AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(db)
+    .await?
+    .rows_affected())
+}
+
 /// One account as the API returns it. Never carries the password hash.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct UserView {
@@ -178,13 +198,15 @@ fn validate_role(raw: &str) -> Result<auth::Role, UserError> {
 const SELECT_USERS: &str = "SELECT id, email, display_name, role, is_active, \
      must_change_password, created_at, updated_at, last_login_at FROM users";
 
-/// Lists all accounts, oldest first.
+/// Lists all managed accounts, oldest first. The local-operator placeholder is
+/// not a managed account: it appears as an ordinary row to the console
+/// otherwise, and PATCH refuses it (D57).
 pub async fn list_users(pool: &SqlitePool) -> Result<Vec<UserView>, UserError> {
-    Ok(
-        sqlx::query_as::<_, UserView>(&format!("{SELECT_USERS} ORDER BY created_at, id"))
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as::<_, UserView>(&format!(
+        "{SELECT_USERS} WHERE is_placeholder = 0 ORDER BY created_at, id"
+    ))
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Fetches one account by id.
@@ -212,9 +234,6 @@ pub async fn create_user(
     input: &UserInput,
     mode: Mode,
 ) -> Result<UserView, UserError> {
-    if mode == Mode::Unprotected {
-        return Err(UserError::SetupIncomplete);
-    }
     let email = validate_email(&input.email)?;
     let role = validate_role(&input.role)?;
     validate_password(&input.password)?;
@@ -223,6 +242,11 @@ pub async fn create_user(
         return Err(UserError::Invalid(
             "display_name must not be empty".to_string(),
         ));
+    }
+    // Validate before the mode gate so a malformed body is a `400` in every
+    // mode, as `utoipa` documents; nothing is written or hashed either way.
+    if mode == Mode::Unprotected {
+        return Err(UserError::SetupIncomplete);
     }
     // An admin-set initial password must be rotated unless the admin says
     // otherwise explicitly.
@@ -390,16 +414,7 @@ pub async fn update_user(
     // keys. A self-service change never comes through here.
     let mut api_keys_revoked = 0u64;
     if password_hash.is_some() {
-        api_keys_revoked = sqlx::query(
-            "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? \
-             WHERE user_id = ? AND revoked_at IS NULL",
-        )
-        .bind(&now)
-        .bind(&now)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        api_keys_revoked = revoke_live_api_keys(&mut *tx, user_id).await?;
     }
 
     let detail = serde_json::json!({
@@ -437,7 +452,8 @@ pub struct OperatorResetOutcome {
 /// `NULL` actor, because no session identifies the operator.
 ///
 /// Failure mode: [`UserError::Invalid`] for a too-short password,
-/// [`UserError::NotFound`] for an unknown or placeholder account.
+/// [`UserError::NotFound`] for an unknown account, [`UserError::LocalOperator`]
+/// for the local-operator placeholder (its password is set in Settings).
 pub async fn reset_password_as_operator(
     pool: &SqlitePool,
     user_id: &str,
@@ -461,7 +477,17 @@ pub async fn reset_password_as_operator(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((email, is_active)) = updated else {
-        return Err(UserError::NotFound("user"));
+        // The write filters the placeholder out; name it instead of claiming
+        // the account does not exist.
+        let placeholder: Option<i64> =
+            sqlx::query_scalar("SELECT is_placeholder FROM users WHERE id = ?")
+                .bind(user_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        return match placeholder {
+            Some(1) => Err(UserError::LocalOperator),
+            _ => Err(UserError::NotFound("user")),
+        };
     };
 
     let sessions_revoked = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
@@ -469,16 +495,7 @@ pub async fn reset_password_as_operator(
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    let api_keys_revoked = sqlx::query(
-        "UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?), updated_at = ? \
-         WHERE user_id = ? AND revoked_at IS NULL",
-    )
-    .bind(&now)
-    .bind(&now)
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let api_keys_revoked = revoke_live_api_keys(&mut *tx, user_id).await?;
 
     let detail = serde_json::json!({
         "source": "cli",
@@ -1244,10 +1261,7 @@ mod tests {
         let refused = reset_password_as_operator(&pool, "local", "new-password-1")
             .await
             .expect_err("placeholder");
-        assert!(
-            matches!(refused, UserError::NotFound("user")),
-            "{refused:?}"
-        );
+        assert!(matches!(refused, UserError::LocalOperator), "{refused:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
