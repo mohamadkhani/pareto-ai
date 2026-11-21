@@ -31,7 +31,7 @@ use crate::users::{self, UserInput, UserPatch, UserView};
     path = "/api/users",
     tag = "users",
     responses(
-        (status = 200, description = "all accounts", body = [UserView]),
+        (status = 200, description = "all managed accounts; the local-operator placeholder is not included", body = [UserView]),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "not an admin", body = ErrorBody)
     )
@@ -100,7 +100,7 @@ pub async fn create_user(
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
         (status = 404, description = "no such user", body = ErrorBody),
-        (status = 409, description = "refusing to remove the last active administrator", body = ErrorBody)
+        (status = 409, description = "the last active administrator cannot be deactivated or demoted, or the target is the local operator (managed in Settings)", body = ErrorBody)
     )
 )]
 pub async fn update_user(
@@ -436,6 +436,31 @@ mod tests {
             .expect("users");
         assert_eq!(users, 0, "the refused request created no account");
 
+        // Validation runs before the mode gate: a malformed body is a `400` in
+        // every mode, as the route documents.
+        let malformed = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "not-an-email",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            malformed.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            malformed.body
+        );
+
         // Setting the first password promotes the local operator and opens
         // account creation for the rest of the process.
         let set = send(
@@ -474,6 +499,23 @@ mod tests {
         )
         .await;
         assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    }
+
+    #[tokio::test]
+    async fn the_local_operator_is_not_listed_as_an_account() {
+        let app = TestApp::unprotected().await;
+        let listed = send(
+            app.router(),
+            api_request(Method::GET, "/api/users", None, None, None),
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        assert_eq!(
+            listed.body.as_array().map(Vec::len),
+            Some(0),
+            "the placeholder is not a managed account: {}",
+            listed.body
+        );
     }
 
     #[tokio::test]
