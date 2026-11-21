@@ -1,0 +1,56 @@
+# Lints the AUR recipes when they change.
+#
+# This used to live in ci.yml and ran on every push and pull request, which
+# meant a UI or server change paid for a container plus a full `pacman -Syu`.
+# A PKGBUILD cannot be affected by application code, so the check now has its
+# own workflow with a path filter, and installs only namcap.
+#
+# PLACEHOLDER sums are swapped for SKIP so namcap's checksum checks pass; CI
+# injects the real sums only when publishing.
+
+name: Packaging
+
+on:
+  pull_request:
+    paths:
+      - "packaging/arch/**"
+      - ".github/workflows/packaging.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packaging/arch/**"
+      - ".github/workflows/packaging.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  aur-lint:
+    name: Lint PKGBUILDs with namcap
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # `base-devel` already carries the toolchain; only namcap and git are
+      # needed, and `-Sy` avoids the full system upgrade the old job paid for.
+      - name: Install namcap
+        run: pacman -Sy --noconfirm --needed namcap git
+
+      - uses: actions/checkout@v4
+
+      - name: Lint PKGBUILDs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in packaging/arch/pareto-ai packaging/arch/pareto-ai-bin \
+                     packaging/arch/pareto-ai-desktop packaging/arch/pareto-ai-desktop-bin; do
+            cp "$pkg/PKGBUILD" /tmp/PKGBUILD
+            sed -i "s/'PLACEHOLDER'/'SKIP'/" /tmp/PKGBUILD
+            echo "::group::namcap $pkg"
+            namcap /tmp/PKGBUILD
+            echo "::endgroup::"
+          done
