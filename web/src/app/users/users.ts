@@ -84,6 +84,16 @@ export class Users {
    */
   protected readonly unprotected = computed(() => this.setup.status()?.mode === 'unprotected');
 
+  /** False until the setup status arrives (the first render, or a failed load). */
+  protected readonly statusKnown = computed(() => this.setup.status() !== null);
+
+  /**
+   * Creation needs a known, non-unprotected mode. While the status is unknown
+   * the buttons stay disabled rather than opening a form that can only answer
+   * `409 setup_incomplete`; Refresh retries the status read.
+   */
+  protected readonly createAllowed = computed(() => this.statusKnown() && !this.unprotected());
+
   protected readonly users = signal<UserView[]>([]);
   protected readonly loading = signal(false);
   protected readonly loadError = signal<string | null>(null);
@@ -150,6 +160,11 @@ export class Users {
   protected async reload(): Promise<void> {
     this.loading.set(true);
     this.loadError.set(null);
+    // The constructor reads the status once; a failed load leaves it null, so
+    // Refresh is also the retry for it.
+    if (this.setup.status() === null) {
+      void this.setup.load().catch(() => undefined);
+    }
     try {
       this.users.set(await this.usersService.list());
     } catch (err) {
@@ -160,7 +175,7 @@ export class Users {
   }
 
   protected openCreate(): void {
-    if (this.unprotected()) {
+    if (!this.createAllowed()) {
       return;
     }
     this.createForm.reset({

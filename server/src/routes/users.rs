@@ -574,6 +574,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_last_active_administrator_is_a_409_on_the_wire() {
+        let app = TestApp::new().await;
+        let first = app
+            .create_user("first@example.com", Role::Admin, true)
+            .await;
+        let second = app
+            .create_user("second@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "first@example.com").await;
+
+        // With another administrator around, deactivation is allowed.
+        let deactivated = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{second}"),
+                Some(serde_json::json!({ "is_active": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(deactivated.status, StatusCode::OK, "{}", deactivated.body);
+
+        // The remaining administrator cannot deactivate themselves: the error
+        // map must turn the service guard into 409 last_active_admin, not a 500.
+        let refused = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{first}"),
+                Some(serde_json::json!({ "is_active": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "last_active_admin");
+        assert!(
+            refused.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("last active administrator"),
+            "{}",
+            refused.body
+        );
+        let active: i64 = sqlx::query_scalar("SELECT is_active FROM users WHERE id = ?")
+            .bind(&first)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("row");
+        assert_eq!(active, 1, "the refusal changed nothing");
+    }
+
+    #[tokio::test]
     async fn users_crud_is_admin_only_and_forced_rotation_survives_a_reset() {
         let app = TestApp::new().await;
         let admin_id = app

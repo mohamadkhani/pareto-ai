@@ -1,7 +1,12 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
+import {
+  FetchMock,
+  errorResponse,
+  jsonResponse,
+  noContentResponse,
+} from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import { SetupService, type SetupMode, type SetupStatus } from '../setup/setup.service';
 import type { UserView } from './users.types';
@@ -153,6 +158,35 @@ describe('Users', () => {
     fixture.detectChanges();
     expect(root.querySelector('ui-dialog')).toBeNull();
     expect(fetchMock.requests).toHaveLength(1);
+  });
+
+  it('keeps creation closed while the setup status is unknown', async () => {
+    // First request: the status read fails and stays null. Second: the list.
+    fetchMock.respond(errorResponse(500, 'internal', 'status unavailable'));
+    fetchMock.respond(jsonResponse(200, []));
+
+    TestBed.configureTestingModule({
+      imports: [Users],
+      providers: [{ provide: AuthService, useValue: authStub('admin') }, provideRouter([])],
+    });
+    await TestBed.compileComponents();
+    // Deliberately no status seed: `SetupService.status()` starts null.
+    const fixture = TestBed.createComponent(Users);
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Checking whether this gateway has a password');
+    const buttons = Array.from(root.querySelectorAll('button')).filter(
+      (candidate) => candidate.textContent?.trim() === 'New user',
+    );
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(true);
+    }
+    buttons[1].click();
+    fixture.detectChanges();
+    expect(root.querySelector('ui-dialog')).toBeNull();
   });
 
   it('lists accounts with role, status, and rotation badges', async () => {

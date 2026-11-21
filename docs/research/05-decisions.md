@@ -1053,10 +1053,10 @@ command resolves only `GATEWAY_DATA_DIR` (or `--data-dir`) and runs before the
 rest of the configuration is parsed, so a malformed timezone, timeout, or master
 key cannot block recovery. The desktop app's data directory must be passed
 explicitly. The command does not reactivate a deactivated account; that still
-needs an admin. Its audit row has a `NULL` actor and `insecure = 0`, because the
-target is always a real account (so the database resolves to `protected`) and the
-offline process cannot know the live mode; `detail.source = "cli"` identifies the
-row.
+needs an admin. Its audit row has a `NULL` actor, and `insecure = 0` because
+`auth::audit` derives that column from the actor row with
+`COALESCE((SELECT is_placeholder FROM users WHERE id = ?), 0)`, which a `NULL`
+actor leaves at `0`; `detail.source = "cli"` identifies the row.
 
 **Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
 introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa).
@@ -1072,9 +1072,10 @@ statements, so two concurrent wizard requests cannot both create an
 administrator. The promotion forces `role = 'admin'` and `is_active = 1` and
 revokes the local operator's live API keys, so the first password always yields
 exactly one active administrator and no credential minted without a password
-survives it. `PATCH /api/users/{id}` refuses the placeholder with
-`409 local_operator`, and refuses to deactivate or demote the last active real
-administrator with `409 last_active_admin`.
+survives it. `PATCH /api/users/{id}` refuses a valid patch to the placeholder
+with `409 local_operator` (invalid input is a `400` first), and refuses to
+deactivate or demote the last active real administrator with
+`409 last_active_admin`.
 
 **Why:** skipping setup leaves the gateway as a trusted local operator, and the
 console lets that operator create accounts before setting a password. With the
@@ -1110,9 +1111,11 @@ and tightened by [`eb2ae47`](https://github.com/mohamadkhani/pareto-ai/commit/eb
 
 **Decision (2026-11-21):** `POST /api/users` is refused with
 `409 setup_incomplete` while the gateway is in `unprotected` mode. The rule
-lives in `users::create_user`, so every caller inherits it. The only way out of
-that mode is the first admin/password (`/api/setup/admin`, exposed as Settings),
-which promotes the local operator.
+lives in `users::create_user`, so every caller inherits it. The only console or
+HTTP way out of that mode is the first admin/password (`/api/setup/admin`,
+exposed as Settings), which promotes the local operator;
+`GATEWAY_ADMIN_EMAIL` plus `GATEWAY_ADMIN_PASSWORD` also promote the placeholder
+during startup (`bootstrap::ensure_admin`, before `resolve_mode`).
 
 **Why:** skipping setup lets the local operator use the console without a
 password. Creating any real account in that state flips `resolve_mode` to
