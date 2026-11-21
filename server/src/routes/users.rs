@@ -31,7 +31,7 @@ use crate::users::{self, UserInput, UserPatch, UserView};
     path = "/api/users",
     tag = "users",
     responses(
-        (status = 200, description = "all accounts", body = [UserView]),
+        (status = 200, description = "all managed accounts; the local-operator placeholder is not included", body = [UserView]),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "not an admin", body = ErrorBody)
     )
@@ -50,7 +50,10 @@ pub async fn list_users(
 
 /// Creates an account with role and initial password. Admin only, audited as
 /// `user.create`. The account is flagged `must_change_password` unless the
-/// input waives it: an admin-set password must be rotated first.
+/// input waives it: an admin-set password must be rotated first. Refused while
+/// the gateway is `unprotected` (D58, enforced by [`users::create_user`]):
+/// without a password, a real account would make the next restart `protected`
+/// with no administrator.
 #[utoipa::path(
     post,
     path = "/api/users",
@@ -61,7 +64,7 @@ pub async fn list_users(
         (status = 400, description = "invalid request body", body = ErrorBody),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
-        (status = 409, description = "email already exists", body = ErrorBody)
+        (status = 409, description = "email already exists, or setup is not complete (set a password first)", body = ErrorBody)
     )
 )]
 pub async fn create_user(
@@ -77,7 +80,7 @@ pub async fn create_user(
         user_id: &admin.user_id,
         ip: &ip.0,
     };
-    let view = users::create_user(&state.pool, &actor, &input)
+    let view = users::create_user(&state.pool, &actor, &input, state.setup.mode())
         .await
         .map_err(|e| e.into_api_error(rid))?;
     Ok((StatusCode::CREATED, Json(view)))
@@ -96,7 +99,8 @@ pub async fn create_user(
         (status = 400, description = "invalid request body", body = ErrorBody),
         (status = 401, description = "not authenticated", body = ErrorBody),
         (status = 403, description = "forbidden or CSRF failure", body = ErrorBody),
-        (status = 404, description = "no such user", body = ErrorBody)
+        (status = 404, description = "no such user", body = ErrorBody),
+        (status = 409, description = "the last active administrator cannot be deactivated or demoted, or the target is the local operator (managed in Settings)", body = ErrorBody)
     )
 )]
 pub async fn update_user(
@@ -294,7 +298,7 @@ async fn ensure_key_owner(
 mod tests {
     use super::*;
     use crate::auth::Role;
-    use crate::test_support::{self, TestApp, api_request, send};
+    use crate::test_support::{self, TestApp, api_request, api_request_from, send};
     use axum::body::Body;
     use axum::http::Method;
 
@@ -401,6 +405,229 @@ mod tests {
         assert!(text.contains("api_key.create"), "{text}");
         assert!(text.contains("api_key.revoke"), "{text}");
         assert!(!text.contains(&key), "audit rows never carry the key");
+    }
+
+    #[tokio::test]
+    async fn unprotected_mode_refuses_account_creation_until_the_first_password() {
+        let app = TestApp::unprotected().await;
+        let router = app.router();
+
+        let refused = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "plain@example.com",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "setup_incomplete");
+        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_placeholder = 0")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("users");
+        assert_eq!(users, 0, "the refused request created no account");
+
+        // Validation runs before the mode gate: a malformed body is a `400` in
+        // every mode, as the route documents.
+        let malformed = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "not-an-email",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            malformed.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            malformed.body
+        );
+
+        // Setting the first password promotes the local operator and opens
+        // account creation for the rest of the process.
+        let set = send(
+            router.clone(),
+            api_request_from(
+                Method::POST,
+                "/api/setup/admin",
+                Some(serde_json::json!({
+                    "email": "admin@example.com",
+                    "password": "first-admin-password",
+                })),
+                None,
+                None,
+                Some("127.0.0.1:5000"),
+            ),
+        )
+        .await;
+        assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+        let cookie = test_support::session_cookie_from(&set.headers);
+        let csrf = set.body["csrf_token"].as_str().expect("csrf token");
+
+        let created = send(
+            router,
+            api_request(
+                Method::POST,
+                "/api/users",
+                Some(serde_json::json!({
+                    "email": "plain@example.com",
+                    "display_name": "Plain",
+                    "role": "user",
+                    "password": "temporary-password-1",
+                })),
+                Some(&cookie),
+                Some(csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    }
+
+    #[tokio::test]
+    async fn the_local_operator_is_not_listed_as_an_account() {
+        let app = TestApp::unprotected().await;
+        let listed = send(
+            app.router(),
+            api_request(Method::GET, "/api/users", None, None, None),
+        )
+        .await;
+        assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+        assert_eq!(
+            listed.body.as_array().map(Vec::len),
+            Some(0),
+            "the placeholder is not a managed account: {}",
+            listed.body
+        );
+    }
+
+    #[tokio::test]
+    async fn the_local_operator_placeholder_cannot_be_patched() {
+        for patch in [
+            serde_json::json!({ "role": "user" }),
+            serde_json::json!({ "is_active": false }),
+            serde_json::json!({ "password": "attacker-password-1" }),
+        ] {
+            let app = TestApp::unprotected().await;
+            let router = app.router();
+
+            let refused = send(
+                router,
+                api_request(
+                    Method::PATCH,
+                    &format!("/api/users/{}", crate::auth::LOCAL_OPERATOR_ID),
+                    Some(patch.clone()),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+            assert_eq!(refused.body["error"]["code"], "local_operator");
+
+            let (role, active, placeholder): (String, i64, i64) =
+                sqlx::query_as("SELECT role, is_active, is_placeholder FROM users WHERE id = ?")
+                    .bind(crate::auth::LOCAL_OPERATOR_ID)
+                    .fetch_one(&app.state.pool)
+                    .await
+                    .expect("placeholder row");
+            assert_eq!(
+                (role.as_str(), active, placeholder),
+                ("admin", 1, 1),
+                "the refused patch changed nothing (patch {patch})"
+            );
+        }
+
+        // Validation precedes the row rules, so an invalid patch is a `400`
+        // even for the placeholder; `409 local_operator` applies to valid input.
+        let app = TestApp::unprotected().await;
+        let invalid = send(
+            app.router(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{}", crate::auth::LOCAL_OPERATOR_ID),
+                Some(serde_json::json!({ "role": "root" })),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST, "{}", invalid.body);
+        assert_eq!(invalid.body["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn the_last_active_administrator_is_a_409_on_the_wire() {
+        let app = TestApp::new().await;
+        let first = app
+            .create_user("first@example.com", Role::Admin, true)
+            .await;
+        let second = app
+            .create_user("second@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "first@example.com").await;
+
+        // With another administrator around, deactivation is allowed.
+        let deactivated = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{second}"),
+                Some(serde_json::json!({ "is_active": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(deactivated.status, StatusCode::OK, "{}", deactivated.body);
+
+        // The remaining administrator cannot deactivate themselves: the error
+        // map must turn the service guard into 409 last_active_admin, not a 500.
+        let refused = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/users/{first}"),
+                Some(serde_json::json!({ "is_active": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+        assert_eq!(refused.body["error"]["code"], "last_active_admin");
+        assert!(
+            refused.body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("last active administrator"),
+            "{}",
+            refused.body
+        );
+        let active: i64 = sqlx::query_scalar("SELECT is_active FROM users WHERE id = ?")
+            .bind(&first)
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("row");
+        assert_eq!(active, 1, "the refusal changed nothing");
     }
 
     #[tokio::test]

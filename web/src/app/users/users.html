@@ -16,10 +16,19 @@
       </ui-banner>
     }
 
+    @if (unprotected()) {
+      <ui-banner tone="warning" actionLabel="Open Settings" (actioned)="openSettings()">
+        Account creation is off until this gateway has a password. Set the first administrator
+        password in Settings, then add accounts.
+      </ui-banner>
+    }
+
     <div class="toolbar">
-      <ui-button variant="primary" (clicked)="openCreate()">New user</ui-button>
+      <ui-button variant="primary" [disabled]="!createAllowed()" (clicked)="openCreate()">
+        New user
+      </ui-button>
       <span class="spacer"></span>
-      <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
+      <ui-button [disabled]="loading()" (clicked)="refresh()">Refresh</ui-button>
     </div>
   }
 
@@ -159,9 +168,25 @@
     } @else if (loading() && users().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (users().length === 0) {
-      <ui-empty title="No users yet" description="Create the first account for the console.">
+      <ui-empty
+        title="No users yet"
+        [description]="
+          unprotected()
+            ? 'Account creation is off until this gateway has a password. Set it in Settings.'
+            : !statusKnown()
+              ? 'Checking whether this gateway has a password…'
+              : 'Create the first account for the console.'
+        "
+      >
         <span ui-empty-action>
-          <ui-button size="sm" variant="primary" (clicked)="openCreate()">New user</ui-button>
+          <ui-button
+            size="sm"
+            variant="primary"
+            [disabled]="!createAllowed()"
+            (clicked)="openCreate()"
+          >
+            New user
+          </ui-button>
         </span>
       </ui-empty>
     } @else {

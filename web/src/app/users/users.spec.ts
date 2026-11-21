@@ -1,9 +1,26 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { FetchMock, jsonResponse, noContentResponse } from '../../testing/fetch-mock';
+import { provideRouter } from '@angular/router';
+import {
+  FetchMock,
+  errorResponse,
+  jsonResponse,
+  noContentResponse,
+} from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
+import { SetupService, type SetupMode, type SetupStatus } from '../setup/setup.service';
 import type { UserView } from './users.types';
 import { Users } from './users';
+
+const setupStatus: SetupStatus = {
+  mode: 'protected',
+  bind: '0.0.0.0:8081',
+  is_local: false,
+  setup_required: false,
+  warning: null,
+  tls: { enabled: false, domain: null, reason: 'local', error: null, expires_at: null },
+  master_key_source: 'env',
+};
 
 function authStub(role: 'admin' | 'user'): object {
   return {
@@ -82,12 +99,17 @@ describe('Users', () => {
     vi.unstubAllGlobals();
   });
 
-  async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Users>> {
+  async function create(
+    role: 'admin' | 'user' = 'admin',
+    mode: SetupMode = 'protected',
+  ): Promise<ComponentFixture<Users>> {
     TestBed.configureTestingModule({
       imports: [Users],
-      providers: [{ provide: AuthService, useValue: authStub(role) }],
+      providers: [{ provide: AuthService, useValue: authStub(role) }, provideRouter([])],
     });
     await TestBed.compileComponents();
+    // Pre-seed the shared status so `load()` resolves without a request.
+    TestBed.inject(SetupService).status.set({ ...setupStatus, mode });
     const fixture = TestBed.createComponent(Users);
     await fixture.whenStable();
     fixture.detectChanges();
@@ -100,6 +122,88 @@ describe('Users', () => {
 
     expect(root.textContent).toContain('Forbidden');
     expect(fetchMock.requests).toHaveLength(0);
+  });
+
+  it('disables account creation and points at Settings while unprotected', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create('admin', 'unprotected');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Account creation is off');
+    const newUser = buttonByText(root, 'New user');
+    expect(newUser.disabled).toBe(true);
+    newUser.click();
+    fixture.detectChanges();
+    expect(root.querySelector('ui-dialog')).toBeNull();
+    expect(fetchMock.requests).toHaveLength(1);
+  });
+
+  it('disables both create entry points in the empty unprotected state', async () => {
+    // Right after `skip` there are no real accounts: the empty state is the
+    // first thing the operator sees.
+    fetchMock.respond(jsonResponse(200, []));
+    const fixture = await create('admin', 'unprotected');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('No users yet');
+    expect(root.textContent).toContain('Set it in Settings');
+    const buttons = Array.from(root.querySelectorAll('button')).filter(
+      (candidate) => candidate.textContent?.trim() === 'New user',
+    );
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(true);
+    }
+    buttons[1].click();
+    fixture.detectChanges();
+    expect(root.querySelector('ui-dialog')).toBeNull();
+    expect(fetchMock.requests).toHaveLength(1);
+  });
+
+  it('keeps creation closed while the setup status is unknown', async () => {
+    // First request: the status read fails and stays null. Second: the list.
+    fetchMock.respond(errorResponse(500, 'internal', 'status unavailable'));
+    fetchMock.respond(jsonResponse(200, []));
+
+    TestBed.configureTestingModule({
+      imports: [Users],
+      providers: [{ provide: AuthService, useValue: authStub('admin') }, provideRouter([])],
+    });
+    await TestBed.compileComponents();
+    // Deliberately no status seed: `SetupService.status()` starts null.
+    const fixture = TestBed.createComponent(Users);
+    await fixture.whenStable();
+    fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('Checking whether this gateway has a password');
+    const buttons = Array.from(root.querySelectorAll('button')).filter(
+      (candidate) => candidate.textContent?.trim() === 'New user',
+    );
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect(button.disabled).toBe(true);
+    }
+    buttons[1].click();
+    fixture.detectChanges();
+    expect(root.querySelector('ui-dialog')).toBeNull();
+  });
+
+  it('refreshes the setup status from the Refresh button', async () => {
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create('admin', 'unprotected');
+    const root = fixture.nativeElement as HTMLElement;
+    expect(buttonByText(root, 'New user').disabled).toBe(true);
+
+    // The status moved in another tab or through the CLI bootstrap.
+    fetchMock.respond(jsonResponse(200, { ...setupStatus, mode: 'protected' }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    buttonByText(root, 'Refresh').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(buttonByText(root, 'New user').disabled).toBe(false);
+    expect(root.textContent).not.toContain('Account creation is off');
   });
 
   it('lists accounts with role, status, and rotation badges', async () => {
@@ -252,9 +356,10 @@ describe('Users drawer', () => {
 
     TestBed.configureTestingModule({
       imports: [Users],
-      providers: [{ provide: AuthService, useValue: authStub('admin') }],
+      providers: [{ provide: AuthService, useValue: authStub('admin') }, provideRouter([])],
     });
     await TestBed.compileComponents();
+    TestBed.inject(SetupService).status.set({ ...setupStatus, mode: 'protected' });
     const fixture = TestBed.createComponent(Users);
     await fixture.whenStable();
     fixture.detectChanges();
