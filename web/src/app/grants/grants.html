@@ -4,8 +4,8 @@
     <p class="hint">
       Who may use which models, offerings, and credentials. A <code>deny</code> beats an
       <code>allow</code>; a <code>user</code> role without any grant is denied, an admin is allowed
-      by default. A request through an API key needs grants for both the key and its owner — grant
-      the account and the key.
+      by default. An API key with no grants of its own inherits its owner's access; grant the key
+      only to narrow it, and a key can never exceed the account.
     </p>
   </header>
 
