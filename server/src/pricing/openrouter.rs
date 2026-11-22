@@ -118,6 +118,9 @@ pub struct OrModel {
     /// OpenRouter model id, e.g. `openai/gpt-4o` (also the canonical name).
     pub id: String,
     pub display_name: Option<String>,
+    /// The Hugging Face repository id when the model is open-weight.
+    /// Used as an external identity anchor (D60), never as a price field.
+    pub hugging_face_id: Option<String>,
     pub context_length: Option<i64>,
     pub max_output_tokens: Option<i64>,
     pub input_modalities: Vec<String>,
@@ -402,6 +405,12 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
             .get("name")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        hugging_face_id: entry
+            .get("hugging_face_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         context_length: entry
             .get("context_length")
             .and_then(serde_json::Value::as_i64),
@@ -423,6 +432,24 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
         raw_pricing: pricing.cloned(),
         managed: crate::catalog::is_discoverable_model_id(id),
     })
+}
+/// Registry aliases from an OpenRouter catalog: the base id and the
+/// repository id both point at the repository id. Tagged variants
+/// (`:free`, `:batch`, `-free`, `-batch`, `-thinking`) are distinct offerings,
+/// so they contribute nothing (D60).
+fn registry_aliases(models: &[OrModel]) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    for model in models {
+        let Some(hugging_face_id) = model.hugging_face_id.as_deref() else {
+            continue;
+        };
+        if crate::catalog::registry::is_tagged_variant(&model.id) {
+            continue;
+        }
+        aliases.push((hugging_face_id.to_string(), hugging_face_id.to_string()));
+        aliases.push((model.id.clone(), hugging_face_id.to_string()));
+    }
+    aliases
 }
 
 /// The price keys that carry a per-token or per-request amount. A negative
@@ -617,6 +644,29 @@ async fn apply_success(
     let mut tx = pool.begin().await?;
 
     let provider_id = ensure_provider(&mut tx).await?;
+    // D60: the OpenRouter payload is also the `hugging_face_id` reference. Store
+    // its aliases before building the index so this run already joins a
+    // provider that published the repository id (SailResearch does). An empty
+    // alias list is left alone rather than wiping the layer.
+    let registry_aliases = registry_aliases(&parsed.models);
+    if !registry_aliases.is_empty()
+        && let Err(error) = catalog::registry::replace_in(
+            &mut tx,
+            catalog::RegistrySource::OpenRouter,
+            &registry_aliases,
+            &finished_at,
+        )
+        .await
+    {
+        // A refused or failed registry refresh must not fail the price sync:
+        // the prices are the point of this run, and the previous layer keeps
+        // serving the join.
+        tracing::warn!(
+            error = %error,
+            "the OpenRouter registry layer was not replaced; continuing the price sync"
+        );
+    }
+    let mut models = catalog::identity::load_index(&mut tx).await?;
     let mut skipped_manual = 0usize;
     let mut filtered_not_created = 0usize;
     let mut raw_prices = serde_json::Map::new();
@@ -627,8 +677,45 @@ async fn apply_success(
         // an offering that already exists (for example one the operator
         // created by hand), because that row is not ours to hide.
         let offering_id = if model.managed {
-            let model_id = upsert_model(&mut tx, model).await?;
-            Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+            match models.resolve(&model.id) {
+                crate::model_identity::IdentityMatch::Exact(model_id) => {
+                    refresh_model(&mut tx, model, &model_id, true).await?;
+                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                }
+                crate::model_identity::IdentityMatch::Unique(model_id) => {
+                    // A registry or spelling join: the existing row's
+                    // connector/admin metadata wins, only empty fields fill.
+                    refresh_model(&mut tx, model, &model_id, false).await?;
+                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                }
+                crate::model_identity::IdentityMatch::Ambiguous => {
+                    match existing_offering(&mut tx, &provider_id, &model.id).await? {
+                        Some(offering_id) => {
+                            // Never repoint an operator's offering on a guess:
+                            // keep its model, refresh only its price below.
+                            tracing::warn!(
+                                upstream_model_id = %model.id,
+                                offering_id = %offering_id,
+                                "ambiguous model identity; keeping the existing offering's model"
+                            );
+                            Some(offering_id)
+                        }
+                        None => {
+                            // A genuinely new ambiguous id may still become its
+                            // own row (D60); there is nothing to repoint.
+                            let model_id = create_model(&mut tx, model, &mut models).await?;
+                            Some(
+                                upsert_offering(&mut tx, &provider_id, &model_id, &model.id)
+                                    .await?,
+                            )
+                        }
+                    }
+                }
+                crate::model_identity::IdentityMatch::Unknown => {
+                    let model_id = create_model(&mut tx, model, &mut models).await?;
+                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                }
+            }
         } else {
             match existing_offering(&mut tx, &provider_id, &model.id).await? {
                 Some(offering_id) => Some(offering_id),
@@ -894,70 +981,108 @@ async fn ensure_provider(conn: &mut sqlx::SqliteConnection) -> Result<String, Sy
     Ok(id)
 }
 
-/// Upserts the model row of a catalog entry by canonical name. The lookup is
-/// case-insensitive (`COLLATE NOCASE`), so a provider that spells an existing
-/// model with different case (`moonshotai/Kimi-K3.1-Pro` vs
-/// `moonshotai/kimi-k3.1-pro`) reuses that row and links its offering to it;
-/// the stored spelling is never rewritten. Synced fields are refreshed (that
-/// is what the sync is for); `family` is admin-maintained and never touched
-/// here.
-async fn upsert_model(
+/// Refreshes an already-resolved model row.
+///
+/// An `Exact` match owns the row, so the sync refreshes every connector field.
+/// A `Unique` match joined another provider's row: only empty columns are
+/// filled, so the original connector's metadata (and any admin value) survives.
+/// `family` is admin-maintained and never touched either way. `updated_at`
+/// always moves.
+async fn refresh_model(
     conn: &mut sqlx::SqliteConnection,
     model: &OrModel,
-) -> Result<String, SyncError> {
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE")
-            .bind(&model.id)
-            .fetch_optional(&mut *conn)
-            .await?;
-
+    id: &str,
+    exact: bool,
+) -> Result<(), SyncError> {
     let capabilities = capabilities_json(model);
-    let modalities_input = serde_json::to_string(&model.input_modalities).ok();
-    let modalities_output = serde_json::to_string(&model.output_modalities).ok();
+    let modalities_input = modalities_json(&model.input_modalities);
+    let modalities_output = modalities_json(&model.output_modalities);
     let now = catalog::now_ts();
 
-    match existing {
-        Some(id) => {
-            sqlx::query(
-                "UPDATE models SET modalities_input = ?, modalities_output = ?, \
-                   context_length = ?, max_output_tokens = ?, capabilities_json = ?, \
-                   updated_at = ? \
-                 WHERE id = ?",
-            )
-            .bind(&modalities_input)
-            .bind(&modalities_output)
-            .bind(model.context_length)
-            .bind(model.max_output_tokens)
-            .bind(&capabilities)
-            .bind(&now)
-            .bind(&id)
-            .execute(&mut *conn)
-            .await?;
-            Ok(id)
-        }
-        None => {
-            let id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
-                "INSERT INTO models \
-                   (id, canonical_name, modalities_input, modalities_output, \
-                    context_length, max_output_tokens, capabilities_json, \
-                    created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(&model.id)
-            .bind(&modalities_input)
-            .bind(&modalities_output)
-            .bind(model.context_length)
-            .bind(model.max_output_tokens)
-            .bind(&capabilities)
-            .bind(&now)
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
-            Ok(id)
-        }
+    if exact {
+        sqlx::query(
+            "UPDATE models SET modalities_input = ?, modalities_output = ?, \
+               context_length = ?, max_output_tokens = ?, capabilities_json = ?, \
+               updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&modalities_input)
+        .bind(&modalities_output)
+        .bind(model.context_length)
+        .bind(model.max_output_tokens)
+        .bind(&capabilities)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE models SET \
+               modalities_input = CASE WHEN modalities_input IS NULL OR modalities_input IN ('', '[]') \
+                 THEN ? ELSE modalities_input END, \
+               modalities_output = CASE WHEN modalities_output IS NULL OR modalities_output IN ('', '[]') \
+                 THEN ? ELSE modalities_output END, \
+               context_length = COALESCE(context_length, ?), \
+               max_output_tokens = COALESCE(max_output_tokens, ?), \
+               capabilities_json = COALESCE(capabilities_json, ?), \
+               updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&modalities_input)
+        .bind(&modalities_output)
+        .bind(model.context_length)
+        .bind(model.max_output_tokens)
+        .bind(&capabilities)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     }
+    Ok(())
+}
+
+/// Creates a model row for an id the index does not resolve, and indexes it so
+/// later entries in the same run can join it. The stored spelling is the
+/// OpenRouter id.
+async fn create_model(
+    conn: &mut sqlx::SqliteConnection,
+    model: &OrModel,
+    models: &mut crate::model_identity::CatalogIndex,
+) -> Result<String, SyncError> {
+    let capabilities = capabilities_json(model);
+    let modalities_input = modalities_json(&model.input_modalities);
+    let modalities_output = modalities_json(&model.output_modalities);
+    let now = catalog::now_ts();
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO models \
+           (id, canonical_name, modalities_input, modalities_output, \
+            context_length, max_output_tokens, capabilities_json, \
+            created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&model.id)
+    .bind(&modalities_input)
+    .bind(&modalities_output)
+    .bind(model.context_length)
+    .bind(model.max_output_tokens)
+    .bind(&capabilities)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *conn)
+    .await?;
+    models.insert(&id, &model.id);
+    Ok(id)
+}
+
+/// Serializes a modality list for `models.modalities_*`; an empty list is
+/// `None` (NULL) rather than `"[]"`, so "empty" has one representation.
+fn modalities_json(items: &[String]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    serde_json::to_string(items).ok()
 }
 
 /// Upserts the offering row keyed on `(provider_id, upstream_model_id)`.
@@ -1553,6 +1678,349 @@ mod tests {
             .await
             .expect("runs");
         assert_eq!(runs, 2, "each trigger records its own run");
+    }
+
+    #[tokio::test]
+    async fn a_sail_spelling_joins_the_openrouter_model_by_catalog_identity() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let now = catalog::now_ts();
+        // The row provider discovery would have created from SailResearch's
+        // `/models` answer: same weights, different vendor spelling.
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('sail-deepseek', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("sail model");
+
+        let body = r#"{"data":[{"id":"deepseek/deepseek-v4.1-flash-1017",
+            "context_length":65536,
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("sync");
+
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT m.id, m.canonical_name, o.upstream_model_id \
+               FROM offerings o JOIN models m ON m.id = o.model_id",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("offering");
+        assert_eq!(rows.len(), 1, "one model and one offering: {rows:?}");
+        assert_eq!(rows[0].0, "sail-deepseek", "the existing row is reused");
+        assert_eq!(
+            rows[0].1, "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "the stored spelling is never rewritten"
+        );
+        assert_eq!(rows[0].2, "deepseek/deepseek-v4.1-flash-1017");
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("model count");
+        assert_eq!(models, 1, "no duplicate model row");
+    }
+
+    #[tokio::test]
+    async fn the_sync_records_hugging_face_aliases_but_not_tagged_variants() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let body = r#"{"data":[
+            {"id":"vendor/base-9x","hugging_face_id":"Org/Repo-9X",
+             "pricing":{"prompt":"0.000001","completion":"0.000002"}},
+            {"id":"vendor/base-9x:free","hugging_face_id":"Org/Repo-9X",
+             "pricing":{"prompt":"0","completion":"0"}}
+        ]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("sync");
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT alias, canonical FROM model_registry \
+             WHERE source = 'openrouter' ORDER BY alias",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("registry");
+        assert_eq!(
+            rows,
+            [
+                ("org/repo-9x".to_string(), "org/repo-9x".to_string()),
+                ("vendor/base-9x".to_string(), "org/repo-9x".to_string()),
+            ],
+            "the repository id and base id join; :free stays separate; keys are lower-cased"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registry_shrink_is_refused_but_the_sync_still_succeeds() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let now = catalog::now_ts();
+        // Six distinct aliases: a payload with two cannot replace them, so
+        // `replace_in` returns `Shrink` and the previous layer must survive.
+        for index in 0..6 {
+            sqlx::query(
+                "INSERT INTO model_registry (source, alias, canonical, fetched_at) \
+                 VALUES ('openrouter', ?, 'old-canonical', ?)",
+            )
+            .bind(format!("seed-alias-{index}"))
+            .bind(&now)
+            .execute(&app.state.pool)
+            .await
+            .expect("seed registry");
+        }
+
+        let body = r#"{"data":[{"id":"vendor/base-9x",
+            "hugging_face_id":"Org/Repo-9X",
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        let outcome = run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("a refused registry refresh must not fail the price sync");
+        assert_eq!(outcome.status, SyncStatus::Success);
+        assert!(outcome.error.is_none());
+
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM model_registry \
+             WHERE source = 'openrouter' AND canonical = 'old-canonical'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("registry rows");
+        assert_eq!(kept, 6, "the shrink keeps the previous registry layer");
+        let alias: String = sqlx::query_scalar(
+            "SELECT canonical FROM model_registry \
+             WHERE source = 'openrouter' AND alias = 'seed-alias-0'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("old alias");
+        assert_eq!(alias, "old-canonical", "the old alias still resolves");
+    }
+
+    #[tokio::test]
+    async fn the_openrouter_registry_joins_a_pre_existing_repository_row() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let now = catalog::now_ts();
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('sail-deepseek', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("sail model");
+
+        // The OpenRouter id shares no normalized tail with the existing row;
+        // only `hugging_face_id` can join them.
+        let body = r#"{"data":[{"id":"vendor/unrelated-9x",
+            "hugging_face_id":"deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("sync");
+
+        let linked: String = sqlx::query_scalar(
+            "SELECT model_id FROM offerings WHERE upstream_model_id = 'vendor/unrelated-9x'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("offering");
+        assert_eq!(linked, "sail-deepseek");
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("model count");
+        assert_eq!(models, 1, "the repository anchor prevents a new row");
+    }
+
+    #[tokio::test]
+    async fn a_unique_join_fills_empty_metadata_without_overwriting_connector_values() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let now = catalog::now_ts();
+        sqlx::query(
+            "INSERT INTO models \
+               (id, canonical_name, modalities_input, modalities_output, context_length, \
+                max_output_tokens, capabilities_json, created_at, updated_at) \
+             VALUES ('sail-deepseek', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', \
+                     '[\"text\",\"image\"]', '[]', 64000, 8192, \
+                     '{\"display_name\":\"Sail\"}', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("sail model");
+        // The registry joins the OpenRouter id (which shares no spelling) to the
+        // existing row, so this is a `Unique` join.
+        sqlx::query(
+            "INSERT INTO model_registry (source, alias, canonical, fetched_at) VALUES \
+             ('models_dev', 'vendor/unrelated-9x', 'join-key', ?), \
+             ('models_dev', 'deepseek-ai/DeepSeek-V4.1-Flash-1017', 'join-key', ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("registry");
+
+        let body = r#"{"data":[{"id":"vendor/unrelated-9x",
+            "context_length":131072,
+            "top_provider":{"max_completion_tokens":16384},
+            "supported_parameters":["temperature"],
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("sync");
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT canonical_name, modalities_input, modalities_output \
+               FROM models WHERE id = 'sail-deepseek'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("model row");
+        assert_eq!(row.0, "deepseek-ai/DeepSeek-V4.1-Flash-1017");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("[\"text\",\"image\"]"),
+            "non-empty modalities survive"
+        );
+        assert_eq!(
+            row.2, None,
+            "the fixture has no output modalities, so the value stays NULL"
+        );
+        let limits: (Option<i64>, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT context_length, max_output_tokens, capabilities_json \
+               FROM models WHERE id = 'sail-deepseek'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("metadata");
+        assert_eq!(limits.0, Some(64000), "the connector's context length wins");
+        assert_eq!(limits.1, Some(8192), "the connector's output limit wins");
+        assert!(
+            limits.2.as_deref().is_some_and(|raw| raw.contains("Sail")),
+            "capabilities survive: {:?}",
+            limits.2
+        );
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("model count");
+        assert_eq!(models, 1, "the join reuses the existing row");
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_sync_keeps_the_existing_offering_and_creates_no_model() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        let now = catalog::now_ts();
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url, enabled, created_at, updated_at) \
+             VALUES ('prov-or', 'openrouter', 'https://openrouter.ai/api/v1', 1, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("provider");
+        for (id, name) in [("model-a", "alpha/a-7b"), ("model-b", "beta/b-9x")] {
+            sqlx::query(
+                "INSERT INTO models (id, canonical_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(&now)
+            .bind(&now)
+            .execute(&app.state.pool)
+            .await
+            .expect("model");
+        }
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, enabled, created_at, updated_at) \
+             VALUES ('off-x', 'prov-or', 'model-a', 'vendor/x-9x', 1, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("offering");
+        // The registry key covers both models, so `vendor/x-9x` is ambiguous.
+        sqlx::query(
+            "INSERT INTO model_registry (source, alias, canonical, fetched_at) VALUES \
+             ('models_dev', 'vendor/x-9x', 'key', ?), \
+             ('models_dev', 'alpha/a-7b', 'key', ?), \
+             ('models_dev', 'beta/b-9x', 'key', ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .execute(&app.state.pool)
+        .await
+        .expect("registry");
+
+        let body = r#"{"data":[{"id":"vendor/x-9x",
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
+        let fetch = || std::future::ready(Ok(body.to_string()));
+        run_sync(&app.state.pool, fetch, &actor)
+            .await
+            .expect("sync");
+
+        let linked: String =
+            sqlx::query_scalar("SELECT model_id FROM offerings WHERE id = 'off-x'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("offering");
+        assert_eq!(linked, "model-a", "the existing offering is not repointed");
+        let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("model count");
+        assert_eq!(models, 2, "an ambiguous id creates no model row");
+        let priced: Option<f64> =
+            sqlx::query_scalar("SELECT input_per_m FROM prices WHERE offering_id = 'off-x'")
+                .fetch_one(&app.state.pool)
+                .await
+                .expect("price");
+        assert_eq!(priced, Some(1.0), "the price still updates");
     }
 
     #[tokio::test]

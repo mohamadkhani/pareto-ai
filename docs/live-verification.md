@@ -74,12 +74,25 @@ Useful overrides: `GATEWAY_URL`, `OPENROUTER_BASE`, `SAIL_BASE`,
   components are all variable is unpriced for routing and shown as `variable`
   in the UI (D37). `0012_variable_price.sql` repairs rows written before the
   fix (it nulls every negative component and sets the flag).
-- **Case-only duplicate models.** Discovery and the sync now match
-  `models.canonical_name` case-insensitively, so `vendor/Model` and
-  `vendor/model` are one model. Existing pairs are not merged automatically;
-  the cleanup SQL (keep the oldest row, repoint offerings, delete the
-  duplicate) is in the header of `0013_discovery_state.sql`. Until it runs,
-  benchmark hints can still resolve as `ambiguous` for those pairs.
+- **Duplicate models across providers.** Discovery and the price sync resolve
+  an upstream id by exact name (ignoring ASCII case), then by a unique external
+  canonical id from `model_registry` (models.dev `canonical_model_id`, then
+  OpenRouter `hugging_face_id`), then by a unique spelling identity (D60). Run
+  `gateway sync-model-registry --data-dir <dir>` after adding a provider; a
+  price sync also refreshes the OpenRouter layer. Check
+  `SELECT source, alias, canonical FROM model_registry` and then the Models
+  page: `deepseek-ai/DeepSeek-V4.1-Flash-1017` (Sail) and
+  `deepseek/deepseek-v4.1-flash-1017` (OpenRouter) should be one row with two
+  provider chips. The registry affects current and future writes only. A
+  one-time repair at startup merges pre-existing rows when their spellings
+  normalize alike: the oldest row is kept, references are repointed, and
+  conflicting benchmarks or overrides keep the keeper's value. The run is
+  guarded by `db_meta.model_identity_repair_v1`; the older manual cleanup SQL in
+  the header of `0013_discovery_state.sql` is no longer needed for these pairs.
+  A malformed registry payload is rejected before any delete, so the previous
+  rows survive; a payload that would shrink a source by more than half is also
+  refused and the old rows stay. A missing registry only loses the extra join,
+  never discovery.
 
 ## Security
 

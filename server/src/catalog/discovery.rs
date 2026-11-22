@@ -5,13 +5,22 @@
 //! auth, the same machinery as the credential health probe) and materializes
 //! the answer in the catalog:
 //!
-//! * every usable upstream model id becomes a `models` row whose
-//!   `canonical_name` is that id — `family`, modalities, context length and
-//!   max output stay `NULL` because the OpenAI list payload carries no such
-//!   fields. The lookup is case-insensitive (`COLLATE NOCASE`): a provider
-//!   that spells an existing model with different case
-//!   (`moonshotai/Kimi-K3.1-Pro` vs `moonshotai/kimi-k3.1-pro`) reuses that
-//!   row and only gets a new offering; the stored spelling is never changed;
+//! * every usable upstream model id becomes an `offerings` row under a catalog
+//!   model. The model is resolved in this order: the exact same
+//!   `canonical_name` ignoring ASCII case (`COLLATE NOCASE`), then a unique
+//!   **external canonical id** from `model_registry` (models.dev
+//!   `canonical_model_id`, then OpenRouter `hugging_face_id`; see D60), then a
+//!   unique **catalog identity** ([`crate::model_identity::catalog_identity`]):
+//!   the tail id with case and punctuation normalized and the path vendor
+//!   dropped, keeping tier and build stamps. So
+//!   `deepseek-ai/DeepSeek-V4.1-Flash-1017` and
+//!   `deepseek/deepseek-v4.1-flash-1017` become one model with two offerings,
+//!   while `deepseek-v4-flash` and `deepseek-v4-flash-0731` stay separate.
+//!   Several models under one identity mean the operator keeps them apart, so a
+//!   new row is created instead of guessing. A new model's `canonical_name` is
+//!   the discovered id; `family`, modalities, context length and max output
+//!   stay `NULL` unless a catalog connector supplied them, because the OpenAI
+//!   list payload carries no such fields;
 //! * the provider gets one `offerings` row per id (uniqued by
 //!   `(provider_id, upstream_model_id)`). New offerings are enabled, carry no
 //!   overrides, no headers, and no price: unpriced is fine because routing
@@ -393,6 +402,7 @@ async fn apply(
 ) -> Result<DiscoverySummary, DiscoveryError> {
     let now = now_ts();
     let mut tx = pool.begin().await?;
+    let mut models = super::identity::load_index(&mut tx).await?;
     let mut summary = DiscoverySummary {
         dry_run,
         credential_id: credential_id.to_string(),
@@ -406,14 +416,35 @@ async fn apply(
 
     for entry in entries {
         let upstream_id = &entry.model_id;
-        let model_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM models WHERE canonical_name = ? COLLATE NOCASE")
-                .bind(upstream_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        let model_id = match model_id {
-            Some(id) => id,
-            None => {
+        let existing: Option<(String, String)> = sqlx::query_as(
+            "SELECT id, model_id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
+        )
+        .bind(provider_id)
+        .bind(upstream_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let model_id = match models.resolve(upstream_id) {
+            crate::model_identity::IdentityMatch::Exact(id)
+            | crate::model_identity::IdentityMatch::Unique(id) => id,
+            crate::model_identity::IdentityMatch::Ambiguous if existing.is_some() => {
+                // An operator already linked this offering to a model. An
+                // ambiguous identity cannot prove a different link, so keep it
+                // and create nothing.
+                if let Some((offering_id, model_id)) = &existing {
+                    tracing::warn!(
+                        provider_id,
+                        upstream_model_id = %upstream_id,
+                        offering_id = %offering_id,
+                        model_id = %model_id,
+                        "ambiguous model identity; keeping the existing offering's model"
+                    );
+                }
+                summary.unchanged += 1;
+                continue;
+            }
+            crate::model_identity::IdentityMatch::Ambiguous
+            | crate::model_identity::IdentityMatch::Unknown => {
                 let id = uuid::Uuid::new_v4().to_string();
                 sqlx::query(
                     "INSERT INTO models \
@@ -434,18 +465,12 @@ async fn apply(
                 .map_err(|e| {
                     super::map_write(e, "a model with this canonical_name already exists")
                 })?;
+                models.insert(&id, upstream_id);
                 summary.created_models += 1;
                 id
             }
         };
 
-        let existing: Option<(String, String)> = sqlx::query_as(
-            "SELECT id, model_id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
-        )
-        .bind(provider_id)
-        .bind(upstream_id)
-        .fetch_optional(&mut *tx)
-        .await?;
         match existing {
             Some((offering_id, existing_model_id)) if existing_model_id != model_id => {
                 // The only offering field discovery owns: keep overrides,
@@ -1071,6 +1096,205 @@ mod tests {
         assert_eq!(result.status, StatusCode::NOT_FOUND, "{}", result.body);
         assert_eq!(result.body["error"]["code"], "not_found");
         assert_eq!(counts(&s).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn provider_spellings_with_one_identity_share_a_model() {
+        // Two providers publish the same weights under their own spelling;
+        // discovery must create one model with two offerings, not two models.
+        let (addr_a, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"deepseek-ai/DeepSeek-V4.1-Flash-1017"}]}"#,
+        )
+        .await;
+        let s = seeded(&format!("http://{addr_a}")).await;
+        let first = discover(&s, json!({})).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        assert_eq!(first.body["created_models"], 1);
+
+        let (addr_b, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"deepseek/deepseek-v4.1-flash-1017"}]}"#,
+        )
+        .await;
+        let created = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "other", "base_url": format!("http://{addr_b}") })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+        let other_id = created.body["id"].as_str().expect("provider id");
+        let credential = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{other_id}/credentials"),
+                Some(json!({ "label": "primary", "secret": "sk-other" })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{}",
+            credential.body
+        );
+
+        let second = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{other_id}/discover-models"),
+                Some(json!({})),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(second.status, StatusCode::OK, "{}", second.body);
+        assert_eq!(
+            second.body["created_models"], 0,
+            "the identity joins the existing model: {}",
+            second.body
+        );
+        assert_eq!(second.body["created_offerings"], 1);
+        assert_eq!(counts(&s).await, (1, 2));
+        let canonical: String = sqlx::query_scalar("SELECT canonical_name FROM models")
+            .fetch_one(&s.app.state.pool)
+            .await
+            .expect("model");
+        assert_eq!(
+            canonical, "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "the first spelling stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_identity_creates_a_new_model_instead_of_guessing() {
+        let (addr, _) =
+            spawn_static_server("200 OK", r#"{"data":[{"id":"vendor/family-7b"}]}"#).await;
+        let s = seeded(&format!("http://{addr}")).await;
+        // Two rows the operator keeps apart already share the identity.
+        for (id, name) in [("keep-a", "alpha/family-7b"), ("keep-b", "beta/family-7b")] {
+            sqlx::query(
+                "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+                 VALUES (?, ?, '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z')",
+            )
+            .bind(id)
+            .bind(name)
+            .execute(&s.app.state.pool)
+            .await
+            .expect("model");
+        }
+
+        let result = discover(&s, json!({})).await;
+        assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+        assert_eq!(
+            result.body["created_models"], 1,
+            "several candidates is never a guess: {}",
+            result.body
+        );
+        assert_eq!(counts(&s).await, (3, 1));
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_discovery_keeps_an_existing_offering_and_creates_no_model() {
+        let (addr, _) =
+            spawn_static_server("200 OK", r#"{"data":[{"id":"vendor/family-7b"}]}"#).await;
+        let s = seeded(&format!("http://{addr}")).await;
+        let now = "2026-11-01T00:00:00.000Z";
+        for (id, name) in [("keep-a", "alpha/family-7b"), ("keep-b", "beta/family-7b")] {
+            sqlx::query(
+                "INSERT INTO models (id, canonical_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(now)
+            .bind(now)
+            .execute(&s.app.state.pool)
+            .await
+            .expect("model");
+        }
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, enabled, created_at, updated_at) \
+             VALUES ('off-x', ?, 'keep-a', 'vendor/family-7b', 1, ?, ?)",
+        )
+        .bind(&s.provider_id)
+        .bind(now)
+        .bind(now)
+        .execute(&s.app.state.pool)
+        .await
+        .expect("offering");
+
+        let result = discover(&s, json!({})).await;
+        assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+        assert_eq!(
+            result.body["created_models"], 0,
+            "an existing offering blocks the guess: {}",
+            result.body
+        );
+        assert_eq!(result.body["unchanged"], 1);
+        assert_eq!(counts(&s).await, (2, 1));
+        let linked: String =
+            sqlx::query_scalar("SELECT model_id FROM offerings WHERE id = 'off-x'")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("offering");
+        assert_eq!(linked, "keep-a", "the offering is not repointed");
+    }
+
+    #[tokio::test]
+    async fn the_external_registry_joins_spellings_that_do_not_normalize_alike() {
+        let (addr, _) =
+            spawn_static_server("200 OK", r#"{"data":[{"id":"vendor/new-id-9x"}]}"#).await;
+        let s = seeded(&format!("http://{addr}")).await;
+        let now = "2026-11-01T00:00:00.000Z";
+        // A model discovered earlier under a spelling with no shared tail.
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('keeper', 'sail/old-spelling-7b', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&s.app.state.pool)
+        .await
+        .expect("model");
+        // The registry says both spellings are one model.
+        sqlx::query(
+            "INSERT INTO model_registry (source, alias, canonical, fetched_at) VALUES \
+             ('models_dev', 'sail/old-spelling-7b', 'canonical-key', ?), \
+             ('models_dev', 'vendor/new-id-9x', 'canonical-key', ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&s.app.state.pool)
+        .await
+        .expect("registry");
+
+        let result = discover(&s, json!({})).await;
+        assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+        assert_eq!(
+            result.body["created_models"], 0,
+            "the registry joins the existing row: {}",
+            result.body
+        );
+        assert_eq!(result.body["created_offerings"], 1);
+        let linked: String =
+            sqlx::query_scalar("SELECT model_id FROM offerings WHERE upstream_model_id = ?")
+                .bind("vendor/new-id-9x")
+                .fetch_one(&s.app.state.pool)
+                .await
+                .expect("offering");
+        assert_eq!(linked, "keeper");
     }
 
     #[tokio::test]

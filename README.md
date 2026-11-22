@@ -121,6 +121,33 @@ still set, so it chooses a new password at sign-in. Packaged Arch installs keep
 the database under `/var/lib/pareto-gateway` (the unit sets
 `GATEWAY_DATA_DIR`), so use that directory instead of `/srv/pareto/data`.
 
+### Model identity registry
+
+Providers publish the same model under different ids. The gateway joins them by
+an external registry before falling back to spelling normalization (D60):
+
+```bash
+pareto-gateway sync-model-registry --data-dir /srv/pareto/data
+# or one source only:
+pareto-gateway sync-model-registry --source models_dev
+```
+
+`models_dev` reads `https://models.dev/api.json` (`canonical_model_id`);
+`openrouter` reads `https://openrouter.ai/api/v1/models` (`hugging_face_id`,
+plus the OpenRouter id itself). The OpenRouter layer is also refreshed by
+**Sync prices**, so a normal price sync keeps it current. The command opens the
+database, so it applies pending migrations and may run the one-time duplicate
+repair on first use; otherwise it only writes the `model_registry` table and
+leaves prices and routing alone. Run it after adding a provider or when one
+model appears twice, then reload the Models page.
+The server never fetches this registry at startup, and a malformed payload is
+rejected before any delete, so the previous rows survive a bad response.
+A registry join changes how **current and future** writes attach an offering to
+a model; existing rows whose spellings do not normalize alike are not merged
+retroactively, because the one-time repair only uses spelling identity. Check
+the upstream license before redistributing the data; see
+[`docs/research/03-data-sources.md`](docs/research/03-data-sources.md).
+
 ### HTTPS on a domain
 
 When the gateway is meant to be reached at a public hostname, it can manage its

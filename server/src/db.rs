@@ -59,6 +59,13 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
         .await
         .context("running migrations")?;
 
+    // One-time data repair that pure SQL cannot express: the strict catalog
+    // identity is computed in Rust. It is guarded by a `db_meta` key and is a
+    // no-op on a fresh database, so it belongs to the migration boundary.
+    crate::catalog::repair_duplicate_models(&pool)
+        .await
+        .context("repairing duplicate catalog models")?;
+
     Ok(pool)
 }
 
