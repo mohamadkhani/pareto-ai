@@ -1087,4 +1087,73 @@ mod tests {
         let login = login.await.expect("login task");
         assert_eq!(login.status, StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn changing_one_password_keeps_every_other_account_signing_in() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        app.create_user("user@example.com", Role::User, true).await;
+        let router = app.router();
+
+        // The user changes their own password.
+        let (user_cookie, user_csrf) = test_support::login(&router, "user@example.com").await;
+        let changed = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/change-password",
+                Some(serde_json::json!({
+                    "current_password": test_support::TEST_PASSWORD,
+                    "new_password": "user-new-password-1",
+                })),
+                Some(&user_cookie),
+                Some(&user_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
+
+        // The admin then changes their own password.
+        let (admin_cookie, admin_csrf) = test_support::login(&router, "admin@example.com").await;
+        let changed = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/auth/change-password",
+                Some(serde_json::json!({
+                    "current_password": test_support::TEST_PASSWORD,
+                    "new_password": "admin-new-password-1",
+                })),
+                Some(&admin_cookie),
+                Some(&admin_csrf),
+            ),
+        )
+        .await;
+        assert_eq!(changed.status, StatusCode::NO_CONTENT, "{}", changed.body);
+
+        // Both accounts still sign in with the passwords they just chose.
+        for (email, password) in [
+            ("user@example.com", "user-new-password-1"),
+            ("admin@example.com", "admin-new-password-1"),
+        ] {
+            let response = send(
+                router.clone(),
+                api_request(
+                    Method::POST,
+                    "/api/auth/login",
+                    Some(serde_json::json!({ "email": email, "password": password })),
+                    None,
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.status,
+                StatusCode::OK,
+                "{email} must still sign in: {}",
+                response.body
+            );
+        }
+    }
 }

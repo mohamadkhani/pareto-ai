@@ -95,7 +95,9 @@ checked at reservation time.
 "allow-by-any, deny-by-any" across the model/offering/credential rows matching
 the request; the subject verdict is `deny` if any matching row denies, `allow`
 if any allows, else the owner-role default (admin allow, user deny). Effective
-access = user verdict AND key verdict.
+access = user verdict AND key verdict. **Amended by D59:** the AND applies only
+when the key has its own grants; a key with no grant rows inherits its owner's
+verdict.
 
 ### D10. Only OpenRouter has a built-in price sync
 
@@ -1139,6 +1141,51 @@ repaired by it.
 **Source:** [PR #11](https://github.com/mohamadkhani/pareto-ai/pull/11),
 introduced by [`4a1782f`](https://github.com/mohamadkhani/pareto-ai/commit/4a1782f6ea0d3e77d54e84b5a03b15ecead118aa);
 the service-level gate is [`4d0a14f`](https://github.com/mohamadkhani/pareto-ai/commit/4d0a14fcbbbe3fe1cb1f826200129f0e148f5d02).
+
+### D59. API keys inherit their owner's access; key grants only narrow
+
+**Decision (user, 2026-11-21):** an API key with no grant rows of its own
+inherits its owner's verdict. A key with at least one grant is an explicit scope
+and still intersects with the owner's verdict: it may narrow the owner's access
+but never widen it. A `deny` row on either subject still wins, and a key whose
+owner is denied stays denied.
+
+**Why:** keys are credentials of the account, not independent principals. Users
+create their own keys (`POST /api/users/{id}/keys` is self-or-admin) and the
+console's create-key flow has no grant step, so requiring a separate grant set
+for every key produced keys that were denied on arrival until an admin
+duplicated the account's grants by hand.
+
+**Consequence:** granting an account covers every key it creates. This includes
+keys that already existed with no grants: a zero-grant key that was inert
+before this change becomes live with its owner's access. Before deploying, list
+them:
+
+```sql
+SELECT k.id, k.prefix, k.user_id, k.last_used_at
+FROM api_keys k
+WHERE k.revoked_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM grants g
+                  WHERE g.subject_type = 'api_key' AND g.subject_id = k.id);
+```
+
+To scope one key (for example, a CI key limited to a single model), add grant
+rows for that key; it then becomes an explicit scope. For a `user` account the
+first key grant replaces inheritance for every resource, so a key that must keep
+the account's other models needs `allow` rows for them too. An admin's key is
+already allowed by default, so only `deny` rows restrict it and `allow` rows
+change nothing. A `user`-owned key with only `deny` rows therefore denies
+everything, matching the previous explicit-set behaviour; an admin-owned key
+with a `deny` row allows everything except that resource. Key-level scoping is
+not a security boundary while users may create their own keys: a user can
+always mint a key without grants. It limits blast radius for admin-issued keys.
+This supersedes the "effective access = user verdict AND key verdict" sentence
+of the D9 note.
+
+**Source:** [PR #12](https://github.com/mohamadkhani/pareto-ai/pull/12), commits
+[`5bdc2d4`](https://github.com/mohamadkhani/pareto-ai/commit/5bdc2d4640ff99b2683b85958de79f72133bfe0b)
+and [`bd7323f`](https://github.com/mohamadkhani/pareto-ai/commit/bd7323f8f5243b99f0eda4976222ea2e69eb379f);
+the M4 spec is [`m4-access-money.md`](../specs/m4-access-money.md).
 
 ## Open questions
 

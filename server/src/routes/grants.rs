@@ -3,8 +3,8 @@
 //! Every change is audited (`grant.create` / `grant.delete`) in the same
 //! transaction as the change itself. Evaluation semantics live in
 //! [`crate::access`]: `deny` beats `allow`, admins are allowed by default,
-//! users are denied unless granted, and effective access on an API-key
-//! request is the intersection of the user's and the key's verdicts.
+//! users are denied unless granted, a key with no grants inherits its owner,
+//! and a key with grants can only narrow that owner's access (D59).
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, QueryRejection};

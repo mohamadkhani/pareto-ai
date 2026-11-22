@@ -9,11 +9,11 @@
 //! 2. else any `allow` row matching one of them allows,
 //! 3. else the subject's role default: **allow for `admin`, deny for `user`**.
 //!
-//! The effective verdict is the intersection over subjects: the user must be
-//! allowed **and**, when the request authenticated with an API key, the key
-//! must be allowed too. A key of a `user` therefore needs explicit grants on
-//! both subjects; an admin's requests are allowed by default and only a
-//! `deny` row can restrict them.
+//! The effective verdict: the owner's verdict always applies. A key with no
+//! grant rows of its own inherits the owner's verdict (D59), so granting the
+//! account covers every key it creates. A key with at least one row is an
+//! explicit scope and intersects with the owner: it can narrow the account but
+//! never widen it, and a `deny` row on either subject still wins.
 //!
 //! Every mutation writes its `audit_log` row in the same transaction
 //! (`grant.create` / `grant.delete`).
@@ -288,6 +288,12 @@ impl Grants {
 
     /// Whether the caller may use one candidate's resources.
     ///
+    /// A key with no grants of its own inherits its owner's verdict (D59): the
+    /// owner is the principal, so every key the account creates works without a
+    /// separate grant set. A key with at least one grant is an explicit scope
+    /// and still intersects with the owner's verdict — a key may narrow the
+    /// owner's access but never widen it.
+    ///
     /// `credential_id` is `None` when the candidate has no credential (the
     /// credential resource is then not evaluated; model and offering rows
     /// still apply).
@@ -306,10 +312,18 @@ impl Grants {
         }
         let user_ok = self.subject_verdict("user", user_id, role, &resources);
         let key_ok = match api_key_id {
+            Some(key_id) if !self.subject_has_rows("api_key", key_id) => true,
             Some(key_id) => self.subject_verdict("api_key", key_id, role, &resources),
             None => true,
         };
         user_ok && key_ok
+    }
+
+    /// Whether this grant set holds at least one row for one subject.
+    fn subject_has_rows(&self, subject_type: &str, subject_id: &str) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.subject_type == subject_type && row.subject_id == subject_id)
     }
 
     /// One subject's verdict on the candidate's resources: `deny` beats
@@ -397,7 +411,30 @@ mod tests {
     }
 
     #[test]
-    fn user_and_key_grants_intersect() {
+    fn key_without_grants_inherits_its_owner() {
+        // Granting the account is enough: every key the user creates works
+        // without a key-level grant set (D59).
+        let g = grants(&[("user", "u", "model", "m", "allow")]);
+        assert!(g.allows(Role::User, "u", Some("k"), "m", "o", Some("c")));
+        assert!(
+            !g.allows(Role::User, "u", Some("k"), "other", "o", Some("c")),
+            "the key inherits the owner's limits, not more"
+        );
+
+        // Inheritance never widens the owner's verdict: the owner's deny still
+        // blocks the key.
+        let g = grants(&[
+            ("user", "u", "model", "m", "allow"),
+            ("user", "u", "credential", "c", "deny"),
+        ]);
+        assert!(!g.allows(Role::User, "u", Some("k"), "m", "o", Some("c")));
+
+        // A user-role key of an account with no grants still denies.
+        assert!(!Grants::default().allows(Role::User, "u", Some("k"), "m", "o", None));
+    }
+
+    #[test]
+    fn user_and_key_grants_intersect_when_the_key_has_grants() {
         // Both subjects allow: effective allow.
         let g = grants(&[
             ("user", "u", "model", "m", "allow"),
@@ -405,8 +442,12 @@ mod tests {
         ]);
         assert!(g.allows(Role::User, "u", Some("k"), "m", "o", Some("c")));
 
-        // The user allows, the key does not: the intersection denies.
-        let g = grants(&[("user", "u", "model", "m", "allow")]);
+        // The key's own grants do not cover this resource: the explicit scope
+        // denies even though the owner allows.
+        let g = grants(&[
+            ("user", "u", "model", "m", "allow"),
+            ("api_key", "k", "model", "other", "allow"),
+        ]);
         assert!(!g.allows(Role::User, "u", Some("k"), "m", "o", Some("c")));
 
         // The key allows, the user does not: denied as well.
@@ -423,15 +464,39 @@ mod tests {
 
     #[test]
     fn key_verdict_follows_the_owners_role_default() {
-        // A user-role key without grants denies; an admin's key allows.
+        // An admin's key with no grants inherits the admin default.
         let empty = Grants::default();
-        assert!(!empty.allows(Role::User, "u", Some("k"), "m", "o", None));
         assert!(empty.allows(Role::Admin, "u", Some("k"), "m", "o", None));
 
         // An explicit allow on the key is enough alongside the role default
         // of the user (admin).
         let g = grants(&[("api_key", "k", "offering", "o", "allow")]);
         assert!(g.allows(Role::Admin, "u", Some("k"), "m", "o", None));
+    }
+
+    #[test]
+    fn a_deny_only_key_denies_everything_for_a_user_owner() {
+        // A user-owned key with a `deny` row is an explicit scope without
+        // `allow` rows, so it loses the owner's other grants too (D59).
+        let g = grants(&[
+            ("user", "u", "model", "a", "allow"),
+            ("user", "u", "model", "b", "allow"),
+            ("api_key", "k", "model", "b", "deny"),
+        ]);
+        assert!(!g.allows(Role::User, "u", Some("k"), "a", "o", None));
+        assert!(!g.allows(Role::User, "u", Some("k"), "b", "o", None));
+    }
+
+    #[test]
+    fn allow_rows_do_not_narrow_an_admins_key() {
+        // The role default is allow, so an admin-owned key is scoped only by
+        // `deny` rows; `allow` rows change nothing (D59).
+        let g = grants(&[("api_key", "k", "model", "m", "allow")]);
+        assert!(g.allows(Role::Admin, "u", Some("k"), "other", "o", None));
+
+        let g = grants(&[("api_key", "k", "model", "m", "deny")]);
+        assert!(!g.allows(Role::Admin, "u", Some("k"), "m", "o", None));
+        assert!(g.allows(Role::Admin, "u", Some("k"), "other", "o", None));
     }
 
     #[test]
