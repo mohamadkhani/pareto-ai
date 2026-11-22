@@ -5,6 +5,12 @@
 //! filesystem access as the server itself, accepts the password only through a
 //! hidden prompt (or one line on stdin), and applies the admin-reset rules from
 //! [`crate::users::reset_password_as_operator`].
+//!
+//! `gateway sync-model-registry` (decision D60) refreshes the external
+//! canonical-model ids used to join provider spellings. It is operator-run so
+//! the server never depends on a third-party catalog at startup, and it only
+//! writes the registry table described in
+//! [`crate::catalog::registry`].
 
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -25,6 +31,21 @@ stdin is not a terminal). Sessions are deleted, live API keys are revoked,
 and the account must choose a new password at its next sign-in.
 
   --email      account to reset; omit it when the database has one real account
+  --data-dir   directory holding gateway.db (default: GATEWAY_DATA_DIR or ./data)";
+
+/// Help text printed by `gateway sync-model-registry --help` and on bad
+/// arguments.
+const REGISTRY_USAGE: &str = "\
+usage: gateway sync-model-registry [--source models_dev|openrouter|all]
+                                   [--data-dir <path>]
+
+Refreshes the external canonical-model ids used to join provider spellings
+(decision D60). It writes only the `model_registry` table; opening the database
+may also apply pending migrations and the one-time duplicate repair. Run it
+after adding a provider or when a model shows up twice. The server never
+fetches this registry on its own.
+
+  --source     registry to refresh (default: all)
   --data-dir   directory holding gateway.db (default: GATEWAY_DATA_DIR or ./data)";
 
 /// The parsed arguments of `gateway reset-password`.
@@ -124,6 +145,83 @@ fn parse_args(args: &[String]) -> Result<ResetArgs, String> {
                     return Err("--data-dir must not be empty".to_string());
                 }
                 parsed.data_dir = Some(PathBuf::from(value));
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+/// The parsed arguments of `gateway sync-model-registry`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RegistryArgs {
+    source: Option<String>,
+    data_dir: Option<PathBuf>,
+}
+
+/// Runs `gateway sync-model-registry` with the arguments after the subcommand.
+///
+/// Failure mode: a bad argument, a missing database, a network/upstream
+/// failure, a malformed payload, or a database error. A malformed payload is
+/// rejected before any delete, so the previous registry survives.
+pub async fn run_sync_model_registry(configured_data_dir: &Path, args: &[String]) -> Result<()> {
+    let parsed = parse_registry_args(args).map_err(anyhow::Error::msg)?;
+    let data_dir = resolve_data_dir(parsed.data_dir.as_deref(), configured_data_dir)?;
+    let database = existing_database(&data_dir)?;
+    let pool = db::open(&database)
+        .await
+        .with_context(|| format!("opening {}", database.display()))?;
+
+    let sources = match parsed.source.as_deref() {
+        None | Some("all") => crate::catalog::RegistrySource::ALL.to_vec(),
+        Some("models_dev") => vec![crate::catalog::RegistrySource::ModelsDev],
+        Some("openrouter") => vec![crate::catalog::RegistrySource::OpenRouter],
+        Some(other) => bail!("unknown source `{other}`; expected models_dev, openrouter, or all"),
+    };
+    for source in sources {
+        let rows = crate::catalog::refresh_registry(&pool, source)
+            .await
+            .with_context(|| format!("refreshing the {} registry", source.as_str()))?;
+        println!("{} registry: {rows} aliases", source.as_str());
+    }
+    Ok(())
+}
+
+/// Parses the arguments after `sync-model-registry`; every unknown flag is an
+/// error so a typo cannot refresh an unintended source.
+fn parse_registry_args(args: &[String]) -> Result<RegistryArgs, String> {
+    let mut parsed = RegistryArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--source needs models_dev, openrouter, or all".to_string())?;
+                match value.as_str() {
+                    "models_dev" | "openrouter" | "all" => parsed.source = Some(value.clone()),
+                    other => {
+                        return Err(format!(
+                            "unknown source `{other}`; expected models_dev, openrouter, or all"
+                        ));
+                    }
+                }
+            }
+            "--data-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "--data-dir needs a path".to_string())?;
+                if value.trim().is_empty() {
+                    return Err("--data-dir must not be empty".to_string());
+                }
+                parsed.data_dir = Some(PathBuf::from(value));
+            }
+            "--help" | "-h" => {
+                println!("{REGISTRY_USAGE}");
+                std::process::exit(0);
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -246,6 +344,41 @@ mod tests {
             })
         );
         assert_eq!(parse_args(&[]), Ok(ResetArgs::default()));
+    }
+
+    #[test]
+    fn parses_registry_source_and_data_dir() {
+        assert_eq!(
+            parse_registry_args(&args(&[
+                "--source",
+                "openrouter",
+                "--data-dir",
+                "/srv/data"
+            ])),
+            Ok(RegistryArgs {
+                source: Some("openrouter".to_string()),
+                data_dir: Some(PathBuf::from("/srv/data")),
+            })
+        );
+        assert_eq!(parse_registry_args(&[]), Ok(RegistryArgs::default()));
+        assert_eq!(
+            parse_registry_args(&args(&["--source", "all"])),
+            Ok(RegistryArgs {
+                source: Some("all".to_string()),
+                data_dir: None,
+            })
+        );
+    }
+
+    #[test]
+    fn registry_args_reject_unknown_sources_and_flags() {
+        assert!(
+            parse_registry_args(&args(&["--source", "huggingface"]))
+                .expect_err("unknown source")
+                .contains("models_dev")
+        );
+        assert!(parse_registry_args(&args(&["--source"])).is_err());
+        assert!(parse_registry_args(&args(&["--datadir", "/srv"])).is_err());
     }
 
     #[test]

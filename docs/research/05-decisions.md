@@ -1186,6 +1186,94 @@ of the D9 note.
 [`5bdc2d4`](https://github.com/mohamadkhani/pareto-ai/commit/5bdc2d4640ff99b2683b85958de79f72133bfe0b)
 and [`bd7323f`](https://github.com/mohamadkhani/pareto-ai/commit/bd7323f8f5243b99f0eda4976222ea2e69eb379f);
 the M4 spec is [`m4-access-money.md`](../specs/m4-access-money.md).
+### D60. Two provider spellings of one model share a catalog row
+
+**Decision (2026-11-21; registry layer 2026-11-22):** discovery and the
+OpenRouter price sync resolve an upstream id to an existing `models` row in
+this order:
+
+1. the exact `canonical_name`, ignoring ASCII case (`COLLATE NOCASE`, unchanged);
+2. one or more **external canonical keys** from the `model_registry` table,
+   united across sources in a fixed order (`models_dev`, then `openrouter`):
+   * `models_dev` — `canonical_model_id` from
+     `https://models.dev/api.json`, the primary source because it maps most
+     entries across providers the gateway does not route to;
+   * `openrouter` — `hugging_face_id` from
+     `https://openrouter.ai/api/v1/models`, refreshed by the price sync.
+   A source that reports several canonical ids for one alias is ambiguous and
+   is skipped. If the union of keys names exactly one catalog row, that row is
+   used; if it names several, the catalog identity below may choose among those
+   candidates only, and if it cannot the write is ambiguous (an existing
+   offering is kept, while a genuinely new id still gets its own row);
+3. a unique **catalog identity**: the tail id (part after the path vendor),
+   lower-cased with every run of non-alphanumerics collapsed to `-`, with
+   `:free`/`:batch` kept as a distinct tag. Tier markers and date/build stamps
+   are **not** stripped for this identity;
+4. otherwise a new `models` row is created.
+
+The spelling identity only counts when the normalized tail is specific enough
+to name a model: it carries an ASCII digit (`gpt-4o`, `glm-5-3`) or at least two
+tokens (`claude-opus`). This is a structural rule, not a word list: that path
+has no vendor-alias table and no generic-name allow/deny list. A bare word
+(`flash`, `auto`, `chat`) never joins rows; two providers using the same bare
+word may mean different models.
+
+The registry is populated by `gateway sync-model-registry [--source
+models_dev|openrouter|all]`, an operator command that needs only the data
+directory. The OpenRouter layer is also written by the existing **Sync prices**
+action, because that payload already carries `hugging_face_id`. The server never
+fetches either registry at startup. A refresh replaces one source atomically; a
+malformed payload is rejected before any delete, so the previous rows survive,
+and a payload that would keep less than half of a source's distinct aliases is
+refused with the old rows intact. Each source's canonical keys are united, with
+models.dev first; a source that reports several canonical ids for one alias is
+ambiguous and is skipped, and several catalog rows under the union is ambiguous
+for a write — never a guess.
+
+The live need: SailResearch publishes `deepseek-ai/DeepSeek-V4.1-Flash-1017`
+while OpenRouter publishes `deepseek/deepseek-v4.1-flash-1017`. With only
+case-insensitive name equality the catalog held 394 models for 397 offerings,
+and 7 of Sail's 10 models appeared as their own rows although OpenRouter had
+the same weights. The spelling identity joined 8 of the 10 pairs; models.dev
+maps 9 of the 10 Sail ids to a canonical id (including
+`google/gemma-4-12B-it`, which OpenRouter does not host), and OpenRouter's
+`hugging_face_id` covers the 8 it hosts. The remaining
+`nvidia/Gemma-4-31B-IT-NVFP4` has no external reference and stays separate.
+
+A one-time repair in `db::open` merges rows that differ only by ASCII case
+(`Auto` / `auto`), then rows that already share a spelling identity, keeping the
+oldest row (its spelling and non-NULL metadata win, empty fields — including
+`[]` modalities — are filled from the duplicates), repointing offerings,
+benchmarks, overrides, token caps, grants, and usage events. Conflicting benchmark rows and
+overrides keep the keeper's value, token-cap usage is summed, and a colliding
+grant keeps the keeper's mode. It is guarded by
+`db_meta.model_identity_repair_v1`, so it runs once per database. The repair
+runs before the registry is populated, so it only uses the spelling identity;
+later discoveries use the registry through the write-time index.
+
+**Why:** a model is a property of the weights, not of the provider's naming
+scheme. An external canonical id is the strongest available signal when it
+exists; the spelling identity is the offline fallback for providers, models, or
+builds the registry does not cover. The rule set needs no per-model mapping in
+this repository, and the registry is data with provenance rather than code.
+The benchmark matcher (D38) keeps its own, fuzzier rules — tier/date stripping,
+vendor aliases, and generic-token guards — because a published score is
+model-level; that code predates this decision and is not used to pick a catalog
+row.
+
+**Consequences, accepted deliberately:** the stored spelling belongs to
+whichever provider created the row first and is never rewritten; `/v1/models`
+lists that spelling once, while routing still accepts each provider's own
+`upstream_model_id`; the benchmark matcher stays fuzzier than catalog identity
+because a published score is model-level (D38), so `deepseek-v4-flash` and
+`deepseek-v4-flash-0731` share a score but not a catalog row. The registry is
+optional: without it the spelling identity still works, and an unreachable
+source never fails discovery or a price sync. The models.dev license is still
+unverified in this repository (see
+[`03-data-sources.md`](03-data-sources.md)); confirm the upstream terms before
+redistributing derived data. An operator who deliberately creates two rows
+under one canonical id gets no automatic merge, and a later discovery for that
+id is ambiguous rather than a guess.
 
 ## Open questions
 

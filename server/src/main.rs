@@ -20,6 +20,7 @@ mod ip;
 mod load_test;
 mod master_key;
 mod mix;
+mod model_identity;
 mod money;
 mod openapi;
 mod password;
@@ -111,6 +112,14 @@ async fn main() -> Result<()> {
         let data_dir = config::data_dir_from_env().context("resolving the data directory")?;
         let args: Vec<String> = std::env::args().skip(2).collect();
         return cli::run_reset_password(&data_dir, &args).await;
+    }
+
+    // D60: refresh the external canonical-model ids. Like the reset command it
+    // needs only the data directory, so it runs before `Config::from_env`.
+    if std::env::args().nth(1).as_deref() == Some("sync-model-registry") {
+        let data_dir = config::data_dir_from_env().context("resolving the data directory")?;
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return cli::run_sync_model_registry(&data_dir, &args).await;
     }
 
     let config = Arc::new(Config::from_env().context("reading configuration")?);

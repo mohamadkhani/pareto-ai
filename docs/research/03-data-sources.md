@@ -24,6 +24,11 @@ against a price for a different provider's hosting of it.
   `top_provider.max_completion_tokens`, `architecture.modality`,
   `architecture.input_modalities`, `architecture.output_modalities`,
   `supported_parameters`.
+- **Model identity (D60).** `hugging_face_id` is the exact open-weight
+  repository id (185 of 476 entries at the 2026-11-22 read) and is the
+  secondary registry anchor; the price sync refreshes it. `canonical_slug`
+  groups OpenRouter's own variants but is not used for catalog identity because
+  it would also collapse dated snapshots.
 - Prices are strings, normally USD per token. Normalize to USD per 1M tokens and
   keep the raw value.
 - Caching policy in OmniRoute: 24h TTL, persisted JSON, stale-if-error.
@@ -40,6 +45,10 @@ against a price for a different provider's hosting of it.
   reasoning options, knowledge cutoff, release date, open weights, status.
 - OmniRoute keeps a mapping table from models.dev provider IDs to its own IDs
   because naming drifts. That table is worth reusing as data.
+- **Model identity (D60).** Each model entry may carry `canonical_model_id`, a
+  grouping key shared across providers (8,616 of 10,021 entries at the
+  2026-11-22 read). The gateway stores provider id -> canonical id in
+  `model_registry` and uses it before spelling normalization.
 - **UNVERIFIED:** exact license of the models.dev dataset and its API terms.
   Check the upstream repository and site before shipping derived data.
 

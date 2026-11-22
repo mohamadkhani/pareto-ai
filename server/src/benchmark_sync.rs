@@ -55,15 +55,16 @@
 //! a page after every retry fails with [`SyncError::Page`], never a silent
 //! truncation.
 //!
-//! **Matching (D38).** Both sides are normalized ([`normalize_model_key`]):
-//! lower case, vendor prefix (`vendor/`) dropped, non-alphanumerics collapsed
-//! to `-`, parenthetical tier markers removed. The *identity* used for
-//! matching then drops trailing tier markers (`-latest`, `-preview`,
-//! `-thinking`, `-nothinking`, `-xhigh|-high|-medium|-low`), trailing date and
-//! build stamps (`-1017`, `-0731`, `-20250807`, `-2025-08-07`), and a leading
-//! vendor token from the hyphen shape BenchmarkList publishes
-//! (`openai-gpt-5.4`). Vendor spellings are aligned through
-//! [`canonical_vendor`] (`deepseek-ai`↔`deepseek`, `z-ai`↔`zai-org`,
+//! **Matching (D38).** Both sides are normalized
+//! ([`crate::model_identity::normalize_model_key`]): lower case, vendor prefix
+//! (`vendor/`) dropped, non-alphanumerics collapsed to `-`, parenthetical tier
+//! markers removed. The *identity* used for matching then drops trailing tier
+//! markers (`-latest`, `-preview`, `-thinking`, `-nothinking`,
+//! `-xhigh|-high|-medium|-low`), trailing date and build stamps (`-1017`,
+//! `-0731`, `-20250807`, `-2025-08-07`), and a leading vendor token from the
+//! hyphen shape BenchmarkList publishes (`openai-gpt-5.4`). Vendor spellings
+//! are aligned through [`crate::model_identity::canonical_vendor`]
+//! (`deepseek-ai`↔`deepseek`, `z-ai`↔`zai-org`,
 //! `x-ai`↔`xai`, `moonshotai`↔`moonshot`, `google-ai`↔`google`) for matching
 //! only; stored names are never rewritten. `:free`/`:batch` stay distinct
 //! offerings.
@@ -88,7 +89,7 @@
 //! Network access is isolated behind the [`Fetcher`] trait; tests drive every
 //! source from recorded fixtures under `server/tests/fixtures/benchmarks/`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
@@ -96,6 +97,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::catalog::{self, Actor};
+use crate::model_identity::{Matching, ModelIndex};
 
 /// Freshness window of one source's downloaded scores.
 pub const SYNC_TTL: Duration = Duration::from_secs(5 * 60 * 60);
@@ -862,374 +864,6 @@ pub fn parse_benchlm(raw: &str) -> Result<BenchLmPage, SyncError> {
     Ok(page)
 }
 
-// ---------------------------------------------------------------------------
-// Model matching
-// ---------------------------------------------------------------------------
-
-/// Vendor spellings that name the same organization, used **for matching
-/// only** (`deepseek-ai` and `deepseek` publish the same weights under
-/// different ids). Stored names are never rewritten.
-const VENDOR_ALIASES: [(&str, &str); 20] = [
-    ("deepseek-ai", "deepseek"),
-    ("deepseek", "deepseek"),
-    ("z-ai", "zai-org"),
-    ("zai-org", "zai-org"),
-    ("zai", "zai-org"),
-    ("x-ai", "xai"),
-    ("xai", "xai"),
-    ("moonshotai", "moonshot"),
-    ("moonshot-ai", "moonshot"),
-    ("moonshot", "moonshot"),
-    ("google-ai", "google"),
-    ("google", "google"),
-    ("meta-llama", "meta"),
-    ("meta", "meta"),
-    ("mistralai", "mistral"),
-    ("mistral", "mistral"),
-    ("openai", "openai"),
-    ("anthropic", "anthropic"),
-    ("alibaba", "qwen"),
-    ("qwen", "qwen"),
-];
-
-/// Tails too generic to identify a model on their own: a benchmark row named
-/// `flash` (or `pro`, or `auto`) must never attach to whichever model happens
-/// to carry that word.
-const GENERIC_TOKENS: [&str; 14] = [
-    "flash", "pro", "auto", "mini", "lite", "turbo", "base", "chat", "instruct", "preview",
-    "latest", "thinking", "small", "large",
-];
-
-/// Trailing tier markers stripped for the identity (fallback) key only.
-const TIER_SUFFIXES: [&str; 9] = [
-    "latest",
-    "preview",
-    "thinking",
-    "nothinking",
-    "xhigh",
-    "high",
-    "medium",
-    "low",
-    "exp",
-];
-
-/// Removes parenthetical tier groups, e.g. `Claude Sonnet 5.2 (xHigh)`.
-fn strip_parentheticals(mut lowered: String) -> String {
-    while let (Some(start), Some(end)) = (lowered.find('('), lowered.find(')')) {
-        if end <= start {
-            break;
-        }
-        lowered.replace_range(start..=end, " ");
-    }
-    lowered
-}
-
-/// Lower-cases are the caller's job; this collapses non-alphanumerics into
-/// single dashes.
-fn normalize_text(raw: &str) -> String {
-    let mut key = String::with_capacity(raw.len());
-    let mut last_dash = true;
-    for character in raw.chars() {
-        if character.is_ascii_alphanumeric() {
-            key.push(character);
-            last_dash = false;
-        } else if !last_dash {
-            key.push('-');
-            last_dash = true;
-        }
-    }
-    while key.ends_with('-') {
-        key.pop();
-    }
-    key
-}
-
-/// Normalizes a model name or id for matching: lower case, parenthetical
-/// tier groups removed, the part after the last `/` kept (vendor prefix
-/// dropped), and every run of non-alphanumerics collapsed to `-`.
-///
-/// Variant suffixes (`:free`, `:batch`, `-preview`, `-latest`, dates, …) are
-/// kept here so an exact offering id still identifies one offering;
-/// [`identity_keys`] is what merges the same model across providers.
-/// The result is empty when the input has no alphanumerics.
-pub fn normalize_model_key(raw: &str) -> String {
-    let lowered = strip_parentheticals(raw.trim().to_lowercase());
-    let tail = lowered.rsplit('/').next().unwrap_or(&lowered);
-    normalize_text(tail)
-}
-
-/// The normalized *full* id, vendor segment included
-/// (`deepseek-ai/deepseek-v4-1-flash-1017` -> `deepseek-ai-deepseek-v4-1-flash-1017`).
-/// Used only for an exact full-id match, which does not apply the generic-tail
-/// guard.
-fn normalize_full_key(raw: &str) -> String {
-    normalize_text(&strip_parentheticals(raw.trim().to_lowercase()))
-}
-
-/// The canonical vendor spelling for matching, or the normalized input when
-/// it is not a known alias.
-pub fn canonical_vendor(vendor: &str) -> String {
-    let normalized = normalize_text(&vendor.trim().to_lowercase());
-    VENDOR_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == normalized)
-        .map_or(normalized, |(_, canonical)| (*canonical).to_string())
-}
-
-/// Splits a leading hyphenated vendor token off a tail id, longest alias
-/// first (`z-ai-glm-5` -> (`zai-org`, `glm-5`)). The returned vendor is
-/// canonical; `None` when no known vendor prefixes the key.
-fn split_leading_vendor(key: &str) -> Option<(String, String)> {
-    let mut best: Option<(String, String)> = None;
-    for (alias, _canonical) in VENDOR_ALIASES {
-        let Some(rest) = key
-            .strip_prefix(alias)
-            .and_then(|rest| rest.strip_prefix('-'))
-        else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue;
-        }
-        let shorter = best
-            .as_ref()
-            .is_none_or(|(_, current)| rest.len() < current.len());
-        if shorter {
-            best = Some((canonical_vendor(alias), rest.to_string()));
-        }
-    }
-    best
-}
-
-/// `:free` / `:batch` (normalized to `-free` / `-batch`) mark a distinct
-/// offering, never a tier of the same one.
-fn split_offering(key: &str) -> (&str, Option<&'static str>) {
-    for tag in ["free", "batch"] {
-        if let Some(base) = key.strip_suffix(&format!("-{tag}"))
-            && !base.is_empty()
-        {
-            return (base, Some(tag));
-        }
-    }
-    (key, None)
-}
-
-/// True when a trailing token is a date or build stamp: four to eight digits
-/// (`-1017`, `-0731`, `-20250807`). One-to-three digit version parts
-/// (`-4`, `-5`, `-70b`) are part of the model name and stay.
-fn is_date_or_build(token: &str) -> bool {
-    (4..=8).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// Strips trailing tier markers and date/build stamps repeatedly, so
-/// `deepseek-v4-flash-20250807-thinking` and `deepseek-v4-flash` share an
-/// identity.
-fn strip_variant_suffixes(mut key: String) -> String {
-    loop {
-        let before = key.len();
-        if let Some((head, tail)) = key.rsplit_once('-')
-            && TIER_SUFFIXES.contains(&tail)
-        {
-            key.truncate(head.len());
-        }
-        if let Some((head, tail)) = key.rsplit_once('-')
-            && is_date_or_build(tail)
-        {
-            key.truncate(head.len());
-        }
-        // A dashed date: `-2025-08-07`.
-        let parts: Vec<&str> = key.rsplitn(4, '-').collect();
-        if parts.len() == 4
-            && parts[0].len() == 2
-            && parts[1].len() == 2
-            && parts[2].len() == 4
-            && parts[2].starts_with('2')
-            && parts[..3]
-                .iter()
-                .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            key.truncate(key.len() - 11);
-        }
-        if key.len() == before {
-            break;
-        }
-    }
-    key
-}
-
-/// True when a stripped key still names something: it contains a digit, or a
-/// token that is not on the generic list.
-fn is_distinctive(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    if key.bytes().any(|byte| byte.is_ascii_digit()) {
-        return true;
-    }
-    !key.split('-').all(|token| GENERIC_TOKENS.contains(&token))
-}
-
-/// The identities of a normalized key, most specific first: offering tag
-/// kept, tiers/dates/build stamps removed, and (for the hyphen vendor shape)
-/// a leading vendor token removed too. Two catalog entries sharing any one of
-/// these identities are the same model under different provider spellings.
-/// Empty when every candidate is generic.
-fn identity_keys(normalized_key: &str) -> Vec<String> {
-    let (base, offering) = split_offering(normalized_key);
-    let mut candidates = vec![base.to_string()];
-    if let Some((_vendor, remainder)) = split_leading_vendor(base) {
-        candidates.push(remainder);
-    }
-    let mut identities = Vec::new();
-    for candidate in candidates {
-        let base = strip_variant_suffixes(candidate);
-        if !is_distinctive(&base) {
-            continue;
-        }
-        let identity = match offering {
-            Some(tag) => format!("{base}|{tag}"),
-            None => base,
-        };
-        if !identities.contains(&identity) {
-            identities.push(identity);
-        }
-    }
-    identities
-}
-
-/// Splits an identity key into its base and offering tag.
-fn split_identity(identity: &str) -> (&str, Option<&str>) {
-    match identity.rsplit_once('|') {
-        Some((base, tag)) => (base, Some(tag)),
-        None => (identity, None),
-    }
-}
-
-/// How one hint resolved against the catalog. `Matched` lists **every** catalog
-/// model that shares the hint's identity (one benchmark row per model, because
-/// the published score is model-level); `Ambiguous` means several *distinct*
-/// identities could be meant and nothing is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Matching {
-    Matched(Vec<String>),
-    Unknown,
-    Ambiguous,
-}
-
-/// A normalized index over `models.canonical_name` and
-/// `offerings.upstream_model_id`.
-///
-/// `full` holds the normalized full id for an exact (precise) match. `identities`
-/// holds the merge key: suffix-stripped tail, offering tag kept, vendor prefix
-/// stripped (path or hyphen shape) and aliased. One identity maps to every
-/// catalog model that uses it, which is exactly the multi-model attachment
-/// rule.
-#[derive(Debug, Default)]
-pub struct ModelIndex {
-    full: HashMap<String, Vec<String>>,
-    identities: HashMap<String, Vec<String>>,
-}
-
-fn push_unique(ids: &mut Vec<String>, model_id: &str) {
-    if !ids.iter().any(|id| id == model_id) {
-        ids.push(model_id.to_string());
-    }
-}
-
-impl ModelIndex {
-    /// Builds an index from `(hint, model_id)` pairs. Duplicate ids for one
-    /// key collapse; distinct ids under one identity are returned together.
-    pub fn new(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
-        let mut index = Self::default();
-        for (hint, model_id) in pairs {
-            let key = normalize_model_key(&hint);
-            if key.is_empty() {
-                continue;
-            }
-            let full = normalize_full_key(&hint);
-            if full != key {
-                push_unique(index.full.entry(full).or_default(), &model_id);
-            }
-            for identity in identity_keys(&key) {
-                push_unique(index.identities.entry(identity).or_default(), &model_id);
-            }
-        }
-        index
-    }
-
-    /// Every model id under any of the given identities, sorted. `None` when
-    /// none of them is indexed.
-    fn identity_match(&self, identities: &[String]) -> Option<Matching> {
-        let mut ids: Vec<String> = Vec::new();
-        for identity in identities {
-            if let Some(found) = self.identities.get(identity) {
-                for id in found {
-                    push_unique(&mut ids, id);
-                }
-            }
-        }
-        if ids.is_empty() {
-            return None;
-        }
-        ids.sort();
-        Some(Matching::Matched(ids))
-    }
-
-    /// Resolves one hint. Order:
-    ///
-    /// 1. The exact full id (vendor included) united with the hint's
-    ///    identities. The exact id is what makes a generic tail matchable;
-    ///    the identity group is what attaches the row to every provider of the
-    ///    same model.
-    /// 2. A unique hyphen-boundary suffix match over stripped identities;
-    ///    several distinct candidates stay [`Matching::Ambiguous`].
-    pub fn lookup(&self, hint: &str) -> Matching {
-        let key = normalize_model_key(hint);
-        if key.is_empty() {
-            return Matching::Unknown;
-        }
-        let full = normalize_full_key(hint);
-        let identities = identity_keys(&key);
-        let mut ids = self.full.get(&full).cloned().unwrap_or_default();
-        if let Some(Matching::Matched(found)) = self.identity_match(&identities) {
-            for id in found {
-                push_unique(&mut ids, &id);
-            }
-        }
-        if !ids.is_empty() {
-            ids.sort();
-            ids.dedup();
-            return Matching::Matched(ids);
-        }
-        // Fuzzy: the hint's most-stripped identity ends with a catalog
-        // identity. Only one distinct identity may answer; several means the
-        // hint does not say which model it means.
-        let Some(hint_identity) = identities.last() else {
-            return Matching::Unknown;
-        };
-        let (hint_base, hint_offering) = split_identity(hint_identity);
-        let mut candidates: Vec<&String> = Vec::new();
-        for candidate in self.identities.keys() {
-            let (base, offering) = split_identity(candidate);
-            if offering != hint_offering || base == hint_base {
-                continue;
-            }
-            if hint_base.ends_with(&format!("-{base}")) {
-                candidates.push(candidate);
-            }
-        }
-        match candidates.as_slice() {
-            [identity] => {
-                let identity = (*identity).clone();
-                self.identity_match(std::slice::from_ref(&identity))
-                    .unwrap_or(Matching::Unknown)
-            }
-            [] => Matching::Unknown,
-            _ => Matching::Ambiguous,
-        }
-    }
-}
-
 /// Loads the catalog index from `models` and `offerings`.
 /// Failure mode: [`SyncError::Db`].
 pub async fn load_model_index(pool: &SqlitePool) -> Result<ModelIndex, SyncError> {
@@ -1830,6 +1464,7 @@ pub fn spawn_sync_job(
 mod tests {
     use super::*;
     use crate::catalog::ModelInput;
+    use crate::model_identity::{canonical_vendor, normalize_model_key};
     use crate::test_support::TestApp;
 
     const ARENA_PAGE_1: &str = include_str!("../tests/fixtures/benchmarks/arena_page_1.json");

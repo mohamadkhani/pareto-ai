@@ -14,14 +14,18 @@
 
 pub(crate) mod discovery;
 pub(crate) mod headers;
+pub(crate) mod identity;
 pub(crate) mod overview;
+pub(crate) mod registry;
 pub(crate) mod types;
 
 pub use discovery::{DiscoveryInput, DiscoverySummary};
+pub use identity::repair_duplicate_models;
 pub use overview::{
     AggregatePrice, AllModelsRow, ModelsOverview, OverviewPrice, OverviewProvider, OverviewQuality,
     OverviewQuery, OverviewRow, ProviderModelRow,
 };
+pub use registry::{RegistrySource, refresh as refresh_registry};
 pub use types::*;
 
 use serde_json::json;
@@ -948,8 +952,9 @@ pub async fn get_model(
 }
 
 /// Fetches one model by canonical name, ignoring case (`COLLATE NOCASE`).
-/// This is the identity rule shared by `create_model`, provider discovery and
-/// the OpenRouter price sync: one model row per name, whatever its case.
+/// Manual model creation uses this name rule; provider discovery and the
+/// OpenRouter price sync add the wider catalog identity on top
+/// (see [`crate::model_identity::CatalogIndex`]).
 pub async fn model_by_canonical_name(
     pool: &sqlx::SqlitePool,
     canonical_name: &str,
