@@ -93,6 +93,16 @@ Useful overrides: `GATEWAY_URL`, `OPENROUTER_BASE`, `SAIL_BASE`,
   rows survive; a payload that would shrink a source by more than half is also
   refused and the old rows stay. A missing registry only loses the extra join,
   never discovery.
+- **Benchmark scores for registry-grouped variants.** After
+  `gateway sync-model-registry --data-dir <dir>` is loaded, a benchmark sync
+  also attaches a score to every catalog row the registry groups with a matched
+  model (D38 amendment, 2026-11-25): `openai/gpt-6-luna-pro` inherits the Arena
+  score of `openai/gpt-6-luna`, and `meta/muse-spark-1.3-contributor` inherits
+  `meta/muse-spark-1.3`. Matching reads the registry rows at sync time, so
+  refresh the registry first and re-run a benchmark sync afterwards (the
+  background job waits out its freshness TTL). This widening never strips a
+  `-pro`/`-contributor` spelling itself; only a registry grouping joins those
+  rows, so a gateway without the registry keeps the pure spelling behaviour.
 
 ## Security
 

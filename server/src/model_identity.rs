@@ -12,7 +12,11 @@
 //!   are deliberately fuzzy because a published score is model-level. They
 //!   drop the path vendor, a leading hyphen vendor, tier markers (`-latest`,
 //!   `-preview`, `-thinking`, …) and date/build stamps (`-1017`, `-2025-08-07`),
-//!   so every dated snapshot of one name shares an identity.
+//!   so every dated snapshot of one name shares an identity. When built with
+//!   [`ModelIndex::with_registry`], a match is also widened to every catalog
+//!   row the external [`Registry`] groups under the same canonical key (the
+//!   2026-11-25 D38 amendment), which is how a `-pro` or `-contributor`
+//!   sibling inherits a base model's score without a spelling guess.
 //! * **Catalog identity** — [`catalog_identity`] is strict. It drops the path
 //!   vendor and normalizes case/punctuation but keeps tier and date tokens,
 //!   because `deepseek-v4-flash` and `deepseek-v4-flash-0731` are separate
@@ -324,10 +328,19 @@ pub enum Matching {
 /// stripped (path or hyphen shape) and aliased. One identity maps to every
 /// catalog model that uses it, which is exactly the multi-model attachment
 /// rule.
+///
+/// When the index is built with an external [`Registry`]
+/// ([`ModelIndex::with_registry`]), a resolved match is widened to every
+/// catalog row the source groups under the same canonical key. `by_registry`
+/// indexes a canonical key to its catalog rows and `model_keys` is the reverse,
+/// so a resolved id can name the keys that widen it. Both are empty for
+/// [`ModelIndex::new`], which keeps the pure spelling behaviour.
 #[derive(Debug, Default)]
 pub struct ModelIndex {
     full: HashMap<String, Vec<String>>,
     identities: HashMap<String, Vec<String>>,
+    by_registry: HashMap<String, Vec<String>>,
+    model_keys: HashMap<String, Vec<String>>,
 }
 
 fn push_unique(ids: &mut Vec<String>, model_id: &str) {
@@ -339,22 +352,87 @@ fn push_unique(ids: &mut Vec<String>, model_id: &str) {
 impl ModelIndex {
     /// Builds an index from `(hint, model_id)` pairs. Duplicate ids for one
     /// key collapse; distinct ids under one identity are returned together.
+    ///
+    /// The registry-free constructor, used by tests to pin the pure spelling
+    /// behaviour; production builds the index with [`ModelIndex::with_registry`]
+    /// so a registry is always available when one is loaded.
+    #[cfg(test)]
     pub fn new(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
         let mut index = Self::default();
         for (hint, model_id) in pairs {
-            let key = normalize_model_key(&hint);
-            if key.is_empty() {
-                continue;
-            }
-            let full = normalize_full_key(&hint);
-            if full != key {
-                push_unique(index.full.entry(full).or_default(), &model_id);
-            }
-            for identity in identity_keys(&key) {
-                push_unique(index.identities.entry(identity).or_default(), &model_id);
-            }
+            index.insert_hint(&hint, &model_id);
         }
         index
+    }
+
+    /// Builds the index from catalog `(canonical_name, model_id)` pairs and
+    /// `(upstream_model_id, model_id)` pairs, and widens a resolved match
+    /// through the external [`Registry`]: a model that matched by spelling
+    /// also pulls in every catalog row the source groups under the same
+    /// canonical key.
+    ///
+    /// Registry keys are taken from `canonical_name` only. An upstream id is a
+    /// provider's own offering spelling; the catalog's chosen name is the row
+    /// identity (D60), so only it is allowed to widen the attachment group.
+    /// Without a registry answer the behaviour is exactly [`ModelIndex::new`].
+    pub fn with_registry(
+        models: impl IntoIterator<Item = (String, String)>,
+        offerings: impl IntoIterator<Item = (String, String)>,
+        registry: Registry,
+    ) -> Self {
+        let mut index = Self::default();
+        for (canonical_name, model_id) in models {
+            index.insert_hint(&canonical_name, &model_id);
+            let keys = registry.keys_for(&canonical_name);
+            for key in &keys {
+                push_unique(index.by_registry.entry(key.clone()).or_default(), &model_id);
+            }
+            for key in keys {
+                push_unique(index.model_keys.entry(model_id.clone()).or_default(), &key);
+            }
+        }
+        for (upstream_id, model_id) in offerings {
+            index.insert_hint(&upstream_id, &model_id);
+        }
+        index
+    }
+
+    /// Adds one `(hint, model_id)` pair to the spelling index.
+    fn insert_hint(&mut self, hint: &str, model_id: &str) {
+        let key = normalize_model_key(hint);
+        if key.is_empty() {
+            return;
+        }
+        let full = normalize_full_key(hint);
+        if full != key {
+            push_unique(self.full.entry(full).or_default(), model_id);
+        }
+        for identity in identity_keys(&key) {
+            push_unique(self.identities.entry(identity).or_default(), model_id);
+        }
+    }
+
+    /// Widens `ids` with every catalog row sharing a registry key with any id
+    /// already in it, then sorts and dedupes. A no-op without a registry.
+    fn widen_by_registry(&self, mut ids: Vec<String>) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for id in &ids {
+            if let Some(found) = self.model_keys.get(id) {
+                for key in found {
+                    push_unique(&mut keys, key);
+                }
+            }
+        }
+        for key in &keys {
+            if let Some(found) = self.by_registry.get(key) {
+                for id in found {
+                    push_unique(&mut ids, id);
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Every model id under any of the given identities, sorted. `None` when
@@ -397,9 +475,7 @@ impl ModelIndex {
             }
         }
         if !ids.is_empty() {
-            ids.sort();
-            ids.dedup();
-            return Matching::Matched(ids);
+            return Matching::Matched(self.widen_by_registry(ids));
         }
         // Fuzzy: the hint's most-stripped identity ends with a catalog
         // identity. Only one distinct identity may answer; several means the
@@ -421,8 +497,11 @@ impl ModelIndex {
         match candidates.as_slice() {
             [identity] => {
                 let identity = (*identity).clone();
-                self.identity_match(std::slice::from_ref(&identity))
-                    .unwrap_or(Matching::Unknown)
+                match self.identity_match(std::slice::from_ref(&identity)) {
+                    Some(Matching::Matched(ids)) => Matching::Matched(self.widen_by_registry(ids)),
+                    Some(other) => other,
+                    None => Matching::Unknown,
+                }
             }
             [] => Matching::Unknown,
             _ => Matching::Ambiguous,
@@ -861,5 +940,73 @@ mod tests {
             registry,
         );
         assert_eq!(index.resolve("incoming/a-7b"), IdentityMatch::Ambiguous);
+    }
+
+    #[test]
+    fn a_benchmark_match_widens_through_the_registry_but_never_guesses() {
+        // Two catalog rows the external source groups under one canonical id;
+        // the benchmark only names the base.
+        let registry = Registry::new(
+            vec![
+                (
+                    "openai/gpt-6-luna".to_string(),
+                    "openai/gpt-6-luna".to_string(),
+                ),
+                (
+                    "openai/gpt-6-luna-pro".to_string(),
+                    "openai/gpt-6-luna".to_string(),
+                ),
+            ],
+            Vec::new(),
+        );
+        let index = ModelIndex::with_registry(
+            vec![
+                ("openai/gpt-6-luna".to_string(), "base".to_string()),
+                ("openai/gpt-6-luna-pro".to_string(), "pro".to_string()),
+            ],
+            Vec::new(),
+            registry,
+        );
+        assert_eq!(
+            index.lookup("GPT-6 Luna (Max)"),
+            Matching::Matched(vec!["base".to_string(), "pro".to_string()]),
+            "the base match widens to the registry sibling"
+        );
+
+        // Without a registry the same hint matches only the base: the
+        // widening is the registry's claim, not a spelling guess. `-pro` is a
+        // distinct tail and is never stripped.
+        let plain = ModelIndex::new(vec![
+            ("openai/gpt-6-luna".to_string(), "base".to_string()),
+            ("openai/gpt-6-luna-pro".to_string(), "pro".to_string()),
+        ]);
+        assert_eq!(
+            plain.lookup("GPT-6 Luna (Max)"),
+            Matching::Matched(vec!["base".to_string()]),
+            "without a registry nothing is widened"
+        );
+
+        // A source that reports several canonicals for the alias is skipped,
+        // so the sibling is not widened in.
+        let ambiguous = Registry::new(
+            vec![
+                ("openai/gpt-6-luna-pro".to_string(), "one".to_string()),
+                ("openai/gpt-6-luna-pro".to_string(), "two".to_string()),
+            ],
+            Vec::new(),
+        );
+        let index = ModelIndex::with_registry(
+            vec![
+                ("openai/gpt-6-luna".to_string(), "base".to_string()),
+                ("openai/gpt-6-luna-pro".to_string(), "pro".to_string()),
+            ],
+            Vec::new(),
+            ambiguous,
+        );
+        assert_eq!(
+            index.lookup("GPT-6 Luna (Max)"),
+            Matching::Matched(vec!["base".to_string()]),
+            "an ambiguous source never widens the group"
+        );
     }
 }
