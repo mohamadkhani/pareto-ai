@@ -457,11 +457,12 @@ pub async fn override_price(
 /// enabled offering of an enabled provider, with effective limits (offering
 /// overrides win) and prices in USD per 1M tokens. Unknown price components
 /// are null — never 0. Enabled combos are appended as `combo:<name>` entries
-/// (review m4 — discoverable), with null limits and price (they vary per
-/// member); a combo is shown when at least one of its candidate offerings is
-/// allowed for the caller — explicit members for a members pool, any catalog
-/// offering for a whole-catalog pool (D35). Auth: an API key (any account) or
-/// an admin session.
+/// (review m4 — discoverable) with `context_length` set to the minimum
+/// effective context over their eligible members (D63) and null max-output and
+/// price (those vary per member). A combo is shown when at least one of its
+/// candidate offerings is allowed for the caller — explicit members for a
+/// members pool, any catalog offering for a whole-catalog pool (D35). Auth: an
+/// API key (any account) or an admin session.
 #[utoipa::path(
     get,
     path = "/v1/models",
@@ -1490,7 +1491,10 @@ mod tests {
             .expect("combo entry");
         assert_eq!(combo["name"], "smart");
         assert!(combo["price"].is_null(), "members price their own calls");
-        assert!(combo["context_length"].is_null());
+        assert_eq!(
+            combo["context_length"], 200000,
+            "the combo advertises the smallest eligible member context"
+        );
 
         // A disabled combo is not advertised.
         let disabled = send(
@@ -1590,6 +1594,142 @@ mod tests {
             .expect("whole-catalog combo entry");
         assert_eq!(combo["name"], "pro");
         assert!(combo["price"].is_null(), "the pool prices its own calls");
-        assert!(combo["context_length"].is_null());
+        assert!(
+            combo["context_length"].is_null(),
+            "a catalog pool has no explicit members to take a minimum over"
+        );
+    }
+
+    #[tokio::test]
+    async fn v1_models_combo_context_is_the_minimum_of_eligible_members() {
+        // A combo may be routed to any eligible member, so the advertised
+        // context window is the smallest one a client could land on; a member
+        // that is not eligible (here a disabled model) must not lower it, and
+        // an offering override wins over the model value.
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+
+        let provider = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "acme", "base_url": "https://api.acme.example/v1" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(provider.status, StatusCode::CREATED, "{}", provider.body);
+        let provider_id = provider.body["id"]
+            .as_str()
+            .expect("provider id")
+            .to_string();
+
+        let mut offering_ids = Vec::new();
+        let mut model_ids = Vec::new();
+        for (name, context) in [("acme/large", 200000), ("acme/small", 128000)] {
+            let model = send(
+                router.clone(),
+                api_request(
+                    Method::POST,
+                    "/api/models",
+                    Some(json!({ "canonical_name": name, "context_length": context })),
+                    Some(&cookie),
+                    Some(&csrf),
+                ),
+            )
+            .await;
+            assert_eq!(model.status, StatusCode::CREATED, "{}", model.body);
+            let model_id = model.body["id"].as_str().expect("model id").to_string();
+            let offering_id =
+                create_offering(&router, &cookie, &csrf, &provider_id, &model_id, name).await;
+            model_ids.push(model_id);
+            offering_ids.push(offering_id);
+        }
+
+        let created = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/combos",
+                Some(json!({
+                    "name": "min",
+                    "strategy": "ordered",
+                    "members": [
+                        { "offering_id": offering_ids[0] },
+                        { "offering_id": offering_ids[1] },
+                    ],
+                })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+
+        async fn combo_context(router: &axum::Router, cookie: &str) -> serde_json::Value {
+            let listing = send(
+                router.clone(),
+                api_request(Method::GET, "/v1/models", None, Some(cookie), None),
+            )
+            .await;
+            assert_eq!(listing.status, StatusCode::OK, "{}", listing.body);
+            listing.body["data"]
+                .as_array()
+                .expect("data")
+                .iter()
+                .find(|entry| entry["id"] == "combo:min")
+                .expect("combo entry")["context_length"]
+                .clone()
+        }
+
+        assert_eq!(
+            combo_context(&router, &cookie).await,
+            json!(128000),
+            "the smallest eligible member sets the combo context"
+        );
+
+        // The model-level kill switch (D61) makes the small member ineligible:
+        // it must no longer lower the advertised window.
+        let disabled = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/models/{}", model_ids[1]),
+                Some(json!({ "enabled": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK, "{}", disabled.body);
+        assert_eq!(
+            combo_context(&router, &cookie).await,
+            json!(200000),
+            "an ineligible member does not count toward the minimum"
+        );
+
+        // The offering override wins over the model value, like /v1/models.
+        let overridden = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/offerings/{}", offering_ids[0]),
+                Some(json!({ "context_override": 64000 })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(overridden.status, StatusCode::OK, "{}", overridden.body);
+        assert_eq!(
+            combo_context(&router, &cookie).await,
+            json!(64000),
+            "the offering override is the effective context"
+        );
     }
 }

@@ -1421,11 +1421,32 @@ pub struct ComboV1Entry {
     pub members: Vec<(String, String)>,
 }
 
+/// One member offering as joined for the `GET /v1/models` combo entry: the
+/// row ids access control needs plus the effective context and enabled flags
+/// that decide whether it may lower the advertised combo context.
+#[derive(Debug, sqlx::FromRow)]
+struct ComboMemberRow {
+    offering_id: String,
+    model_id: String,
+    context_override: Option<i64>,
+    context_length: Option<i64>,
+    offering_enabled: i64,
+    provider_enabled: i64,
+    model_enabled: i64,
+}
+
 /// The enabled combos as advertised by `GET /v1/models`: one `combo:<name>`
-/// entry per enabled combo. Limits and price are null — they vary per member
-/// and the chat pipeline checks them per candidate. A [`Pool::All`] combo is
-/// advertised with an empty `members` list; the route decides its visibility
-/// against the caller's catalog-wide access. Failure mode: [`ComboError`].
+/// entry per enabled combo. `context_length` is the minimum effective context
+/// (the offering override wins over the model value, like [`catalog::V1Model`])
+/// over the combo's **eligible** members — an enabled offering, provider, and
+/// model — so a client sizes its prompt for the smallest window it may be
+/// routed to; members with an unknown context are ignored, and when none is
+/// known the field stays null. `max_output_tokens` and price are null — they
+/// vary per member and the chat pipeline checks them per candidate. A
+/// [`Pool::All`] combo has no explicit members, so its context stays null; it
+/// is advertised with an empty `members` list and the route decides its
+/// visibility against the caller's catalog-wide access. Failure mode:
+/// [`ComboError`].
 pub async fn list_v1_entries(pool: &SqlitePool) -> Result<Vec<ComboV1Entry>, ComboError> {
     let mut entries = Vec::new();
     for combo in list(pool).await? {
@@ -1433,14 +1454,28 @@ pub async fn list_v1_entries(pool: &SqlitePool) -> Result<Vec<ComboV1Entry>, Com
             continue;
         }
         let mut members = Vec::with_capacity(combo.members.len());
+        let mut min_context: Option<i64> = None;
         for member in &combo.members {
-            let row: Option<(String, String)> =
-                sqlx::query_as("SELECT id, model_id FROM offerings WHERE id = ?")
-                    .bind(&member.offering_id)
-                    .fetch_optional(pool)
-                    .await?;
-            if let Some((offering_id, model_id)) = row {
-                members.push((model_id, offering_id));
+            let row: Option<ComboMemberRow> = sqlx::query_as(
+                "SELECT o.id AS offering_id, o.model_id, o.context_override, m.context_length, \
+                        o.enabled AS offering_enabled, pr.enabled AS provider_enabled, \
+                        m.enabled AS model_enabled \
+                 FROM offerings o \
+                 JOIN models m ON m.id = o.model_id \
+                 JOIN providers pr ON pr.id = o.provider_id \
+                 WHERE o.id = ?",
+            )
+            .bind(&member.offering_id)
+            .fetch_optional(pool)
+            .await?;
+            let Some(row) = row else {
+                continue;
+            };
+            members.push((row.model_id.clone(), row.offering_id.clone()));
+            let eligible =
+                row.offering_enabled == 1 && row.provider_enabled == 1 && row.model_enabled == 1;
+            if eligible && let Some(context) = row.context_override.or(row.context_length) {
+                min_context = Some(min_context.map_or(context, |current| current.min(context)));
             }
         }
         entries.push(ComboV1Entry {
@@ -1448,7 +1483,7 @@ pub async fn list_v1_entries(pool: &SqlitePool) -> Result<Vec<ComboV1Entry>, Com
             model: catalog::V1Model {
                 id: format!("{NAMESPACE}{}", combo.name),
                 name: combo.name.clone(),
-                context_length: None,
+                context_length: min_context,
                 max_output_tokens: None,
                 modalities: catalog::V1Modalities {
                     input: Vec::new(),

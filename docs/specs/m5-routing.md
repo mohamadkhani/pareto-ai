@@ -87,5 +87,6 @@ categories (only generic quality for now).
 5. Combo resolution works end-to-end through the model id namespace
    **`combo:<name>`** — chosen 2026-11-16 (`03c0c3d`); `combos.rs` `NAMESPACE`.
    Combos are advertised as `combo:<name>` entries in `GET /v1/models`
-   (discovery, not a hidden namespace).
+   (discovery, not a hidden namespace), with `context_length` set to the
+   minimum eligible member window (D63).
 6. Benchmark import is idempotent and user overrides are never overwritten.
