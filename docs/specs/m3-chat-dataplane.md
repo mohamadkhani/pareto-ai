@@ -72,8 +72,9 @@ request_logs(request_id TEXT PK, client_request_id TEXT, occurred_at TEXT NOT
 
 ## Request limits
 
-- Max request body (4 MB default, `GATEWAY_MAX_BODY_BYTES`), max `messages`
-  count (200), `max_tokens` clamped to the offering's `max_output_tokens`/
+- Max request body (32 MB default, `GATEWAY_MAX_BODY_BYTES`) is the only
+  conversation-length bound; there is no `messages` count limit (D62).
+  `max_tokens` is clamped to the offering's `max_output_tokens`/
   `max_output_override`; input longer than the offering's context minus
   `max_tokens` → `400 context_length_exceeded` before any upstream call.
 

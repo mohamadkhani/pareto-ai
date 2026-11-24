@@ -2,7 +2,8 @@
 //!
 //! One request runs validate → resolve offering → forward → stream → settle:
 //!
-//! * **Validate**: body size (handler-enforced, 4 MiB), ≤200 messages,
+//! * **Validate**: body size (handler-enforced, `GATEWAY_MAX_BODY_BYTES`,
+//!   32 MiB by default; the message count is unbounded, see D62),
 //!   `max_tokens` clamped to the offering's output limit, and
 //!   `context_length_exceeded` before any upstream call when the estimated
 //!   input plus `max_tokens` does not fit the offering's context.
@@ -93,8 +94,6 @@ use crate::upstream::{
     Budget, FailureClass, TimeoutKind, UpstreamCall, UpstreamError, UpstreamStream,
 };
 
-/// Maximum number of chat messages in one request.
-pub const MAX_MESSAGES: usize = 200;
 /// Largest buffered (non-streaming) response kept in memory.
 const MAX_BUFFERED_RESPONSE: usize = 32 * 1024 * 1024;
 /// Status recorded for a request whose client disconnected before completion.
@@ -260,11 +259,6 @@ fn parse_request(raw: &[u8]) -> Result<WireRequest, ChatFailure> {
     let messages = match messages {
         Some(messages) if messages.is_empty() => {
             return Err(ChatFailure::invalid("`messages` must not be empty"));
-        }
-        Some(messages) if messages.len() > MAX_MESSAGES => {
-            return Err(ChatFailure::invalid(format!(
-                "`messages` must contain at most {MAX_MESSAGES} messages"
-            )));
         }
         Some(messages) if messages.iter().any(|message| !message.is_object()) => {
             return Err(ChatFailure::invalid("each message must be an object"));
@@ -5480,17 +5474,6 @@ mod tests {
         let s = seeded().await;
         let router = s.app.router();
 
-        let many: Vec<serde_json::Value> = (0..=MAX_MESSAGES)
-            .map(|i| json!({"role": "user", "content": format!("m{i}")}))
-            .collect();
-        let too_many = send(
-            router.clone(),
-            chat_request(&s.cookie, json!({"model": "m", "messages": many})),
-        )
-        .await;
-        assert_eq!(too_many.status, StatusCode::BAD_REQUEST);
-        assert_eq!(too_many.body["error"]["code"], "invalid_request");
-
         let no_model = send(
             router.clone(),
             chat_request(&s.cookie, json!({"messages": [{"role": "user"}]})),
@@ -5521,7 +5504,7 @@ mod tests {
 
         assert_eq!(stub.request_count(), 0);
         let rows = usage_rows(&s.app).await;
-        assert_eq!(rows.len(), 4, "every completion is accounted for");
+        assert_eq!(rows.len(), 3, "every completion is accounted for");
         for row in &rows {
             assert_eq!(row.error_class.as_deref(), Some("invalid_request"));
             assert_eq!(row.status, Some(400));
@@ -5598,6 +5581,59 @@ mod tests {
     // -----------------------------------------------------------------------
     // Non-streaming
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_long_conversation_is_forwarded_instead_of_capped() {
+        // D62: there is no message-count limit, so a 1000-message history must
+        // reach the upstream instead of being refused with a local 400.
+        let upstream_body = json!({
+            "id": "c1",
+            "object": "chat.completion",
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 8},
+        });
+        let stub = Stub::spawn(vec![Scenario::Json {
+            body: upstream_body.to_string(),
+        }])
+        .await;
+        let s = seeded().await;
+        let (provider_id, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &provider_id,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        let history = (0..1000)
+            .map(|i| json!({"role": "user", "content": format!("m{i}")}))
+            .collect::<Vec<_>>();
+        let response = send(
+            s.app.router(),
+            chat_request(
+                &s.cookie,
+                json!({"model": "m", "messages": history, "max_tokens": 42}),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(stub.request_count(), 1, "the request reached the provider");
+        assert_eq!(
+            stub.requests()[0].body["messages"]
+                .as_array()
+                .expect("messages")
+                .len(),
+            1000
+        );
+    }
 
     #[tokio::test]
     async fn non_streaming_returns_the_json_body_and_settles() {
@@ -6213,18 +6249,18 @@ mod tests {
         assert!(!ok.stream);
         assert_eq!(ok.max_tokens, Some(5));
 
-        let at_limit = (0..MAX_MESSAGES)
-            .map(|i| json!({"role": "user", "content": i}))
+        // D62: message count is not capped, so a long but small conversation
+        // reaches the upstream instead of being refused locally.
+        let long_history = (0..1000)
+            .map(|i| json!({"role": "user", "content": format!("m{i}")}))
             .collect::<Vec<_>>();
-        assert!(
-            parse_request(
-                json!({"model": "m", "messages": at_limit})
-                    .to_string()
-                    .as_bytes()
-            )
-            .is_ok(),
-            "exactly {MAX_MESSAGES} messages is fine"
-        );
+        let parsed = parse_request(
+            json!({"model": "m", "messages": long_history})
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("a 1000-message conversation is accepted");
+        assert_eq!(parsed.messages.len(), 1000);
 
         for (body, why) in [
             (json!({"messages": [{"role": "user"}]}), "missing model"),

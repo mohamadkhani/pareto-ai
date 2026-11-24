@@ -1275,6 +1275,36 @@ redistributing derived data. An operator who deliberately creates two rows
 under one canonical id gets no automatic merge, and a later discovery for that
 id is ambiguous rather than a guess.
 
+### D62. No message-count limit on `/v1/chat/completions`; the body size is the bound
+
+**Decision (2026-11-25):** the data plane accepts any number of `messages` in a
+request. The only local bound on conversation length is
+`GATEWAY_MAX_BODY_BYTES`, whose default rises from 4 MiB to 32 MiB. The
+`MAX_MESSAGES = 200` constant is removed.
+
+**Why:** the 200-message cap came from the initial scaffold (`7000c88`,
+2026-11-16) without a decision record, and it made the gateway stricter than the
+upstream about the shape of a valid request. A provider such as SailResearch
+serves a conversation of several hundred short messages directly; through this
+gateway the same conversation was refused with
+`invalid_request: \`messages\` must contain at most 200 messages`. The cap also
+protected nothing real: cost and memory follow bytes and tokens, not the number
+of array items, and a 300-message conversation of short turns is a few hundred
+KiB — far below the byte limit. The genuine ceiling already exists in the
+offering's context window, enforced before dispatch by
+`400 context_length_exceeded`.
+
+**Consequences, accepted deliberately:** memory per in-flight request is now
+bounded only by `max_body_bytes`, so an operator who raises it past 32 MiB is
+trading RAM for longer conversations; a request that exceeds it still fails with
+`invalid_request` and its `bytes_in` is recorded. Clients that used the 200
+cap as an early, cheap error now either fit under the byte limit or reach
+upstream and receive `context_length_exceeded` instead. Two related limits are
+unchanged: `max_tokens` is still clamped to the offering's output limit, and
+non-streaming responses still buffer at most 32 MiB. The test that proved
+"exactly 200 passes, 201 fails" is replaced by one proving a 1000-message
+conversation is accepted.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

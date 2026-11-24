@@ -28,7 +28,9 @@ pub const DEFAULT_HTTPS_PORT: u16 = 443;
 pub const DEFAULT_DATA_DIR: &str = "data";
 
 /// Largest request body the data plane accepts (`GATEWAY_MAX_BODY_BYTES`).
-pub const DEFAULT_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// This is the only bound on conversation length: there is no message-count
+/// limit (D62), because a provider's own context window is the real ceiling.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// Upstream connect timeout (`GATEWAY_TIMEOUT_CONNECT_MS`).
 pub const DEFAULT_TIMEOUT_CONNECT: Duration = Duration::from_secs(10);
 /// Time from upstream request start to the first response byte
@@ -75,7 +77,7 @@ pub struct Config {
     /// client and those headers are never read.
     pub trusted_proxies: Vec<IpCidr>,
     /// Largest chat request body accepted, in bytes
-    /// (`GATEWAY_MAX_BODY_BYTES`, default 4 MiB).
+    /// (`GATEWAY_MAX_BODY_BYTES`, default 32 MiB).
     pub max_body_bytes: usize,
     /// Upstream TCP connect timeout (`GATEWAY_TIMEOUT_CONNECT_MS`, default 10s).
     pub timeout_connect: Duration,

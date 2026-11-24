@@ -271,7 +271,7 @@ run it and open `http://127.0.0.1:8081/` (see *Run* above). See
 | `GATEWAY_HTTPS_PORT` | `443` | Port HTTPS is served on. Port 80 stays reserved for ACME HTTP-01 challenges and the HTTP→HTTPS redirect. |
 | `GATEWAY_ACME_DIRECTORY` | Let's Encrypt production | ACME directory URL. Use `https://acme-staging-v02.api.letsencrypt.org/directory` for a staging dry run. |
 | `GATEWAY_TRUSTED_PROXY` | unset | Comma-separated IPv4/IPv6 CIDRs of reverse proxies allowed to vouch for the client address via `X-Forwarded-For`/`X-Real-IP` (e.g. `10.0.0.0/8,127.0.0.1/32`). This decides the client IP used for login rate limiting and audit rows: when unset, the peer address is the client and those headers are ignored ([review finding 4](docs/reviews/2026-11-16-m1-backend.md)). Startup warns when listening on a non-loopback address without it. |
-| `GATEWAY_MAX_BODY_BYTES` | `4194304` (4 MiB) | Largest `POST /v1/chat/completions` request body |
+| `GATEWAY_MAX_BODY_BYTES` | `33554432` (32 MiB) | Largest `POST /v1/chat/completions` request body. The only conversation-length bound: there is no message-count limit (D62). |
 | `GATEWAY_TIMEOUT_CONNECT_MS` | `10000` | Upstream TCP connect timeout |
 | `GATEWAY_TIMEOUT_FIRST_BYTE_MS` | `30000` | Budget from upstream request start to the first response byte |
 | `GATEWAY_TIMEOUT_IDLE_MS` | `60000` | Maximum gap between upstream body chunks |

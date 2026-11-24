@@ -47,7 +47,8 @@ pub struct ChatCompletionRequest {
     /// the `combo:<name>` namespace (M5 — expanded to its member offerings
     /// and routed by the combo's strategy).
     pub model: String,
-    /// Conversation so far; at most 200 messages.
+    /// Conversation so far. No message-count limit: the request body size
+    /// (`GATEWAY_MAX_BODY_BYTES`) is what bounds a conversation (D62).
     pub messages: Vec<serde_json::Value>,
     /// Stream SSE chunks instead of one JSON body. Defaults to false.
     #[serde(default)]
