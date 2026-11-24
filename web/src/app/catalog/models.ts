@@ -260,6 +260,11 @@ export class Models {
   protected readonly priceError = signal<string | null>(null);
   protected readonly savingPrice = signal(false);
   protected readonly togglingEnabled = signal(false);
+  /**
+   * Row whose enable switch is in flight (`offering:<id>` or `model:<id>`).
+   * One shared signal keeps a second click from racing the first.
+   */
+  protected readonly togglingModelKey = signal<string | null>(null);
   protected readonly overrideDraft = signal('');
   protected readonly overrideError = signal<string | null>(null);
   protected readonly savingOverride = signal(false);
@@ -878,16 +883,26 @@ export class Models {
 
   protected statusTone(row: OverviewRow): BadgeTone {
     if (isProviderRow(row)) {
-      return row.enabled ? 'success' : 'neutral';
+      return row.enabled && row.model_enabled ? 'success' : 'neutral';
     }
-    return row.offerings_count > 0 ? 'success' : 'neutral';
+    return row.model_enabled && row.offerings_count > 0 ? 'success' : 'neutral';
   }
 
   protected statusLabel(row: OverviewRow): string {
+    if (!row.model_enabled) {
+      return 'disabled (all)';
+    }
     if (isProviderRow(row)) {
       return row.enabled ? 'enabled' : 'disabled';
     }
     return `${row.offerings_count} offering${row.offerings_count === 1 ? '' : 's'}`;
+  }
+
+  /** Tooltip for a status badge whose model is disabled for every provider. */
+  protected statusTitle(row: OverviewRow): string | null {
+    return row.model_enabled
+      ? null
+      : 'This model is disabled for all providers. Enable it with All providers selected.';
   }
 
   protected rowUnpriced(row: OverviewRow): boolean {
@@ -938,7 +953,34 @@ export class Models {
   }
 
   protected offeringEnabled(row: OverviewRow): boolean {
-    return isProviderRow(row) && row.enabled;
+    // Effective state: a model disabled for all providers overrides the
+    // offering's own flag, which is kept for when the model is enabled again.
+    return isProviderRow(row) && row.enabled && row.model_enabled;
+  }
+
+  /** The per-provider switch is blocked while the model is disabled everywhere. */
+  protected offeringToggleBlocked(row: OverviewRow): boolean {
+    return isProviderRow(row) && !row.model_enabled;
+  }
+
+  /** Action-button label: the target is the offering or the whole model. */
+  protected toggleModelLabel(row: OverviewRow): string {
+    if (!isProviderRow(row)) {
+      return row.model_enabled ? 'Disable all' : 'Enable all';
+    }
+    return row.enabled ? 'Disable' : 'Enable';
+  }
+
+  /** Tooltip explaining a blocked per-provider switch. */
+  protected toggleModelTitle(row: OverviewRow): string | null {
+    if (!isProviderRow(row)) {
+      return row.model_enabled
+        ? 'Disable this model for every provider, including providers added later'
+        : 'Enable this model again for every provider that offers it';
+    }
+    return row.model_enabled
+      ? `${row.enabled ? 'Disable' : 'Enable'} this provider's offering`
+      : 'This model is disabled for all providers. Select All providers to enable it first.';
   }
 
   protected detailPrice(row: OverviewRow): OverviewPrice | null {
@@ -1261,7 +1303,7 @@ export class Models {
 
   protected async toggleEnabled(): Promise<void> {
     const row = this.detailRow();
-    if (row === null || !isProviderRow(row) || this.togglingEnabled()) {
+    if (row === null || !isProviderRow(row) || !row.model_enabled || this.togglingEnabled()) {
       return;
     }
     this.togglingEnabled.set(true);
@@ -1274,6 +1316,65 @@ export class Models {
       this.actionError.set(describeError(err, 'Changing the offering failed.'));
     } finally {
       this.togglingEnabled.set(false);
+    }
+  }
+
+  /**
+   * Enables or disables a row from the list. With a provider selected the
+   * switch targets that provider's offering; with All providers selected it
+   * targets the model itself, so providers added later stay disabled too
+   * (D61). A success banner states the scope of the change.
+   */
+  protected async toggleModelEnabled(row: OverviewRow): Promise<void> {
+    if (this.togglingModelKey() !== null) {
+      return;
+    }
+    if (isProviderRow(row)) {
+      if (!row.model_enabled) {
+        this.notice.set(
+          `${row.canonical_name} is disabled for all providers. Select All providers and enable it there first.`,
+        );
+        return;
+      }
+      this.togglingModelKey.set(this.rowKey(row));
+      this.actionError.set(null);
+      this.notice.set(null);
+      try {
+        await this.catalog.updateOffering(row.offering_id, { enabled: !row.enabled });
+        const provider = this.providerById().get(row.provider_id)?.name ?? 'this provider';
+        this.notice.set(
+          row.enabled
+            ? `${row.canonical_name} disabled for ${provider}.`
+            : `${row.canonical_name} enabled for ${provider}.`,
+        );
+        await this.reload();
+      } catch (err) {
+        this.actionError.set(describeError(err, 'Changing the offering failed.'));
+      } finally {
+        this.togglingModelKey.set(null);
+      }
+      return;
+    }
+
+    const enable = !row.model_enabled;
+    this.togglingModelKey.set(this.rowKey(row));
+    this.actionError.set(null);
+    this.notice.set(null);
+    try {
+      await this.catalog.updateModel(row.model_id, { enabled: enable });
+      const providers = row.providers_count;
+      this.notice.set(
+        enable
+          ? `${row.canonical_name} enabled again for every provider; each provider's own offering setting applies.`
+          : `${row.canonical_name} disabled for all ${providers} provider${
+              providers === 1 ? '' : 's'
+            }. New offerings of this model stay disabled until it is enabled again.`,
+      );
+      await this.reload();
+    } catch (err) {
+      this.actionError.set(describeError(err, 'Changing the model failed.'));
+    } finally {
+      this.togglingModelKey.set(null);
     }
   }
 

@@ -228,6 +228,12 @@ export interface Model {
   max_output_tokens: number | null;
   /** Free-form JSON: a tag array or a structured object. */
   capabilities: unknown;
+  /**
+   * False when the model is disabled for every provider. Routing and
+   * `/v1/models` skip all of its offerings, including offerings created later,
+   * until it is enabled again. Per-provider `Offering.enabled` still applies.
+   */
+  enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -242,6 +248,16 @@ export interface ModelInput {
   max_output_tokens: number | null;
   /** The UI writes capabilities as a free-form tag list. */
   capabilities: string[];
+}
+
+/**
+ * `PATCH /api/models/{id}`: only the fields the admin changed. `enabled`
+ * is the model-level kill switch: false disables the model for every provider
+ * without touching each offering's own flag, so enabling it later restores
+ * those choices.
+ */
+export interface ModelPatch {
+  enabled?: boolean;
 }
 
 /**

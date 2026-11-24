@@ -6,10 +6,10 @@
 //!   `max_tokens` clamped to the offering's output limit, and
 //!   `context_length_exceeded` before any upstream call when the estimated
 //!   input plus `max_tokens` does not fit the offering's context.
-//! * **Resolve**: enabled offerings of enabled providers matching the
-//!   requested model (`upstream_model_id` or `canonical_name`) in a fixed
-//!   deterministic order (creation order, id tiebreak), or — for the M5
-//!   `combo:<name>` namespace — the combo's member offerings in the combo's
+//! * **Resolve**: enabled offerings of enabled providers and enabled models
+//!   matching the requested model (`upstream_model_id` or `canonical_name`) in
+//!   a fixed deterministic order (creation order, id tiebreak), or — for the
+//!   M5 `combo:<name>` namespace — the combo's member offerings in the combo's
 //!   strategy order (`ordered` = stored list, `round_robin` = stable rotation
 //!   persisted in `combo_models.rr_cursor` — advanced once per request that
 //!   actually dispatches upstream, never for a pre-dispatch refusal —
@@ -353,13 +353,15 @@ struct OfferingJoin {
     base_url: String,
     offering_enabled: i64,
     provider_enabled: i64,
+    model_enabled: i64,
 }
 
 const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream_model_id, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
-     o.enabled AS offering_enabled, pr.enabled AS provider_enabled \
+     o.enabled AS offering_enabled, pr.enabled AS provider_enabled, \
+     m.enabled AS model_enabled \
      FROM offerings o \
      JOIN models m ON m.id = o.model_id \
      JOIN providers pr ON pr.id = o.provider_id";
@@ -368,11 +370,12 @@ const SELECT_OFFERING_JOIN: &str = "SELECT o.id AS offering_id, o.model_id, o.up
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
-     o.enabled AS offering_enabled, pr.enabled AS provider_enabled \
+     o.enabled AS offering_enabled, pr.enabled AS provider_enabled, \
+     m.enabled AS model_enabled \
      FROM offerings o \
      JOIN models m ON m.id = o.model_id \
      JOIN providers pr ON pr.id = o.provider_id \
-     WHERE pr.enabled = 1 AND o.enabled = 1";
+     WHERE pr.enabled = 1 AND o.enabled = 1 AND m.enabled = 1";
 
 /// Builds one candidate from its join row, picking the provider credential
 /// (M3 cooldown demotion plus M5 breaker avoidance, see [`ordered_credentials`]).
@@ -400,7 +403,7 @@ fn build_candidate(
         provider_id: row.provider_id,
         provider_name: row.provider_name,
         base_url: row.base_url,
-        enabled: row.offering_enabled == 1 && row.provider_enabled == 1,
+        enabled: row.offering_enabled == 1 && row.provider_enabled == 1 && row.model_enabled == 1,
         context_length: row.context_override.or(row.context_length),
         max_output_tokens: row.max_output_override.or(row.max_output_tokens),
         modalities_input: row.modalities_input,

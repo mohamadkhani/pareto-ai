@@ -474,7 +474,9 @@
                   }}</ui-badge>
                 </td>
                 <td>
-                  <ui-badge [tone]="statusTone(row)">{{ statusLabel(row) }}</ui-badge>
+                  <ui-badge [tone]="statusTone(row)" [attr.title]="statusTitle(row)">{{
+                    statusLabel(row)
+                  }}</ui-badge>
                   @if (rowVariableCount(row) > 0 && scope() === 'all') {
                     <ui-badge tone="warning" [title]="variableTooltip"
                       >{{ rowVariableCount(row) }} variable</ui-badge
@@ -485,6 +487,15 @@
                   }
                 </td>
                 <td class="actions">
+                  <ui-button
+                    size="sm"
+                    variant="ghost"
+                    [disabled]="togglingModelKey() !== null || offeringToggleBlocked(row)"
+                    [attr.title]="toggleModelTitle(row)"
+                    (clicked)="toggleModelEnabled(row)"
+                  >
+                    {{ toggleModelLabel(row) }}
+                  </ui-button>
                   <ui-button size="sm" variant="ghost" (clicked)="openDetail(row)">
                     Details
                   </ui-button>
@@ -536,6 +547,12 @@
       @if (scope() === 'provider') {
         <section class="detail-section">
           <h3>Offering</h3>
+          @if (!row.model_enabled) {
+            <ui-banner tone="warning">
+              This model is disabled for all providers. Select All providers and enable the model
+              before enabling this offering.
+            </ui-banner>
+          }
           <dl class="facts">
             <div>
               <dt>Upstream id</dt>
@@ -548,7 +565,7 @@
               <dd>
                 <ui-switch
                   [checked]="offeringEnabled(row)"
-                  [disabled]="togglingEnabled()"
+                  [disabled]="togglingEnabled() || !row.model_enabled"
                   label="Offering enabled"
                   (checkedChange)="toggleEnabled()"
                 />

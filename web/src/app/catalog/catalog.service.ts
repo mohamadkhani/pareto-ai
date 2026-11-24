@@ -11,6 +11,7 @@ import type {
   DiscoverySummary,
   Model,
   ModelInput,
+  ModelPatch,
   Offering,
   OfferingInput,
   OfferingPatch,
@@ -105,6 +106,7 @@ function toModel(raw: Model): Model {
     context_length: raw.context_length,
     max_output_tokens: raw.max_output_tokens,
     capabilities: raw.capabilities,
+    enabled: raw.enabled,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
   };
@@ -299,6 +301,22 @@ export class CatalogService {
       await requestJson<Model>('/api/models', {
         method: 'POST',
         body: input,
+        csrfToken: this.auth.csrfToken(),
+      }),
+    );
+  }
+
+  /**
+   * Applies a partial model update and returns the updated row. `enabled`
+   * is the cross-provider kill switch: false disables every offering of the
+   * model, including ones created later, and leaves each offering's own flag
+   * untouched.
+   */
+  async updateModel(id: string, patch: ModelPatch): Promise<Model> {
+    return toModel(
+      await requestJson<Model>(`/api/models/${id}`, {
+        method: 'PATCH',
+        body: patch,
         csrfToken: this.auth.csrfToken(),
       }),
     );

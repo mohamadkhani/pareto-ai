@@ -120,7 +120,12 @@ pub struct ProviderModelRow {
     pub max_output_tokens: Option<i64>,
     pub offering_id: String,
     pub upstream_model_id: String,
+    /// The offering's own flag. A globally disabled model overrides it (see
+    /// `model_enabled`).
     pub enabled: bool,
+    /// False when the model is disabled for every provider (D61). The offering
+    /// flag above is kept so re-enabling the model restores it.
+    pub model_enabled: bool,
     /// `null` when the offering is unpriced.
     pub price: Option<OverviewPrice>,
     /// The blend at the selected token-mix profile; `null` when it cannot be
@@ -142,6 +147,9 @@ pub struct AllModelsRow {
     pub context_length: Option<i64>,
     /// Largest effective max output across the model's offerings.
     pub max_output_tokens: Option<i64>,
+    /// False when the model is disabled for every provider (D61): routing and
+    /// `/v1/models` skip all of its offerings, including new ones.
+    pub model_enabled: bool,
     /// Every provider that offers the model, ordered by provider name, so the
     /// page can show one chip per provider instead of a bare count.
     pub providers: Vec<OverviewProvider>,
@@ -223,6 +231,8 @@ struct OverviewRowRaw {
     modalities_output: Option<String>,
     context_length: Option<i64>,
     max_output_tokens: Option<i64>,
+    /// `models.enabled`: the cross-provider kill switch (D61).
+    model_enabled: i64,
     provider_id: String,
     provider_name: String,
     offering_id: String,
@@ -323,6 +333,7 @@ pub async fn load_with_search(
                             offering_id: row.offering_id.clone(),
                             upstream_model_id: row.upstream_model_id.clone(),
                             enabled: row.enabled != 0,
+                            model_enabled: row.model_enabled != 0,
                             price: row.price_view(),
                             mix_price: row.mix_price_view(&profile),
                             quality: quality.get(&row.model_id).map(quality_view),
@@ -377,6 +388,7 @@ async fn fetch_rows(
     let rows = sqlx::query_as::<_, OverviewRowRaw>(
         "SELECT m.id AS model_id, m.canonical_name, m.family, m.modalities_input, \
                 m.modalities_output, m.context_length, m.max_output_tokens, \
+                m.enabled AS model_enabled, \
                 o.provider_id, pr.name AS provider_name, o.id AS offering_id, o.upstream_model_id, \
                 o.context_override, max_output_override, o.enabled, \
                 p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m, \
@@ -522,6 +534,7 @@ fn aggregate(
                 modalities_output: parse_modalities(first.modalities_output.as_deref()),
                 context_length,
                 max_output_tokens,
+                model_enabled: first.model_enabled != 0,
                 providers,
                 providers_count,
                 offerings_count: offerings.len(),

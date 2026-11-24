@@ -80,8 +80,16 @@ export interface ProviderOverviewRow {
   /** Effective max output: the offering override wins over the model value. */
   max_output_tokens: number | null;
   offering_id: string;
+  /** The provider that owns the offering; used by per-provider notices. */
+  provider_id: string;
   upstream_model_id: string;
+  /** The offering's own flag; `model_enabled` overrides it when false. */
   enabled: boolean;
+  /**
+   * False when the model is disabled for every provider. The per-provider
+   * switch cannot re-enable it until the model itself is enabled.
+   */
+  model_enabled: boolean;
   /** Null when the offering has no price row or an all-null price row. */
   price: OverviewPrice | null;
   /** The blend at the selected mix profile; null when it cannot be computed. */
@@ -106,6 +114,12 @@ export interface ModelOverviewRow {
   context_length: number | null;
   /** Largest effective max output across the model's offerings. */
   max_output_tokens: number | null;
+  /**
+   * False when the model is disabled for every provider. Routing and
+   * `/v1/models` skip every offering of the model, including offerings created
+   * after the switch was flipped.
+   */
+  model_enabled: boolean;
   /** Every provider that offers the model, ordered by name. */
   providers: OverviewProvider[];
   providers_count: number;

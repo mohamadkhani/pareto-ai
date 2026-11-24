@@ -112,7 +112,8 @@ const SELECT_CREDENTIAL_COLUMNS: &str = "id, provider_id, label, secret_cipher, 
      balance_low_threshold, balance_available, balance_currency, balance_error, \
      balance_fetched_at, balance_gate, status, cooldown_until, last_tested_at, created_at, updated_at";
 const SELECT_MODEL_COLUMNS: &str = "id, canonical_name, family, modalities_input, \
-     modalities_output, context_length, max_output_tokens, capabilities_json, created_at, updated_at";
+     modalities_output, context_length, max_output_tokens, capabilities_json, enabled, \
+     created_at, updated_at";
 const SELECT_OFFERING_COLUMNS: &str = "id, provider_id, model_id, upstream_model_id, \
      context_override, max_output_override, enabled, headers_json, created_at, updated_at";
 const SELECT_PRICE_COLUMNS: &str = "offering_id, input_per_m, output_per_m, cache_read_per_m, \
@@ -1043,6 +1044,9 @@ pub async fn create_model(
 }
 
 /// Applies a partial model update and audits it as `model.update`.
+/// `enabled = false` is the model-level kill switch (D61): it excludes every
+/// offering of the model, including offerings created later, without changing
+/// each provider's own offering flag.
 pub async fn update_model(
     pool: &sqlx::SqlitePool,
     actor: &Actor<'_>,
@@ -1065,6 +1069,7 @@ pub async fn update_model(
     let context_length = validate_count(patch.context_length, "context_length")?;
     let max_output_tokens = validate_count(patch.max_output_tokens, "max_output_tokens")?;
     let capabilities_json = validate_capabilities(patch.capabilities.clone())?;
+    let enabled = patch.enabled.map(|value| if value { 1 } else { 0 });
 
     if canonical_name.is_none()
         && family.is_none()
@@ -1073,6 +1078,7 @@ pub async fn update_model(
         && context_length.is_none()
         && max_output_tokens.is_none()
         && capabilities_json.is_none()
+        && enabled.is_none()
     {
         return Err(CatalogError::Invalid(
             "no fields to update; send at least one model field".to_string(),
@@ -1106,6 +1112,7 @@ pub async fn update_model(
            context_length = COALESCE(?, context_length), \
            max_output_tokens = COALESCE(?, max_output_tokens), \
            capabilities_json = COALESCE(?, capabilities_json), \
+           enabled = COALESCE(?, enabled), \
            updated_at = ? \
          WHERE id = ?",
     )
@@ -1116,6 +1123,7 @@ pub async fn update_model(
     .bind(context_length)
     .bind(max_output_tokens)
     .bind(&capabilities_json)
+    .bind(enabled)
     .bind(&now)
     .bind(id)
     .execute(&mut *tx)
@@ -1136,6 +1144,7 @@ pub async fn update_model(
             "family": family,
             "context_length": context_length,
             "max_output_tokens": max_output_tokens,
+            "enabled": patch.enabled,
         }),
     )
     .await?;
@@ -1728,8 +1737,9 @@ pub struct V1ModelEntry {
 }
 
 /// The enabled offerings as advertised by `GET /v1/models`: one entry per
-/// enabled offering of an enabled provider, with effective (override-aware)
-/// limits and the offering's price row. Unknown prices stay null.
+/// enabled offering of an enabled provider and an enabled model, with
+/// effective (override-aware) limits and the offering's price row. Unknown
+/// prices stay null.
 pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1ModelEntry>, CatalogError> {
     let rows = sqlx::query_as::<_, V1Row>(
         "SELECT o.model_id, o.id AS offering_id, o.upstream_model_id, o.context_override, \
@@ -1741,7 +1751,7 @@ pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1ModelEntry>
          JOIN models m ON m.id = o.model_id \
          JOIN providers pr ON pr.id = o.provider_id \
          LEFT JOIN prices p ON p.offering_id = o.id \
-         WHERE o.enabled = 1 AND pr.enabled = 1 \
+         WHERE o.enabled = 1 AND pr.enabled = 1 AND m.enabled = 1 \
          ORDER BY m.canonical_name, o.upstream_model_id",
     )
     .fetch_all(pool)

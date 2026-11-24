@@ -129,6 +129,9 @@ pub struct ModelRow {
     pub context_length: Option<i64>,
     pub max_output_tokens: Option<i64>,
     pub capabilities_json: Option<String>,
+    /// Model-level kill switch (D61): 0 excludes every offering of this model
+    /// from routing, including offerings created after the switch was flipped.
+    pub enabled: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -322,6 +325,9 @@ pub struct ModelView {
     /// Free-form capabilities JSON; synced models keep their display name
     /// under `display_name` (the spec schema has no display-name column).
     pub capabilities: Option<serde_json::Value>,
+    /// False when the model is disabled for every provider (D61). Offerings
+    /// keep their own `enabled` flag, which this one overrides.
+    pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -340,6 +346,7 @@ impl From<&ModelRow> for ModelView {
                 .capabilities_json
                 .as_deref()
                 .and_then(|raw| serde_json::from_str(raw).ok()),
+            enabled: row.enabled != 0,
             created_at: row.created_at.clone(),
             updated_at: row.updated_at.clone(),
         }
@@ -593,6 +600,10 @@ pub struct ModelPatch {
     pub context_length: Option<i64>,
     pub max_output_tokens: Option<i64>,
     pub capabilities: Option<serde_json::Value>,
+    /// Model-level kill switch (D61). `false` disables every provider's
+    /// offering of this model, including offerings created later; `true`
+    /// restores each offering's own `enabled` value.
+    pub enabled: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]

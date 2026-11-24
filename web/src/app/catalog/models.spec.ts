@@ -57,6 +57,7 @@ const modelFixture: Model = {
   context_length: 400000,
   max_output_tokens: 128000,
   capabilities: [],
+  enabled: true,
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
 };
@@ -118,6 +119,7 @@ function allRow(overrides: Partial<ModelOverviewRow> = {}): ModelOverviewRow {
     modalities_output: ['text'],
     context_length: 400000,
     max_output_tokens: 128000,
+    model_enabled: true,
     providers: [
       { id: 'p1', name: 'openrouter' },
       { id: 'p2', name: 'deepinfra' },
@@ -155,8 +157,10 @@ function providerRow(overrides: Partial<ProviderOverviewRow> = {}): ProviderOver
     context_length: 400000,
     max_output_tokens: 128000,
     offering_id: 'o1',
+    provider_id: 'p1',
     upstream_model_id: 'openai/gpt-5',
     enabled: true,
+    model_enabled: true,
     price: {
       input_per_m: 1.25,
       output_per_m: 5,
