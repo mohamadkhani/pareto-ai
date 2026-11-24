@@ -117,6 +117,7 @@ build-api:
 # production binary with the Angular UI embedded (single artifact)
 build: ui-build
     cd server && cargo build --release --offline
+    upx ./server/target/release/gateway
     @ls -la server/target/release/gateway
 
 # ── Angular frontend (pnpm) ─────────────────────────────────────────────────
