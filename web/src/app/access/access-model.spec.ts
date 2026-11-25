@@ -12,6 +12,7 @@ function model(overrides: Partial<Model> = {}): Model {
     context_length: null,
     max_output_tokens: null,
     capabilities: [],
+    enabled: true,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
     ...overrides,

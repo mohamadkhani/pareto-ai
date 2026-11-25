@@ -324,6 +324,15 @@ function minQualityBox(root: HTMLElement): HTMLInputElement {
   return input;
 }
 
+/** The toolbar switch that reveals rows whose effective state is disabled. */
+function showDisabledSwitch(root: HTMLElement): HTMLButtonElement {
+  const control = root.querySelector<HTMLButtonElement>('.models-toolbar button[role="switch"]');
+  if (control === null) {
+    throw new Error('no show-disabled switch');
+  }
+  return control;
+}
+
 /** Queues the filtered response, then the unfiltered one used for the count. */
 function queueSearch(
   fetchMock: FetchMock,
@@ -760,6 +769,140 @@ describe('Models', () => {
     expect(call.method).toBe('PATCH');
     expect(call.url).toBe('/api/offerings/o1');
     expect(call.body).toEqual({ enabled: false });
+  });
+
+  it('disables a model for every provider from the all-provider view', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, { ...modelFixture, enabled: false }));
+    queueReload(fetchMock, allOverview);
+    const row = Array.from(root.querySelectorAll('tbody tr')).find((candidate) =>
+      candidate.textContent?.includes('openai/gpt-5'),
+    );
+    if (!(row instanceof HTMLElement)) {
+      throw new Error('no row for openai/gpt-5');
+    }
+    buttonByText(row, 'Disable all').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[6];
+    expect(call.method).toBe('PATCH');
+    expect(call.url).toBe('/api/models/m1');
+    expect(call.headers.get('X-CSRF-Token')).toBe('csrf-1');
+    expect(call.body).toEqual({ enabled: false });
+    expect(root.textContent).toContain('disabled for all 2 providers');
+    expect(root.textContent).toContain('moves to the Show disabled view');
+  });
+
+  it('toggles one provider offering from the all-provider list', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, providerOverview));
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    fetchMock.respond(jsonResponse(200, providerRow({ enabled: false })));
+    queueReload(fetchMock, providerOverview);
+    buttonByText(root, 'Disable').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[7];
+    expect(call.method).toBe('PATCH');
+    expect(call.url).toBe('/api/offerings/o1');
+    expect(call.body).toEqual({ enabled: false });
+    expect(root.textContent).toContain('openai/gpt-5 disabled for openrouter');
+  });
+
+  it('blocks a per-provider switch while the model is disabled for all providers', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(
+      jsonResponse(200, { ...providerOverview, rows: [providerRow({ model_enabled: false })] }),
+    );
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The disabled model is hidden by default; the switch reveals it so the
+    // blocked per-provider control can be inspected.
+    expect(root.textContent).toContain('No enabled models');
+    showDisabledSwitch(root).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const toggle = buttonByText(root, 'Disable');
+    expect(toggle.disabled).toBe(true);
+    expect(root.textContent).toContain('disabled (all)');
+  });
+
+  it('hides disabled models by default and reveals them with the switch', async () => {
+    const overview: ModelsOverview = {
+      ...allOverview,
+      rows: [
+        allRow(),
+        allRow({ model_id: 'm2', canonical_name: 'anthropic/claude', model_enabled: false }),
+      ],
+    };
+    queueReload(fetchMock, overview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(root.textContent).toContain('Show disabled (1)');
+
+    showDisabledSwitch(root).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+  });
+
+  it('hides a disabled offering in provider scope until the switch is on', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(
+      jsonResponse(200, { ...providerOverview, rows: [providerRow({ enabled: false })] }),
+    );
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(root.textContent).toContain('No enabled models');
+
+    showDisabledSwitch(root).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(root.textContent).toContain('disabled');
+  });
+
+  it('reveals every disabled model from the empty-state button', async () => {
+    const overview: ModelsOverview = {
+      ...allOverview,
+      rows: [allRow({ model_enabled: false })],
+    };
+    queueReload(fetchMock, overview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.textContent).toContain('No enabled models');
+    buttonByText(root, 'Show disabled').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
   });
 
   it('sets a quality override from the detail dialog', async () => {

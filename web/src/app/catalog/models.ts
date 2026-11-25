@@ -231,6 +231,12 @@ export class Models {
   protected readonly maxPriceInput = signal('');
   /** The minimum quality score a row must reach. */
   protected readonly minQualityInput = signal('');
+  /**
+   * False (the default) shows only rows whose effective state is enabled, so
+   * the catalog opens on what is actually routable. The switch reveals the
+   * disabled rows for inspection or to turn one back on.
+   */
+  protected readonly showDisabled = signal(false);
   /** Rows before the search filter, for the "N of M models" count. */
   protected readonly totalModels = signal<number | null>(null);
   protected readonly loading = signal(false);
@@ -331,6 +337,7 @@ export class Models {
   protected readonly minQuality = computed(() => parseOptionalNumber(this.minQualityInput()));
   protected readonly rows = computed<OverviewRow[]>(() =>
     this.overviewRows()
+      .filter((row) => this.showDisabled() || this.rowEnabled(row))
       .filter((row) => this.matchesRefinements(row))
       .sort((a, b) => this.compareRows(a, b)),
   );
@@ -405,6 +412,15 @@ export class Models {
   protected readonly anyFilterActive = computed(
     () => this.filterActive() || this.refinementActive(),
   );
+  /** Disabled rows the default "enabled only" view hides. */
+  protected readonly hiddenDisabledCount = computed(
+    () => this.overviewRows().filter((row) => !this.rowEnabled(row)).length,
+  );
+  /** Label for the "Show disabled" switch; the count appears only when > 0. */
+  protected readonly showDisabledLabel = computed(() => {
+    const hidden = this.hiddenDisabledCount();
+    return hidden === 0 ? 'Show disabled' : `Show disabled (${hidden})`;
+  });
   /** The price column the maximum applies to. */
   protected readonly maxPriceLabel = computed(() =>
     this.mixSelected() ? 'Max mix price ($/M)' : 'Max input price ($/M)',
@@ -891,11 +907,20 @@ export class Models {
     });
   }
 
-  protected statusTone(row: OverviewRow): BadgeTone {
+  /**
+   * The row's effective state, matching the success badge: a globally disabled
+   * model overrides the offering's own flag, and the All scope also needs at
+   * least one offering to count as enabled.
+   */
+  protected rowEnabled(row: OverviewRow): boolean {
     if (isProviderRow(row)) {
-      return row.enabled && row.model_enabled ? 'success' : 'neutral';
+      return row.enabled && row.model_enabled;
     }
-    return row.model_enabled && row.offerings_count > 0 ? 'success' : 'neutral';
+    return row.model_enabled && row.offerings_count > 0;
+  }
+
+  protected statusTone(row: OverviewRow): BadgeTone {
+    return this.rowEnabled(row) ? 'success' : 'neutral';
   }
 
   protected statusLabel(row: OverviewRow): string {
@@ -1373,12 +1398,14 @@ export class Models {
     try {
       await this.catalog.updateModel(row.model_id, { enabled: enable });
       const providers = row.providers_count;
+      const scope =
+        providers === 0
+          ? 'every provider'
+          : `all ${providers} provider${providers === 1 ? '' : 's'}`;
       this.notice.set(
         enable
           ? `${row.canonical_name} enabled again for every provider; each provider's own offering setting applies.`
-          : `${row.canonical_name} disabled for all ${providers} provider${
-              providers === 1 ? '' : 's'
-            }. New offerings of this model stay disabled until it is enabled again.`,
+          : `${row.canonical_name} disabled for ${scope}. New offerings of this model stay disabled until it is enabled again. The row moves to the Show disabled view.`,
       );
       await this.reload();
     } catch (err) {

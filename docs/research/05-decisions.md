@@ -1275,6 +1275,40 @@ redistributing derived data. An operator who deliberately creates two rows
 under one canonical id gets no automatic merge, and a later discovery for that
 id is ambiguous rather than a guess.
 
+### D61. The model-level enable flag is the cross-provider routing switch
+
+**Decision (2026-11-25):** `models.enabled` is the kill switch for a catalog
+model. When it is 0, every offering of the model is excluded from routing,
+combos, the catalog-pool preview, and `/v1/models`, including offerings created
+after the switch was flipped. `offerings.enabled` stays the per-provider choice;
+the model flag overrides it without rewriting it, so enabling the model again
+restores each provider's own setting. The admin console writes the offering
+flag when a provider is selected and the model flag when **All providers** is
+selected.
+
+**Why:** `offerings.enabled` alone cannot express "no provider may route this
+model". A provider discovered later creates a new offering that defaults to
+enabled, so a disable applied only to today's offerings would silently come
+back on tomorrow. The catalog already identifies one model across provider
+spellings (D60), so the model row is the correct entity for a switch that must
+cover future offerings. Keeping the two flags independent also preserves
+operator intent: a model disabled globally does not erase which providers were
+individually disabled.
+
+**Consequences, accepted deliberately:** a disabled model is invisible to
+`/v1/models` and to routing even while its providers and offerings stay enabled
+in the admin catalog; the Models page hides disabled rows by default (the
+**Show disabled** switch, labelled with the hidden count, reveals them), shows
+`disabled (all)` on the revealed row, and blocks a per-provider enable until the
+model is enabled again. Discovery and the price
+sync still record new offerings and prices for a disabled model — the catalog
+stays complete — but they are not routable. A genuinely new model identity gets
+its own row and is enabled by default; only a spelling or registry match to the
+disabled row inherits the switch.
+
+**Source:** commit
+[`b7fe1db`](https://github.com/mohamadkhani/pareto-ai/commit/b7fe1db6b8a2d88fd2ab8c6d6cd8f5d12530025f).
+
 ### D62. No message-count limit on `/v1/chat/completions`; the body size is the bound
 
 **Decision (2026-11-25):** the data plane accepts any number of `messages` in a

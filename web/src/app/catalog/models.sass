@@ -29,6 +29,8 @@
 .models-toolbar ui-field
   flex: 1 1 14rem
   min-width: 12rem
+.models-toolbar ui-switch
+  min-height: var(--control-height-md)
 .sync-panel
   margin-bottom: var(--space-4)
   border: 1px solid var(--border-subtle)
@@ -204,7 +206,7 @@ th.num .sort-button
 .actions
   white-space: nowrap
   text-align: right
-.actions ui-button + ui-button
+.actions > * + *
   margin-left: var(--space-1)
 .empty-link
   color: var(--accent)

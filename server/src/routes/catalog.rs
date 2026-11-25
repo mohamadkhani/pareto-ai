@@ -159,7 +159,10 @@ pub async fn get_model(
     Ok(Json(ModelView::from(&row)))
 }
 
-/// Updates a model. Admin only, audited as `model.update`.
+/// Updates a model. Admin only, audited as `model.update`. The `enabled`
+/// field is the model-level kill switch (D61): false excludes every offering
+/// of the model, including offerings created later, without rewriting each
+/// offering's own flag.
 #[utoipa::path(
     patch,
     path = "/api/models/{id}",
@@ -454,15 +457,15 @@ pub async fn override_price(
 // ---------------------------------------------------------------------------
 
 /// Lists the enabled offerings in OpenAI-compatible shape: one entry per
-/// enabled offering of an enabled provider, with effective limits (offering
-/// overrides win) and prices in USD per 1M tokens. Unknown price components
-/// are null — never 0. Enabled combos are appended as `combo:<name>` entries
-/// (review m4 — discoverable) with `context_length` set to the minimum
-/// effective context over their eligible members (D63) and null max-output and
-/// price (those vary per member). A combo is shown when at least one of its
-/// candidate offerings is allowed for the caller — explicit members for a
-/// members pool, any catalog offering for a whole-catalog pool (D35). Auth: an
-/// API key (any account) or an admin session.
+/// enabled offering of an enabled provider and an enabled model, with effective
+/// limits (offering overrides win) and prices in USD per 1M tokens. Unknown
+/// price components are null — never 0. Enabled combos are appended as
+/// `combo:<name>` entries (review m4 — discoverable) with `context_length` set
+/// to the minimum effective context over their eligible members (D63) and null
+/// max-output and price (those vary per member). A combo is shown when at least
+/// one of its candidate offerings is allowed for the caller — explicit members
+/// for a members pool, any catalog offering for a whole-catalog pool (D35).
+/// Auth: an API key (any account) or an admin session.
 #[utoipa::path(
     get,
     path = "/v1/models",
@@ -1364,6 +1367,110 @@ mod tests {
         )
         .await;
         assert_eq!(empty.body["data"].as_array().expect("data").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_model_disabled_for_all_providers_stays_out_of_v1_models_after_a_new_offering() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        let (provider_id, model_id) = provider_and_model(&router, &cookie, &csrf).await;
+        create_offering(&router, &cookie, &csrf, &provider_id, &model_id, "brain-1").await;
+
+        // Disabling the model is the cross-provider switch (D61): it is set on
+        // the model row, not on each offering.
+        let disabled = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/models/{model_id}"),
+                Some(json!({ "enabled": false })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK, "{}", disabled.body);
+        assert_eq!(disabled.body["enabled"], false);
+
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(listing.status, StatusCode::OK);
+        assert_eq!(
+            listing.body["data"].as_array().expect("data").len(),
+            0,
+            "a model disabled for all providers is not advertised"
+        );
+
+        // A provider added later creates a new offering for the same model.
+        // The offering defaults to enabled, but the model switch must keep it
+        // off: that is why the flag lives on the model entity.
+        let second = send(
+            router.clone(),
+            api_request(
+                Method::POST,
+                "/api/providers",
+                Some(json!({ "name": "second", "base_url": "https://api.second.example/v1" })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(second.status, StatusCode::CREATED, "{}", second.body);
+        let second_provider = second.body["id"].as_str().expect("provider id").to_string();
+        create_offering(
+            &router,
+            &cookie,
+            &csrf,
+            &second_provider,
+            &model_id,
+            "brain-1-copy",
+        )
+        .await;
+
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(
+            listing.body["data"].as_array().expect("data").len(),
+            0,
+            "new offerings inherit the disabled model"
+        );
+
+        // The per-offering flags were never rewritten, so enabling the model
+        // restores both offerings.
+        let enabled = send(
+            router.clone(),
+            api_request(
+                Method::PATCH,
+                &format!("/api/models/{model_id}"),
+                Some(json!({ "enabled": true })),
+                Some(&cookie),
+                Some(&csrf),
+            ),
+        )
+        .await;
+        assert_eq!(enabled.status, StatusCode::OK, "{}", enabled.body);
+        assert_eq!(enabled.body["enabled"], true);
+
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        let data = listing.body["data"].as_array().expect("data");
+        assert_eq!(data.len(), 2, "both offerings are routable again");
+        assert!(
+            data.iter().any(|entry| entry["id"] == "brain-1")
+                && data.iter().any(|entry| entry["id"] == "brain-1-copy")
+        );
     }
 
     #[tokio::test]
