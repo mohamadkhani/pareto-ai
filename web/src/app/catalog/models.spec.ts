@@ -333,6 +333,33 @@ function showDisabledSwitch(root: HTMLElement): HTMLButtonElement {
   return control;
 }
 
+/** The select-all checkbox in the table header. */
+function headerCheckbox(root: HTMLElement): HTMLInputElement {
+  const box = root.querySelector<HTMLInputElement>('thead .select-col input[type="checkbox"]');
+  if (box === null) {
+    throw new Error('no select-all checkbox');
+  }
+  return box;
+}
+
+/** The selection checkbox of the row whose text contains `name`. */
+function rowCheckbox(root: HTMLElement, name: string): HTMLInputElement {
+  const row = Array.from(root.querySelectorAll('tbody tr')).find((candidate) =>
+    candidate.textContent?.includes(name),
+  );
+  const box = row?.querySelector<HTMLInputElement>('.select-col input[type="checkbox"]');
+  if (box === null || box === undefined) {
+    throw new Error(`no selection checkbox for ${name}`);
+  }
+  return box;
+}
+
+/** Sets a native checkbox and fires the change the component listens for. */
+function checkBox(input: HTMLInputElement, checked: boolean): void {
+  input.checked = checked;
+  input.dispatchEvent(new Event('change'));
+}
+
 /** Queues the filtered response, then the unfiltered one used for the count. */
 function queueSearch(
   fetchMock: FetchMock,
@@ -1629,5 +1656,130 @@ describe('Models', () => {
       '/api/models/overview?provider=p1&mix=mix-code-agent&q=gpt',
     ]);
     expect(root.textContent).toContain('1 of 1 model');
+  });
+
+  it('selects every visible row and disables them in one batch', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(root.querySelector('.batch-bar')).toBeNull();
+
+    checkBox(headerCheckbox(root), true);
+    fixture.detectChanges();
+
+    expect(headerCheckbox(root).checked).toBe(true);
+    expect(root.querySelector('.batch-bar')?.textContent).toContain('2 selected');
+    expect(root.querySelector('.batch-bar')?.textContent).toContain('every provider');
+
+    fetchMock.respond(jsonResponse(200, { ...modelFixture, enabled: false }));
+    fetchMock.respond(
+      jsonResponse(200, {
+        ...modelFixture,
+        id: 'm2',
+        canonical_name: 'anthropic/claude',
+        enabled: false,
+      }),
+    );
+    queueReload(fetchMock, allOverview);
+    buttonByText(root, 'Disable selected').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const calls = fetchMock.requests.slice(6, 8);
+    expect(calls.map((call) => call.url).sort()).toEqual(['/api/models/m1', '/api/models/m2']);
+    expect(calls.every((call) => call.method === 'PATCH')).toBe(true);
+    expect(
+      calls.every((call) => call.body && (call.body as { enabled: boolean }).enabled === false),
+    ).toBe(true);
+    expect(root.textContent).toContain('Disabled 2 models for every provider');
+    // The selection clears once the batch finishes.
+    expect(root.querySelector('.batch-bar')).toBeNull();
+  });
+
+  it('shows the select-all box as indeterminate while only some rows are checked', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    checkBox(rowCheckbox(root, 'openai/gpt-5'), true);
+    fixture.detectChanges();
+
+    expect(headerCheckbox(root).indeterminate).toBe(true);
+    expect(headerCheckbox(root).checked).toBe(false);
+
+    checkBox(rowCheckbox(root, 'anthropic/claude'), true);
+    fixture.detectChanges();
+
+    expect(headerCheckbox(root).indeterminate).toBe(false);
+    expect(headerCheckbox(root).checked).toBe(true);
+
+    buttonByText(root, 'Clear').click();
+    fixture.detectChanges();
+
+    expect(root.querySelector('.batch-bar')).toBeNull();
+    expect(headerCheckbox(root).checked).toBe(false);
+  });
+
+  it('disables the selected offering for the provider scope only', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, providerOverview));
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    checkBox(rowCheckbox(root, 'openai/gpt-5'), true);
+    fixture.detectChanges();
+
+    expect(root.querySelector('.batch-bar')?.textContent).toContain(
+      "Changes this provider's offerings (openrouter)",
+    );
+
+    fetchMock.respond(jsonResponse(200, providerRow({ enabled: false })));
+    queueReload(fetchMock, providerOverview);
+    buttonByText(root, 'Disable selected').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const call = fetchMock.requests[7];
+    expect(call.method).toBe('PATCH');
+    expect(call.url).toBe('/api/offerings/o1');
+    expect(call.body).toEqual({ enabled: false });
+    expect(root.textContent).toContain('Disabled 1 offering for openrouter.');
+  });
+
+  it('skips a globally disabled model when batch enabling offerings', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const disabled: ModelsOverview = {
+      ...providerOverview,
+      rows: [providerRow({ enabled: false, model_enabled: false })],
+    };
+    fetchMock.respond(jsonResponse(200, disabled));
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The disabled row is hidden by default; reveal it to select it.
+    showDisabledSwitch(root).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    checkBox(rowCheckbox(root, 'openai/gpt-5'), true);
+    fixture.detectChanges();
+
+    const before = fetchMock.requests.length;
+    queueReload(fetchMock, disabled);
+    buttonByText(root, 'Enable selected').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fetchMock.requests.slice(before).some((call) => call.method === 'PATCH')).toBe(false);
+    expect(root.textContent).toContain('1 selected model is disabled for all providers');
   });
 });

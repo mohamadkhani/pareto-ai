@@ -54,6 +54,7 @@ import {
 import { UiBadge, type BadgeTone } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
+import { UiCheckbox } from '../ui/checkbox';
 import { UiChip } from '../ui/chip';
 import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
@@ -194,6 +195,7 @@ function emptyPriceDraft(): PriceDraft {
     UiBadge,
     UiBanner,
     UiButton,
+    UiCheckbox,
     UiChip,
     UiCombobox,
     UiDialog,
@@ -237,6 +239,9 @@ export class Models {
    * disabled rows for inspection or to turn one back on.
    */
   protected readonly showDisabled = signal(false);
+  /** Row keys (see `overviewRowKey`) checked for a batch action. */
+  protected readonly selectedKeys = signal<ReadonlySet<string>>(new Set());
+  protected readonly batching = signal(false);
   /** Rows before the search filter, for the "N of M models" count. */
   protected readonly totalModels = signal<number | null>(null);
   protected readonly loading = signal(false);
@@ -340,6 +345,23 @@ export class Models {
       .filter((row) => this.showDisabled() || this.rowEnabled(row))
       .filter((row) => this.matchesRefinements(row))
       .sort((a, b) => this.compareRows(a, b)),
+  );
+  /** Checked rows that are still visible; keys of hidden rows are ignored. */
+  protected readonly selectedRows = computed<OverviewRow[]>(() => {
+    const keys = this.selectedKeys();
+    return keys.size === 0 ? [] : this.rows().filter((row) => keys.has(this.rowKey(row)));
+  });
+  protected readonly selectedCount = computed(() => this.selectedRows().length);
+  protected readonly allSelected = computed(
+    () => this.rows().length > 0 && this.selectedCount() === this.rows().length,
+  );
+  /** Some but not all visible rows are checked; drives the mixed box state. */
+  protected readonly someSelected = computed(() => this.selectedCount() > 0 && !this.allSelected());
+  /** What a batch enable/disable will change, stated for the current scope. */
+  protected readonly batchHint = computed(() =>
+    this.scope() === 'provider'
+      ? `Changes this provider's offerings (${this.scopedProviderName()})`
+      : 'Changes every provider, including providers added later',
   );
   protected readonly detailRow = computed<OverviewRow | null>(() => {
     const key = this.detailKey();
@@ -529,6 +551,7 @@ export class Models {
     }
     this.providerId.set(value);
     this.writeUrlParam('provider', value === 'all' ? null : value);
+    this.selectedKeys.set(new Set());
     this.notice.set(null);
     this.actionError.set(null);
     void this.loadOverview();
@@ -593,6 +616,7 @@ export class Models {
   protected clearAllFilters(): void {
     this.providerId.set('all');
     this.writeUrlParam('provider', null);
+    this.selectedKeys.set(new Set());
     this.clearRefinements();
     this.resetSearch();
     void this.loadOverview();
@@ -1413,6 +1437,139 @@ export class Models {
     } finally {
       this.togglingModelKey.set(null);
     }
+  }
+
+  // --- batch selection -----------------------------------------------------
+
+  protected isSelected(row: OverviewRow): boolean {
+    return this.selectedKeys().has(this.rowKey(row));
+  }
+
+  /** Checks or unchecks one row without touching the rest. */
+  protected setRowSelected(row: OverviewRow, selected: boolean): void {
+    const key = this.rowKey(row);
+    this.selectedKeys.update((keys) => {
+      const next = new Set(keys);
+      if (selected) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+      return next;
+    });
+  }
+
+  /** Header box: checks every visible row, or clears the whole selection. */
+  protected toggleSelectAll(selected: boolean): void {
+    this.selectedKeys.set(
+      selected ? new Set(this.rows().map((row) => this.rowKey(row))) : new Set(),
+    );
+  }
+
+  protected clearSelection(): void {
+    this.selectedKeys.set(new Set());
+  }
+
+  /**
+   * Enables or disables every checked row at once. With a provider selected it
+   * flips each checked offering for that provider; with All providers selected
+   * it flips the model kill switch, so providers added later stay disabled too
+   * (D61). A model disabled for all providers cannot be enabled from a
+   * provider scope, so those rows are skipped and called out.
+   */
+  protected async batchSetEnabled(enable: boolean): Promise<void> {
+    if (this.batching() || this.selectedCount() === 0) {
+      return;
+    }
+    this.batching.set(true);
+    this.actionError.set(null);
+    this.notice.set(null);
+    try {
+      if (this.scope() === 'provider') {
+        await this.batchOfferings(enable);
+      } else {
+        await this.batchModels(enable);
+      }
+    } finally {
+      this.batching.set(false);
+    }
+  }
+
+  private async batchOfferings(enable: boolean): Promise<void> {
+    const rows = this.selectedRows().filter(isProviderRow);
+    const provider = this.scopedProviderName();
+    // The kill switch wins: a globally disabled model cannot be enabled here.
+    const targets = enable ? rows.filter((row) => row.model_enabled) : rows;
+    const skipped = rows.length - targets.length;
+    const outcome = await this.runBatch(
+      targets.map((row) => this.catalog.updateOffering(row.offering_id, { enabled: enable })),
+    );
+    this.selectedKeys.set(new Set());
+    if (outcome.ok > 0) {
+      this.notice.set(
+        enable
+          ? `Enabled ${outcome.ok} offering${outcome.ok === 1 ? '' : 's'} for ${provider}.`
+          : `Disabled ${outcome.ok} offering${outcome.ok === 1 ? '' : 's'} for ${provider}.`,
+      );
+    }
+    if (skipped > 0) {
+      this.actionError.set(
+        `${skipped} selected model${skipped === 1 ? ' is' : 's are'} disabled for all providers. ` +
+          'Select All providers to enable them first.',
+      );
+    } else if (outcome.failed > 0) {
+      this.actionError.set(
+        `${enable ? 'Enabling' : 'Disabling'} ${outcome.failed} of ${targets.length} offerings failed: ${outcome.firstError}`,
+      );
+    }
+    await this.reload();
+  }
+
+  private async batchModels(enable: boolean): Promise<void> {
+    const rows = this.selectedRows().filter((row) => !isProviderRow(row));
+    const outcome = await this.runBatch(
+      rows.map((row) => this.catalog.updateModel(row.model_id, { enabled: enable })),
+    );
+    this.selectedKeys.set(new Set());
+    if (outcome.ok > 0) {
+      const noun = outcome.ok === 1 ? 'model' : 'models';
+      this.notice.set(
+        enable
+          ? `Enabled ${outcome.ok} ${noun} again for every provider; each provider's own offering setting applies.`
+          : `Disabled ${outcome.ok} ${noun} for every provider. New offerings stay disabled until they are enabled again.`,
+      );
+    }
+    if (outcome.failed > 0) {
+      this.actionError.set(
+        `${enable ? 'Enabling' : 'Disabling'} ${outcome.failed} of ${rows.length} models failed: ${outcome.firstError}`,
+      );
+    }
+    await this.reload();
+  }
+
+  /**
+   * Runs one request per target in parallel and reports how many succeeded.
+   * One failing row never hides the rows that did change.
+   */
+  private async runBatch(
+    requests: ReadonlyArray<Promise<unknown>>,
+  ): Promise<{ ok: number; failed: number; firstError: string | null }> {
+    const results = await Promise.allSettled(requests);
+    let ok = 0;
+    let firstError: string | null = null;
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        ok += 1;
+      } else if (firstError === null) {
+        firstError = describeError(result.reason, 'the request failed');
+      }
+    }
+    return { ok, failed: results.length - ok, firstError };
+  }
+
+  private scopedProviderName(): string {
+    const id = this.overview()?.provider_id ?? null;
+    return id === null ? 'this provider' : (this.providerById().get(id)?.name ?? id);
   }
 
   protected async saveOverride(): Promise<void> {

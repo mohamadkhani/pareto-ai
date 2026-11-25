@@ -449,8 +449,14 @@
         <ui-checkbox [checked]="true" label="Allow this model" />
         <ui-checkbox [checked]="false" label="Unchecked" />
         <ui-checkbox [checked]="true" [disabled]="true" label="Disabled" />
+        <ui-checkbox [checked]="false" [indeterminate]="true" label="Partially selected" />
+        <ui-checkbox [checked]="true" [ariaLabel]="'Select this row'" />
       </div>
-      <p class="note">The input is the focus target; the label is the accessible name.</p>
+      <p class="note">
+        The input is the focus target; the label is the accessible name. Use
+        <code>ariaLabel</code> for a bare checkbox in a table column, and
+        <code>indeterminate</code> for the mixed state of a select-all control.
+      </p>
     </section>
   </div>
 </ng-template>

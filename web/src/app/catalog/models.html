@@ -229,6 +229,33 @@
       </div>
     </section>
 
+    @if (selectedCount() > 0) {
+      <div class="batch-bar" role="region" aria-label="Batch actions">
+        <span class="batch-count">{{ selectedCount() }} selected</span>
+        <span class="batch-hint">{{ batchHint() }}</span>
+        <span class="batch-spacer"></span>
+        <ui-button
+          size="sm"
+          [loading]="batching()"
+          [disabled]="batching()"
+          (clicked)="batchSetEnabled(true)"
+        >
+          Enable selected
+        </ui-button>
+        <ui-button
+          size="sm"
+          [loading]="batching()"
+          [disabled]="batching()"
+          (clicked)="batchSetEnabled(false)"
+        >
+          Disable selected
+        </ui-button>
+        <ui-button size="sm" variant="ghost" [disabled]="batching()" (clicked)="clearSelection()">
+          Clear
+        </ui-button>
+      </div>
+    }
+
     @if (loadError()) {
       <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
         {{ loadError() }}
@@ -308,6 +335,14 @@
         <table>
           <thead>
             <tr>
+              <th scope="col" class="select-col">
+                <ui-checkbox
+                  [checked]="allSelected()"
+                  [indeterminate]="someSelected()"
+                  [ariaLabel]="'Select all models'"
+                  (checkedChange)="toggleSelectAll($event)"
+                />
+              </th>
               <th scope="col" [attr.aria-sort]="sortAria('name')">
                 <button type="button" class="sort-button" (click)="setSort('name')">
                   Model
@@ -383,6 +418,13 @@
           <tbody>
             @for (row of rows(); track rowKey(row)) {
               <tr>
+                <td class="select-col">
+                  <ui-checkbox
+                    [checked]="isSelected(row)"
+                    [ariaLabel]="'Select ' + row.canonical_name"
+                    (checkedChange)="setRowSelected(row, $event)"
+                  />
+                </td>
                 <td>
                   <span class="model-name">{{ row.canonical_name }}</span>
                   @if (row.family !== null) {

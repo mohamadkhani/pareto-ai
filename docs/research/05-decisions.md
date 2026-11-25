@@ -1300,7 +1300,12 @@ individually disabled.
 in the admin catalog; the Models page hides disabled rows by default (the
 **Show disabled** switch, labelled with the hidden count, reveals them), shows
 `disabled (all)` on the revealed row, and blocks a per-provider enable until the
-model is enabled again. Discovery and the price
+model is enabled again. The page's row selection and its batch **Enable
+selected** / **Disable selected** actions follow the same scope rule as the
+single-row switch: with a provider selected they flip that provider's offerings,
+with **All providers** selected they flip the model flag, and a model disabled
+for every provider is skipped (and called out) when a provider-scoped batch
+tries to enable it. Discovery and the price
 sync still record new offerings and prices for a disabled model — the catalog
 stays complete — but they are not routable. A genuinely new model identity gets
 its own row and is enabled by default; only a spelling or registry match to the
