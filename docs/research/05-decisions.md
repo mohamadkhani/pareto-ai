@@ -1349,14 +1349,13 @@ conversation is accepted.
 **Decision (2026-11-25):** the `context_length` of an advertised `combo:<name>`
 entry in `GET /v1/models` is the minimum effective context over the combo's
 **eligible** members — an enabled offering of an enabled provider and an enabled
-model (the model-level kill switch), with the offering's `context_override`
-winning over the model value, exactly as for a plain model entry. Members with
-an unknown context are ignored; when no eligible member has a known context the
-field stays null. `max_output_tokens` and price stay null. A `pool = "all"`
-combo has no explicit members, so its context stays null. The advertised value
-is informational only: routing still filters context per candidate
-(`context_fits`), so a request larger than the minimum is served by the members
-whose window fits it, not refused.
+model (D61), with the offering's `context_override` winning over the model value,
+exactly as for a plain model entry. Members with an unknown context are ignored;
+when no eligible member has a known context the field stays null.
+`max_output_tokens` and price stay null. A `pool = "all"` combo has no explicit
+members, so its context stays null. The advertised value is informational only:
+routing still filters context per candidate (`context_fits`), so a request larger
+than the minimum is served by the members whose window fits it, not refused.
 
 **Why:** a combo is addressable like a model, so a client sizes its prompt from
 the advertised window. A null gives the client nothing, and any single member
