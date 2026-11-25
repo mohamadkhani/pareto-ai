@@ -109,6 +109,24 @@ function typeInto(root: HTMLElement, selector: string, value: string): void {
   input.dispatchEvent(new Event('input'));
 }
 
+/** Picks a combobox option by visible label (focus, type, click the option). */
+function comboboxInto(root: HTMLElement, selector: string, label: string): void {
+  const input = root.querySelector<HTMLInputElement>(selector);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`no combobox input matching ${selector}`);
+  }
+  input.dispatchEvent(new FocusEvent('focus'));
+  input.value = label;
+  input.dispatchEvent(new Event('input'));
+  const option = Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!option) {
+    throw new Error(`no combobox option labelled ${label}`);
+  }
+  option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function submit(root: HTMLElement): void {
   const form = root.querySelector('form');
   if (!(form instanceof HTMLFormElement)) {
@@ -242,12 +260,7 @@ describe('Limits', () => {
 
     buttonByText(root, 'New cap').click();
     fixture.detectChanges();
-    const model = root.querySelector<HTMLSelectElement>('#cap-model');
-    expect(model).not.toBeNull();
-    if (model !== null) {
-      model.value = 'm1';
-      model.dispatchEvent(new Event('change'));
-    }
+    comboboxInto(root, '#cap-model', 'openai/gpt-5');
     typeInto(root, '#cap-limit', '5000');
     submit(root);
     await fixture.whenStable();

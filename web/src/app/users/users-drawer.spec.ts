@@ -145,6 +145,24 @@ function selectInto(root: HTMLElement, selector: string, value: string): void {
   select.dispatchEvent(new Event('change'));
 }
 
+/** Picks a combobox option by visible label (focus, type, click the option). */
+function comboboxInto(root: HTMLElement, selector: string, label: string): void {
+  const input = root.querySelector<HTMLInputElement>(selector);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`no combobox input matching ${selector}`);
+  }
+  input.dispatchEvent(new FocusEvent('focus'));
+  input.value = label;
+  input.dispatchEvent(new Event('input'));
+  const option = Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!option) {
+    throw new Error(`no combobox option labelled ${label}`);
+  }
+  option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function tabByText(root: HTMLElement, text: string): HTMLButtonElement {
   const tab = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find(
     (candidate) => candidate.textContent?.trim() === text,
@@ -231,7 +249,7 @@ describe('UserDrawer', () => {
 
     expect(
       Array.from(root.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent?.trim()),
-    ).toEqual(['Limits', 'Grants', 'Keys', 'Overview']);
+    ).toEqual(['Limits', 'Grants', 'Access map', 'Keys', 'Overview']);
     await waitForText(fixture, root, 'week');
     await waitForText(fixture, root, '$4.00 of $10.00');
     await waitForText(fixture, root, 'openai/gpt-5');
@@ -296,7 +314,7 @@ describe('UserDrawer', () => {
     buttonByText(root, 'Advanced matrix').click();
     await settle(fixture);
 
-    selectInto(root, '#drawer-grant-resource', 'm2');
+    comboboxInto(root, '#drawer-grant-resource', 'openai/gpt-5-mini');
     selectInto(root, '#drawer-grant-mode', 'deny');
     fixture.detectChanges();
 

@@ -330,12 +330,12 @@
           }
 
           <ui-field label="Add offering" controlId="combo-member-picker">
-            <ui-select [value]="memberPicker()" (valueChange)="addMember($event)">
-              <option value="">Choose an offering…</option>
-              @for (offering of addableOfferings(); track offering.id) {
-                <option [value]="offering.id">{{ offeringLabel(offering.id) }}</option>
-              }
-            </ui-select>
+            <ui-combobox
+              [value]="memberPicker()"
+              placeholder="Choose an offering…"
+              [options]="addableOfferingOptions()"
+              (valueChange)="addMember($event)"
+            />
           </ui-field>
 
           @if (membersError()) {

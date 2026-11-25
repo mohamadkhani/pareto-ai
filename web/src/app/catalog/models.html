@@ -884,15 +884,13 @@
   }
   <div class="model-form">
     <ui-field label="Model" [error]="offeringErrors().model_id ?? ''">
-      <ui-select
+      <ui-combobox
         [id]="'offering-model'"
         [value]="offeringDraft().model_id"
+        placeholder="Choose a model…"
+        [options]="offeringModelOptions()"
         (valueChange)="setOfferingDraft('model_id', $event)"
-      >
-        @for (model of offeringModels(); track model.id) {
-          <option [value]="model.id">{{ model.canonical_name }}</option>
-        }
-      </ui-select>
+      />
     </ui-field>
     <ui-field
       label="Upstream model id"

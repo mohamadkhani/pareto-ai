@@ -17,15 +17,13 @@
   <div class="toolbar">
     @if (isAdmin()) {
       <ui-field label="Account" [controlId]="'limits-user'">
-        <ui-select
+        <ui-combobox
           [id]="'limits-user'"
           [value]="selectedUserId()"
+          placeholder="Choose an account…"
+          [options]="userOptions()"
           (valueChange)="onUserChange($event)"
-        >
-          @for (user of users(); track user.id) {
-            <option [value]="user.id">{{ user.email }}</option>
-          }
-        </ui-select>
+        />
       </ui-field>
     }
     <span class="spacer"></span>
@@ -209,12 +207,12 @@
               [controlId]="'cap-model'"
               [error]="showCapError('model_id') ? capFieldError('model_id') : ''"
             >
-              <ui-select [id]="'cap-model'" formControlName="model_id">
-                <option value="">Choose a model…</option>
-                @for (model of models(); track model.id) {
-                  <option [value]="model.id">{{ model.canonical_name }}</option>
-                }
-              </ui-select>
+              <ui-combobox
+                [id]="'cap-model'"
+                formControlName="model_id"
+                placeholder="Choose a model…"
+                [options]="modelOptions()"
+              />
             </ui-field>
             <ui-field label="Period" [controlId]="'cap-period'">
               <ui-select [id]="'cap-period'" formControlName="period">

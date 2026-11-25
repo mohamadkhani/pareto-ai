@@ -114,6 +114,27 @@ function selectInto(root: HTMLElement, selector: string, value: string): void {
   select.dispatchEvent(new Event('change'));
 }
 
+/**
+ * Picks a combobox option by its visible label: focuses the trigger, types the
+ * label to filter, then clicks the matching `[role="option"]`.
+ */
+function comboboxInto(root: HTMLElement, selector: string, label: string): void {
+  const input = root.querySelector<HTMLInputElement>(`${selector}`);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`no combobox input matching ${selector}`);
+  }
+  input.dispatchEvent(new FocusEvent('focus'));
+  input.value = label;
+  input.dispatchEvent(new Event('input'));
+  const option = Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!option) {
+    throw new Error(`no combobox option labelled ${label}`);
+  }
+  option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function submit(root: HTMLElement): void {
   const form = root.querySelector('form');
   if (!(form instanceof HTMLFormElement)) {
@@ -201,11 +222,15 @@ describe('Grants', () => {
     buttonByText(root, 'New grant').click();
     fixture.detectChanges();
 
-    // The resource picker shows friendly model names.
-    expect(root.querySelector('#grant-resource')?.textContent ?? '').toContain('openai/gpt-5');
+    // The resource picker offers friendly model names in its filtered list.
+    const resourceInput = root.querySelector<HTMLInputElement>('#grant-resource');
+    resourceInput?.dispatchEvent(new FocusEvent('focus'));
+    fixture.detectChanges();
+    const resourceList = resourceInput?.closest('ui-combobox')?.querySelector('ul[role="listbox"]');
+    expect(resourceList?.textContent ?? '').toContain('openai/gpt-5');
 
-    selectInto(root, '#grant-subject', 'u2');
-    selectInto(root, '#grant-resource', 'm1');
+    comboboxInto(root, '#grant-subject', 'user@example.com');
+    comboboxInto(root, '#grant-resource', 'openai/gpt-5');
     selectInto(root, '#grant-mode', 'deny');
     submit(root);
     await fixture.whenStable();
@@ -237,8 +262,8 @@ describe('Grants', () => {
 
     buttonByText(root, 'New grant').click();
     fixture.detectChanges();
-    selectInto(root, '#grant-subject', 'u2');
-    selectInto(root, '#grant-resource', 'm1');
+    comboboxInto(root, '#grant-subject', 'user@example.com');
+    comboboxInto(root, '#grant-resource', 'openai/gpt-5');
     submit(root);
     await fixture.whenStable();
     fixture.detectChanges();

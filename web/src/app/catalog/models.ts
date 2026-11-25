@@ -55,6 +55,7 @@ import { UiBadge, type BadgeTone } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiChip } from '../ui/chip';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -194,6 +195,7 @@ function emptyPriceDraft(): PriceDraft {
     UiBanner,
     UiButton,
     UiChip,
+    UiCombobox,
     UiDialog,
     UiEmpty,
     UiField,
@@ -273,6 +275,14 @@ export class Models {
   // Offering management inside the provider-scoped detail dialog.
   protected readonly offeringOpen = signal(false);
   protected readonly offeringModels = signal<Model[]>([]);
+  /** Model options for the add-offering picker, searchable by name/family. */
+  protected readonly offeringModelOptions = computed<ComboboxOption[]>(() =>
+    this.offeringModels().map((model) => ({
+      value: model.id,
+      label: model.canonical_name,
+      searchText: model.family ?? '',
+    })),
+  );
   protected readonly offeringDraft = signal<OfferingDraft>(emptyOfferingDraft());
   protected readonly offeringAttempted = signal(false);
   protected readonly offeringHeaderRows = signal<HeaderRow[]>([]);

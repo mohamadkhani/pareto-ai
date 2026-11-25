@@ -10,6 +10,7 @@ import { parseDecision } from '../routing/routing.types';
 import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
 import { UiSelect } from '../ui/select';
@@ -39,7 +40,17 @@ const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as
 /** The request log: metadata and settled usage, never bodies. Admin only. */
 @Component({
   selector: 'app-logs',
-  imports: [DecisionPanel, UiBadge, UiBanner, UiButton, UiEmpty, UiField, UiSelect, UiTable],
+  imports: [
+    DecisionPanel,
+    UiBadge,
+    UiBanner,
+    UiButton,
+    UiCombobox,
+    UiEmpty,
+    UiField,
+    UiSelect,
+    UiTable,
+  ],
   templateUrl: './logs.html',
   styleUrl: './logs.sass',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -68,6 +79,18 @@ export class Logs {
   protected readonly hasMore = computed(() => this.nextCursor() !== null);
   protected readonly errorClasses = ERROR_CLASSES;
   protected readonly statuses = STATUSES;
+
+  /** Searchable user filter options; the empty value is "All users". */
+  protected readonly userOptions = computed<ComboboxOption[]>(() => [
+    { value: '', label: 'All users' },
+    ...this.users().map((user) => ({ value: user.id, label: user.email })),
+  ]);
+
+  /** Searchable provider filter options; the empty value is "All providers". */
+  protected readonly providerOptions = computed<ComboboxOption[]>(() => [
+    { value: '', label: 'All providers' },
+    ...this.providers().map((provider) => ({ value: provider.id, label: provider.name })),
+  ]);
 
   /** The entry whose details are open. */
   protected readonly expandedId = signal<string | null>(null);

@@ -71,6 +71,22 @@ function selectInto(root: HTMLElement, selector: string, value: string): void {
   select.dispatchEvent(new Event('change'));
 }
 
+/** Picks a combobox option by its `data-value` (focus, then click the row). */
+function comboboxInto(root: HTMLElement, selector: string, value: string): void {
+  const input = root.querySelector<HTMLInputElement>(selector);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`no combobox input matching ${selector}`);
+  }
+  input.dispatchEvent(new FocusEvent('focus'));
+  const option = Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (candidate) => candidate.dataset['value'] === value,
+  );
+  if (!option) {
+    throw new Error(`no combobox option with value ${value}`);
+  }
+  option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function buttonByText(scope: ParentNode, text: string): HTMLButtonElement {
   const button = Array.from(scope.querySelectorAll('button')).find(
     (candidate) => candidate.textContent?.trim() === text,
@@ -207,7 +223,7 @@ describe('Logs', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    selectInto(root, '#logs-user', 'u1');
+    comboboxInto(root, '#logs-user', 'u1');
     await fixture.whenStable();
     fixture.detectChanges();
 

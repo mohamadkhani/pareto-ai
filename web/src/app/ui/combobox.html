@@ -1,0 +1,49 @@
+<div class="combobox" [class.is-open]="open()" [class.is-disabled]="isDisabled()">
+  <input
+    #inputEl
+    class="control combobox-input"
+    [attr.id]="controlId()"
+    type="text"
+    role="combobox"
+    [attr.name]="name() || null"
+    [attr.placeholder]="placeholder() || null"
+    [attr.aria-label]="ariaLabel() || null"
+    [attr.aria-expanded]="open() ? 'true' : 'false'"
+    [attr.aria-controls]="listId"
+    [attr.aria-autocomplete]="'list'"
+    [attr.aria-activedescendant]="activeDescendant()"
+    [attr.aria-describedby]="describedBy()"
+    [attr.aria-invalid]="invalid() ? 'true' : null"
+    [value]="displayValue()"
+    [disabled]="isDisabled()"
+    (focus)="onFocus()"
+    (input)="onInput($event)"
+    (keydown)="onKeydown($event)"
+    (blur)="onBlur()"
+  />
+  <ul
+    class="combobox-list"
+    [attr.id]="listId"
+    role="listbox"
+    [attr.aria-label]="ariaLabel() || null"
+    [hidden]="!open()"
+  >
+    @for (option of filteredOptions(); track option.value; let i = $index) {
+      <li
+        class="combobox-option"
+        role="option"
+        [attr.id]="optionId(i)"
+        [attr.data-value]="option.value"
+        [class.is-active]="i === activeIndex()"
+        [attr.aria-selected]="option.value === value() ? 'true' : 'false'"
+        (mousedown)="$event.preventDefault()"
+        (click)="onOptionClick(option)"
+        (mousemove)="onOptionMove(option)"
+      >
+        {{ option.label }}
+      </li>
+    } @empty {
+      <li class="combobox-empty" role="presentation">No matches</li>
+    }
+  </ul>
+</div>

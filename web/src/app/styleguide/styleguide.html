@@ -259,6 +259,24 @@
             <option value="block">block</option>
           </ui-select>
         </ui-field>
+        <ui-field
+          label="Searchable model"
+          hint="Type to filter by name, family, or provider; arrow keys and Enter pick."
+        >
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+          />
+        </ui-field>
+        <ui-field label="Compact combobox" hint="Same control at toolbar height.">
+          <ui-combobox
+            size="sm"
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="compactCombobox"
+          />
+        </ui-field>
         <ui-field label="Compact input">
           <ui-input size="sm" value="1,000" />
         </ui-field>

@@ -1,0 +1,49 @@
+<div class="access-graph" [style.width.px]="width" [style.height.px]="height()">
+  <svg
+    class="access-graph-links"
+    [attr.viewBox]="'0 0 ' + width + ' ' + height()"
+    [attr.width]="width"
+    [attr.height]="height()"
+    preserveAspectRatio="xMinYMin meet"
+    role="presentation"
+  >
+    @for (item of positionedLinks(); track item.link.id) {
+      <path
+        class="access-link"
+        [class.is-allow]="item.tone === 'is-allow'"
+        [class.is-deny]="item.tone === 'is-deny'"
+        [class.is-selected]="isSelected(item.link)"
+        [attr.d]="item.d"
+        role="button"
+        tabindex="0"
+        [attr.aria-label]="item.link.reason"
+        (click)="select(item.link)"
+        (keydown.enter)="select(item.link)"
+      >
+        <title>{{ item.link.reason }}</title>
+      </path>
+    }
+  </svg>
+
+  <ul class="access-column access-column--left" [attr.aria-label]="'Subjects'">
+    @for (item of left(); track item.node.id) {
+      <li class="access-node" [style.top.px]="item.top">
+        <span class="access-node-label" [attr.title]="item.node.label">{{ item.node.label }}</span>
+        @if (item.node.sublabel) {
+          <span class="access-node-sub">{{ item.node.sublabel }}</span>
+        }
+      </li>
+    }
+  </ul>
+
+  <ul class="access-column access-column--right" [attr.aria-label]="'Models'">
+    @for (item of right(); track item.node.id) {
+      <li class="access-node access-node--model" [style.top.px]="item.top">
+        <span class="access-node-label" [attr.title]="item.node.label">{{ item.node.label }}</span>
+        @if (item.node.sublabel) {
+          <span class="access-node-sub">{{ item.node.sublabel }}</span>
+        }
+      </li>
+    }
+  </ul>
+</div>

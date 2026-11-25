@@ -19,20 +19,20 @@
 
     <div class="toolbar">
       <ui-field label="User" [controlId]="'logs-user'">
-        <ui-select [value]="userFilter()" (valueChange)="onUserFilterChange($event)">
-          <option value="">All users</option>
-          @for (user of users(); track user.id) {
-            <option [value]="user.id">{{ user.email }}</option>
-          }
-        </ui-select>
+        <ui-combobox
+          [value]="userFilter()"
+          placeholder="All users"
+          [options]="userOptions()"
+          (valueChange)="onUserFilterChange($event)"
+        />
       </ui-field>
       <ui-field label="Provider" [controlId]="'logs-provider'">
-        <ui-select [value]="providerFilter()" (valueChange)="onProviderFilterChange($event)">
-          <option value="">All providers</option>
-          @for (provider of providers(); track provider.id) {
-            <option [value]="provider.id">{{ provider.name }}</option>
-          }
-        </ui-select>
+        <ui-combobox
+          [value]="providerFilter()"
+          placeholder="All providers"
+          [options]="providerOptions()"
+          (valueChange)="onProviderFilterChange($event)"
+        />
       </ui-field>
       <ui-field label="Status" [controlId]="'logs-status'">
         <ui-select [value]="statusFilter()" (valueChange)="onStatusFilterChange($event)">

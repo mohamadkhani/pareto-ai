@@ -1,0 +1,77 @@
+// Two-column access diagram. The SVG connectors sit behind HTML node cards so
+// labels stay selectable and themeable; both share the pixel layout computed in
+// the component. Colors, spacing, radius, and motion come from tokens only.
+.access-graph
+  position: relative
+  // width is set inline from the computed layout; keep a sane minimum.
+  min-width: 0
+.access-graph-links
+  position: absolute
+  inset-block-start: 0
+  inset-inline-start: 0
+  overflow: visible
+  pointer-events: none
+.access-link
+  fill: none
+  stroke-width: 2
+  stroke-linecap: round
+  opacity: 0.55
+  pointer-events: stroke
+  cursor: pointer
+  transition: opacity var(--duration-fast) var(--ease-standard), stroke-width var(--duration-fast) var(--ease-standard)
+.access-link.is-allow
+  stroke: var(--success)
+.access-link.is-deny
+  stroke: var(--danger)
+.access-link:hover,
+.access-link.is-selected
+  opacity: 1
+  stroke-width: 3
+.access-link:focus-visible
+  outline: none
+  opacity: 1
+  stroke-width: 3
+.access-column
+  position: absolute
+  inset-block-start: 0
+  margin: 0
+  padding: 0
+  list-style: none
+.access-column--left
+  inset-inline-start: 0
+  width: 200px
+.access-column--right
+  inset-inline-end: 0
+  width: 224px
+.access-node
+  position: absolute
+  inset-inline: 0
+  display: flex
+  flex-direction: column
+  justify-content: center
+  gap: 1px
+  box-sizing: border-box
+  height: 38px
+  padding: var(--space-1) var(--space-2)
+  border: 1px solid var(--border-subtle)
+  border-radius: var(--radius-md)
+  background: var(--surface-raised)
+  overflow: hidden
+.access-node--model
+  border-color: var(--border)
+.access-node-label
+  color: var(--text)
+  font-size: var(--text-small)
+  font-weight: var(--weight-medium)
+  white-space: nowrap
+  overflow: hidden
+  text-overflow: ellipsis
+.access-node-sub
+  color: var(--text-muted)
+  font-size: var(--text-badge)
+  white-space: nowrap
+  overflow: hidden
+  text-overflow: ellipsis
+@media (prefers-reduced-motion: reduce)
+  .access-link
+    transition: none

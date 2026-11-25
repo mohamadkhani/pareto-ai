@@ -62,6 +62,7 @@ const NAV_SECTIONS: readonly NavSection[] = [
     links: [
       { label: 'Users', path: '/users', adminOnly: true },
       { label: 'Grants', path: '/grants', adminOnly: true },
+      { label: 'Access map', path: '/access-map', adminOnly: true },
       { label: 'API keys', path: '/keys', adminOnly: false },
       { label: 'Limits', path: '/limits', adminOnly: false },
     ],

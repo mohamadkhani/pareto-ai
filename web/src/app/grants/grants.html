@@ -46,16 +46,13 @@
             </ui-field>
             @if (form.controls.subject_type.value === 'api_key') {
               <ui-field label="Key owner" [controlId]="'grant-key-owner'">
-                <ui-select
+                <ui-combobox
                   [id]="'grant-key-owner'"
                   formControlName="key_owner_id"
+                  placeholder="Choose an account…"
+                  [options]="ownerOptions()"
                   (valueChange)="onKeyOwnerChange()"
-                >
-                  <option value="">Choose an account…</option>
-                  @for (user of users(); track user.id) {
-                    <option [value]="user.id">{{ user.email }}</option>
-                  }
-                </ui-select>
+                />
               </ui-field>
             }
             <ui-field
@@ -63,18 +60,16 @@
               [controlId]="'grant-subject'"
               [error]="showError('subject_id') ? fieldError('subject_id') : ''"
             >
-              <ui-select [id]="'grant-subject'" formControlName="subject_id">
-                <option value="">
-                  {{
-                    form.controls.subject_type.value === 'user'
-                      ? 'Choose an account…'
-                      : 'Choose an API key…'
-                  }}
-                </option>
-                @for (option of subjectOptions(); track option.id) {
-                  <option [value]="option.id">{{ option.label }}</option>
-                }
-              </ui-select>
+              <ui-combobox
+                [id]="'grant-subject'"
+                formControlName="subject_id"
+                [placeholder]="
+                  form.controls.subject_type.value === 'user'
+                    ? 'Choose an account…'
+                    : 'Choose an API key…'
+                "
+                [options]="subjectOptions()"
+              />
             </ui-field>
             <ui-field label="Resource kind" [controlId]="'grant-resource-type'">
               <ui-select
@@ -92,12 +87,12 @@
               [controlId]="'grant-resource'"
               [error]="showError('resource_id') ? fieldError('resource_id') : ''"
             >
-              <ui-select [id]="'grant-resource'" formControlName="resource_id">
-                <option value="">Choose a resource…</option>
-                @for (option of resourceOptions(); track option.id) {
-                  <option [value]="option.id">{{ option.label }}</option>
-                }
-              </ui-select>
+              <ui-combobox
+                [id]="'grant-resource'"
+                formControlName="resource_id"
+                placeholder="Choose a resource…"
+                [options]="resourceOptions()"
+              />
             </ui-field>
             <ui-field label="Mode" [controlId]="'grant-mode'">
               <ui-select [id]="'grant-mode'" formControlName="mode">

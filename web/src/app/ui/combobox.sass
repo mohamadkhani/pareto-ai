@@ -1,0 +1,61 @@
+// Combobox chrome on top of the shared `.control` input: a chevron on the
+// trigger and the absolutely-positioned listbox popup. Colors, spacing,
+// radius, and motion come from tokens only.
+:host
+  position: relative
+  display: block
+:host::after
+  // The trigger chevron; hidden while the list is open (the popup is the cue).
+  content: ''
+  position: absolute
+  top: 50%
+  right: var(--space-3)
+  width: 0.45rem
+  height: 0.45rem
+  border-right: 2px solid var(--text-muted)
+  border-bottom: 2px solid var(--text-muted)
+  transform: translateY(-70%) rotate(45deg)
+  pointer-events: none
+  transition: transform var(--duration-fast) var(--ease-standard)
+:host(.is-open)::after
+  transform: translateY(-30%) rotate(-135deg)
+:host(.is-disabled)::after
+  display: none
+.combobox-input
+  padding-right: calc(var(--space-3) * 2 + 0.45rem)
+  cursor: text
+.combobox-list
+  // Reset the UA list styling; the popup is positioned, not flowed.
+  position: absolute
+  z-index: var(--z-dropdown)
+  inset-block-start: calc(100% + var(--space-1))
+  inset-inline: 0
+  margin: 0
+  padding: var(--space-1)
+  max-height: 15rem
+  overflow-y: auto
+  list-style: none
+  border: 1px solid var(--border)
+  border-radius: var(--radius-md)
+  background: var(--surface-raised)
+  box-shadow: var(--shadow-md)
+.combobox-list[hidden]
+  display: none
+.combobox-option
+  padding: var(--space-2) var(--space-3)
+  border-radius: var(--radius-sm)
+  color: var(--text)
+  font-size: var(--text-body)
+  line-height: var(--leading-normal)
+  cursor: pointer
+  transition: background var(--duration-fast) var(--ease-standard)
+.combobox-option:hover
+  background: var(--surface-hover)
+.combobox-option.is-active
+  background: var(--accent-soft)
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: -1px
+.combobox-empty
+  padding: var(--space-2) var(--space-3)
+  color: var(--text-muted)
+  font-size: var(--text-small)

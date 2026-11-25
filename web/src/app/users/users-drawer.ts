@@ -12,6 +12,12 @@ import { CatalogService } from '../catalog/catalog.service';
 import type { Credential, Model, Offering, Provider } from '../catalog/catalog.types';
 import { describeError } from '../catalog/errors';
 import { formatTime, formatUsd } from '../catalog/format';
+import { AccessGraph, type AccessGraphLink, type AccessGraphNode } from '../access/access-graph';
+import {
+  computeModelAccess,
+  type CredentialAccess,
+  type ModelAccess,
+} from '../access/access-model';
 import { GrantsService } from '../grants/grants.service';
 import type { GrantMode, GrantResourceType, GrantView } from '../grants/grants.types';
 import { KeysService } from '../keys/keys.service';
@@ -27,6 +33,7 @@ import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCheckbox } from '../ui/checkbox';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -39,14 +46,8 @@ import { type TabItem, UiTabs } from '../ui/tabs';
 import { UsersService } from './users.service';
 import { MIN_PASSWORD_LEN, type UserView } from './users.types';
 
-/** The drawer's four tabs, in the order the task defines them. */
-type DrawerTab = 'limits' | 'grants' | 'keys' | 'overview';
-
-/** One selectable resource in the advanced grant form. */
-interface ResourceOption {
-  id: string;
-  label: string;
-}
+/** The drawer's tabs, in the order the task defines them. */
+type DrawerTab = 'limits' | 'grants' | 'access' | 'keys' | 'overview';
 
 /** The plaintext key shown once after creation. */
 interface ShownKey {
@@ -72,6 +73,11 @@ function capKey(modelId: string, period: MoneyPeriod): string {
   return `${modelId}|${period}`;
 }
 
+/** `1 model` / `3 credentials`: a count with a singular/plural noun. */
+function countLabel(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
 /**
  * The focused per-user path: limits, grants, keys, and account state in a
  * right-edge drawer. Tabs load lazily, each tab keeps its own error, and the
@@ -85,6 +91,7 @@ function capKey(modelId: string, period: MoneyPeriod): string {
     UiBanner,
     UiButton,
     UiCheckbox,
+    UiCombobox,
     UiDialog,
     UiEmpty,
     UiField,
@@ -94,6 +101,7 @@ function capKey(modelId: string, period: MoneyPeriod): string {
     UiSpinner,
     UiTable,
     UiTabs,
+    AccessGraph,
   ],
   templateUrl: './users-drawer.html',
   styleUrl: './users-drawer.sass',
@@ -113,6 +121,7 @@ export class UserDrawer implements OnInit {
   protected readonly tabs: readonly TabItem[] = [
     { id: 'limits', label: 'Limits' },
     { id: 'grants', label: 'Grants' },
+    { id: 'access', label: 'Access map' },
     { id: 'keys', label: 'Keys' },
     { id: 'overview', label: 'Overview' },
   ];
@@ -171,6 +180,70 @@ export class UserDrawer implements OnInit {
   protected readonly grantMode = signal<GrantMode>('allow');
   protected readonly addingGrant = signal(false);
 
+  // --- Access map ---------------------------------------------------------
+
+  protected readonly accessRows = signal<ModelAccess[]>([]);
+  protected readonly accessLoading = signal(false);
+  protected readonly accessError = signal<string | null>(null);
+  protected readonly selectedLink = signal<AccessGraphLink | null>(null);
+
+  /** Only the models this account can actually reach (deny is dropped). */
+  protected readonly accessibleRows = computed(() =>
+    this.accessRows().filter((row) => row.credentials.length > 0),
+  );
+
+  /** The distinct credentials through which any reachable model is served. */
+  protected readonly accessCredentials = computed(() => {
+    const seen = new Map<string, CredentialAccess>();
+    for (const row of this.accessibleRows()) {
+      for (const access of row.credentials) {
+        if (!seen.has(access.credential.id)) {
+          seen.set(access.credential.id, access);
+        }
+      }
+    }
+    return [...seen.values()];
+  });
+
+  /** Left column: credentials that reach at least one model. */
+  protected readonly accessLeftNodes = computed<AccessGraphNode[]>(() =>
+    this.accessCredentials().map((access) => ({
+      id: access.credential.id,
+      label: `${access.providerName} · ${access.credential.label}`,
+      sublabel: countLabel(
+        this.accessibleRows().filter((row) =>
+          row.credentials.some((item) => item.credential.id === access.credential.id),
+        ).length,
+        'model',
+      ),
+    })),
+  );
+
+  /** Right column: the reachable models. */
+  protected readonly accessRightNodes = computed<AccessGraphNode[]>(() =>
+    this.accessibleRows().map((row) => ({
+      id: row.model.id,
+      label: row.model.canonical_name,
+      sublabel: countLabel(row.credentials.length, 'credential'),
+    })),
+  );
+
+  /** One connector per (credential, model) the account can reach. */
+  protected readonly accessLinks = computed<AccessGraphLink[]>(() =>
+    this.accessibleRows().flatMap((row) =>
+      row.credentials.map((access) => ({
+        id: `${access.credential.id}:${row.model.id}`,
+        source: access.credential.id,
+        target: row.model.id,
+        verdict: 'allow' as const,
+        reason: `${access.providerName} · ${access.credential.label} → ${row.model.canonical_name}: ${access.reason.label}`,
+      })),
+    ),
+  );
+
+  protected readonly accessibleModelCount = computed(() => this.accessibleRows().length);
+  protected readonly accessibleCredentialCount = computed(() => this.accessCredentials().length);
+
   protected readonly deniedIds = computed(
     () =>
       new Set(
@@ -193,27 +266,37 @@ export class UserDrawer implements OnInit {
     );
   });
 
-  protected readonly resourceOptions = computed<ResourceOption[]>(() => {
+  protected readonly resourceOptions = computed<ComboboxOption[]>(() => {
     switch (this.resourceType()) {
       case 'model':
         return this.grantModels().map((model) => ({
-          id: model.id,
+          value: model.id,
           label: model.canonical_name,
+          searchText: model.family ?? '',
         }));
       case 'offering':
         return this.offerings().map((offering) => ({
-          id: offering.id,
+          value: offering.id,
           label: `${this.providerName(offering.provider_id)} → ${this.modelName(
             offering.model_id,
           )} (${offering.upstream_model_id})`,
         }));
       case 'credential':
         return this.credentials().map((credential) => ({
-          id: credential.id,
+          value: credential.id,
           label: `${this.providerName(credential.provider_id)} · ${credential.label}`,
         }));
     }
   });
+
+  /** Model options for the token-cap model picker, searchable by name/family. */
+  protected readonly capModelOptions = computed<ComboboxOption[]>(() =>
+    this.models().map((model) => ({
+      value: model.id,
+      label: model.canonical_name,
+      searchText: model.family ?? '',
+    })),
+  );
 
   // --- Keys ---------------------------------------------------------------
 
@@ -265,6 +348,9 @@ export class UserDrawer implements OnInit {
         break;
       case 'grants':
         void this.loadGrants();
+        break;
+      case 'access':
+        void this.loadAccess();
         break;
       case 'keys':
         void this.loadKeys();
@@ -502,6 +588,48 @@ export class UserDrawer implements OnInit {
 
   protected onSearch(value: string | number | null): void {
     this.search.set(typeof value === 'string' ? value : '');
+  }
+
+  // --- Access map methods -------------------------------------------------
+
+  protected async loadAccess(): Promise<void> {
+    this.accessLoading.set(true);
+    this.accessError.set(null);
+    this.selectedLink.set(null);
+    try {
+      const userId = this.user().id;
+      const [grants, models, offerings, providers] = await Promise.all([
+        this.grantsService.list({ subject_type: 'user', subject_id: userId }),
+        this.catalog.listModels().catch(() => [] as Model[]),
+        this.catalog.listOfferings().catch(() => [] as Offering[]),
+        this.catalog.listProviders().catch(() => [] as Provider[]),
+      ]);
+      const credentials = (
+        await Promise.all(
+          providers.map((provider) =>
+            this.catalog.listCredentials(provider.id).catch(() => [] as Credential[]),
+          ),
+        )
+      ).flat();
+      this.accessRows.set(
+        computeModelAccess({
+          role: this.user().role,
+          grants: grants.filter((grant) => grant.subject_type === 'user'),
+          models,
+          offerings,
+          credentials,
+          providers,
+        }),
+      );
+    } catch (err) {
+      this.accessError.set(describeError(err, 'Loading the access map failed.'));
+    } finally {
+      this.accessLoading.set(false);
+    }
+  }
+
+  protected selectLink(link: AccessGraphLink): void {
+    this.selectedLink.set(link);
   }
 
   protected isChecked(modelId: string): boolean {
