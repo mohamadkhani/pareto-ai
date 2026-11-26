@@ -1,7 +1,9 @@
 /**
  * Client-side reconstruction of the server's access verdict (decision D9,
  * amended by D59) for the admin "who can use which model, through which
- * credential" views.
+ * credential" views. The verdict is **account-level**: only the user's own
+ * grant rows are evaluated, so a key that narrows its owner's access (D59)
+ * may see less than the map shows; the map never widens beyond the account.
  *
  * A model is not reachable in the abstract: a request is served by one
  * offering on one provider using one credential, and the server evaluates the
@@ -75,8 +77,9 @@ interface PairVerdict {
 /**
  * Computes each model's reachable credentials for one user.
  *
- * Disabled offerings are skipped (the server never routes to them). Only pairs
- * that allow are returned, so callers can drop empty models to show the final
+ * Disabled offerings are skipped (the server never routes to them), and so are
+ * offerings of a disabled model (D61) or a disabled provider. Only pairs that
+ * allow are returned, so callers can drop empty models to show the final
  * result: which models the account can actually use, and through which
  * credentials.
  */
@@ -92,8 +95,19 @@ export function computeModelAccess(input: AccessInput): ModelAccess[] {
     credentialsByProvider.set(credential.provider_id, list);
   }
   const offeringsByModel = new Map<string, Offering[]>();
+  // A disabled model or a disabled provider excludes its offerings from routing
+  // (D61 for models, and the provider's own switch), so they never reach the
+  // account: mirror the server's filters here instead of drawing phantom edges.
+  const enabledModelIds = new Set(models.filter((m) => m.enabled).map((m) => m.id));
+  const enabledProviderIds = new Set(providers.filter((p) => p.enabled).map((p) => p.id));
   for (const offering of offerings) {
     if (!offering.enabled) {
+      continue;
+    }
+    if (!enabledModelIds.has(offering.model_id)) {
+      continue;
+    }
+    if (!enabledProviderIds.has(offering.provider_id)) {
       continue;
     }
     const list = offeringsByModel.get(offering.model_id) ?? [];

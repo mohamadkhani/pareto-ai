@@ -180,4 +180,28 @@ describe('computeModelAccess', () => {
     })[0];
     expect(row?.credentials).toHaveLength(0);
   });
+
+  it('ignores offerings of a disabled model (D61)', () => {
+    const row = computeModelAccess({
+      role: 'admin',
+      grants: [],
+      models: [model({ enabled: false })],
+      offerings: [offering()],
+      credentials: [credential()],
+      providers: PROVIDERS,
+    })[0];
+    expect(row?.credentials).toHaveLength(0);
+  });
+
+  it('ignores offerings of a disabled provider', () => {
+    const row = computeModelAccess({
+      role: 'admin',
+      grants: [],
+      models: MODELS,
+      offerings: [offering()],
+      credentials: [credential()],
+      providers: [provider({ enabled: false })],
+    })[0];
+    expect(row?.credentials).toHaveLength(0);
+  });
 });
