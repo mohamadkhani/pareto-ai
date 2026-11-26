@@ -1406,6 +1406,17 @@ OpenRouter model as one aggregated offering:
    much over the cheapest ready candidate; a bigger gap moves the session and
    rewrites the pin (the decision records `replaced_why: "price_moved"`).
 
+4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
+   (`price` — cheapest model first — or `quality` — best model first) orders
+   the models, and `provider_selection` (`mix_price` — cheapest at the combo's
+   own blend — `speed`, or `reliability`) orders the providers of one model
+   once it is chosen. Both default to the cheapest behaviour that matches the
+   pre-D64 pool order. A member pool keeps its explicit strategy order.
+5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0–100, default
+   5) keeps a session on its pinned provider while it costs no more than that
+   much over the cheapest ready candidate; a bigger gap moves the session and
+   rewrites the pin (the decision records `replaced_why: "price_moved"`).
+
 **Why:** without the provider pin, the price we score is not the price that
 runs — OpenRouter would pick a provider itself. Storing the fragment instead of
 hard-coding `provider.order` in the request builder keeps the hot path generic

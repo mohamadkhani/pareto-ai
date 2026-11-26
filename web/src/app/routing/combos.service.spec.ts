@@ -16,10 +16,12 @@ function comboFixture(overrides: Partial<Combo> = {}): Combo {
     pool: 'members',
     min_quality: null,
     max_mix_price_per_m: null,
+    sort: 'price',
+    provider_selection: 'mix_price',
     members: [{ offering_id: 'off1', weight: 1 }],
     enabled: true,
     rr_cursor: 0,
-    stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
+    stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto', price_tolerance_pct: 5 },
     ...overrides,
   };
 }

@@ -859,6 +859,10 @@ struct RoutingInfo {
     mix_profile: Option<mix::MixProfileRef>,
     /// The round-robin cursor consumed by this request.
     rr_cursor: Option<i64>,
+    /// The `pool = all` ordering axis (D64); absent for member pools.
+    pool_sort: Option<&'static str>,
+    /// How the pool picked among the providers of one model (D64).
+    provider_selection: Option<&'static str>,
 }
 
 impl Default for RoutingInfo {
@@ -870,6 +874,8 @@ impl Default for RoutingInfo {
             preset: None,
             mix_profile: None,
             rr_cursor: None,
+            pool_sort: None,
+            provider_selection: None,
         }
     }
 }
@@ -999,6 +1005,8 @@ impl Decision {
                     "profile_name": profile.profile_name,
                 })),
                 "rr_cursor": self.routing.rr_cursor,
+                "sort": self.routing.pool_sort,
+                "provider_selection": self.routing.provider_selection,
             },
             "sticky": self.sticky.to_json(),
         })
@@ -1204,6 +1212,48 @@ fn sticky_excluded(
     weighted_exclusions
         .get(offering_id)
         .map(|reason| reason.outcome().to_string())
+}
+
+/// The blended mix price of an offering at the combo's profile, when known.
+fn offering_mix_price(
+    offering_id: &str,
+    mix_prices: &HashMap<String, Option<mix::MixPrice>>,
+) -> Option<f64> {
+    mix_prices
+        .get(offering_id)
+        .and_then(|price| price.as_ref())
+        .map(|mix| mix.per_m)
+}
+
+/// Whether a pinned offering is more than `tolerance_pct` pricier than the
+/// cheapest *ready* candidate, at the combo's mix profile (D64). A pin whose
+/// price is unknown, or the cheapest, is never over the tolerance. The
+/// comparison keeps prompt caches warm while still moving off a provider whose
+/// price jumped.
+fn pin_exceeds_tolerance(
+    pinned_id: &str,
+    tolerance_pct: f64,
+    candidates: &[Candidate],
+    mix_prices: &HashMap<String, Option<mix::MixPrice>>,
+    state: &AppState,
+    parsed: &WireRequest,
+) -> bool {
+    let Some(pinned) = offering_mix_price(pinned_id, mix_prices) else {
+        return false;
+    };
+    let mut best: Option<f64> = None;
+    for candidate in candidates {
+        if !candidate_ready(state, candidate, parsed) {
+            continue;
+        }
+        if let Some(price) = offering_mix_price(&candidate.offering_id, mix_prices) {
+            best = Some(best.map_or(price, |current| current.min(price)));
+        }
+    }
+    match best {
+        Some(best) if best < pinned => (pinned - best) / best * 100.0 > tolerance_pct,
+        _ => false,
+    }
 }
 
 /// The tokens this request wants from a candidate's context window (the same
@@ -1542,6 +1592,10 @@ pub async fn execute(
             Strategy::Weighted => {
                 decision.routing.weights = Some(combo.weights.to_json());
                 decision.routing.preset = combo.preset.map(str::to_owned);
+                if combo.pool == combos::Pool::All {
+                    decision.routing.pool_sort = Some(combo.pool_sort.as_str());
+                    decision.routing.provider_selection = Some(combo.provider_selection.as_str());
+                }
 
                 let mut model_ids: Vec<String> = candidates
                     .iter()
@@ -1609,6 +1663,7 @@ pub async fn execute(
                         items,
                         &combos::PoolConstraints::of(combo),
                         &combo.weights,
+                        Some(combos::PoolOrdering::of(combo)),
                     );
                     for scored in &outcome.ordered {
                         weighted_scores
@@ -1742,15 +1797,28 @@ pub async fn execute(
                         .find(|candidate| candidate.offering_id == existing.offering_id)
                         .is_some_and(|candidate| candidate_ready(state, candidate, &parsed));
                     if let (None, true) = (&excluded, ready) {
-                        if let Some(index) = candidates
-                            .iter()
-                            .position(|candidate| candidate.offering_id == existing.offering_id)
-                        {
-                            let candidate = candidates.remove(index);
-                            candidates.insert(0, candidate);
+                        // D64: keep the pin while it is within the combo's
+                        // price tolerance of the cheapest ready candidate.
+                        if pin_exceeds_tolerance(
+                            &existing.offering_id,
+                            combo.sticky_price_tolerance_pct,
+                            &candidates,
+                            &mix_prices,
+                            state,
+                            &parsed,
+                        ) {
+                            decision.sticky.replaced_why = Some("price_moved".to_string());
+                        } else {
+                            if let Some(index) = candidates
+                                .iter()
+                                .position(|candidate| candidate.offering_id == existing.offering_id)
+                            {
+                                let candidate = candidates.remove(index);
+                                candidates.insert(0, candidate);
+                            }
+                            sticky_age = combos::age_seconds(&existing.chosen_at, &now);
+                            sticky_pinned = Some(existing.offering_id);
                         }
-                        sticky_age = combos::age_seconds(&existing.chosen_at, &now);
-                        sticky_pinned = Some(existing.offering_id);
                     } else {
                         decision.sticky.replaced_why = Some(match excluded {
                             Some(reason) => reason,
@@ -3949,7 +4017,8 @@ pub(crate) async fn preview_combo(
         combos::Pool::All => combos::PoolConstraints::of(combo),
         combos::Pool::Members => combos::PoolConstraints::default(),
     };
-    let outcome = combos::resolve_pool(items, &constraints, &combo.weights);
+    let ordering = (combo.pool == combos::Pool::All).then(|| combos::PoolOrdering::of(combo));
+    let outcome = combos::resolve_pool(items, &constraints, &combo.weights, ordering);
     let mut ordered = outcome.ordered;
     // For explicit members the strategy decides the order: ordered keeps the
     // stored member order, round_robin rotates it, weighted keeps the score
@@ -8152,6 +8221,8 @@ mod tests {
                 max_mix_price_per_m: None,
                 mix_profile: None,
                 stickiness: None,
+                sort: None,
+                provider_selection: None,
             },
         )
         .await
@@ -8361,6 +8432,8 @@ mod tests {
                 max_mix_price_per_m: None,
                 mix_profile: None,
                 stickiness: None,
+                sort: None,
+                provider_selection: None,
             },
         )
         .await
@@ -9271,7 +9344,10 @@ mod tests {
                     enabled: Some(true),
                     ttl_seconds: Some(1800),
                     key_source: Some("auto".to_string()),
+                    price_tolerance_pct: None,
                 }),
+                sort: None,
+                provider_selection: None,
             },
         )
         .await
@@ -9526,9 +9602,10 @@ mod tests {
             Some(first.as_str())
         );
 
-        // Re-price: per-turn re-picking would switch to `second`, the pin
-        // must keep the warm-cache offering for the same session.
-        price_offering(&s, &first, 40.0).await;
+        // Re-price: per-turn re-picking would switch to `second`, but the
+        // move is within the 5% tolerance so the pin keeps the warm-cache
+        // offering for the same session (D64).
+        price_offering(&s, &first, 1.02).await;
         price_offering(&s, &second, 1.0).await;
         let (status, _, body) = send_streaming(
             s.app.router(),
@@ -9568,6 +9645,92 @@ mod tests {
             .await
             .expect("pin count");
         assert_eq!(pins, 2, "one pin per session");
+    }
+
+    #[tokio::test]
+    async fn a_pin_far_pricier_than_the_best_moves_to_the_cheaper_provider() {
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let first = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let second = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &model_id,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &first, 1.0).await;
+        price_offering(&s, &second, 10.0).await;
+        create_pool_combo(&s, "sticky-jump", Some(50.0), true).await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky-jump", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        assert_eq!(
+            log_rows(&s.app).await[0].resolved_offering_id.as_deref(),
+            Some(first.as_str())
+        );
+
+        // The pinned provider becomes 10x pricier: past the 5% tolerance, so
+        // the session moves to the cheaper provider and the pin is rewritten.
+        price_offering(&s, &first, 10.0).await;
+        price_offering(&s, &second, 1.0).await;
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky-jump", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let rows = log_rows(&s.app).await;
+        let log = rows.last().expect("second request log");
+        assert_eq!(
+            log.resolved_offering_id.as_deref(),
+            Some(second.as_str()),
+            "a jump past the tolerance moves the session"
+        );
+        let decision = decision_of(log);
+        assert_eq!(
+            decision["sticky"]["replaced_why"], "price_moved",
+            "{decision}"
+        );
+        assert_eq!(decision["sticky"]["pinned"], second.as_str());
+        let stored: String = sqlx::query_scalar(
+            "SELECT offering_id FROM combo_sticky_choices WHERE session_key = 'sess-a'",
+        )
+        .fetch_one(&s.app.state.pool)
+        .await
+        .expect("pin row");
+        assert_eq!(stored, second, "the pin was rewritten to the new provider");
     }
 
     #[tokio::test]

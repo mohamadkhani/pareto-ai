@@ -191,6 +191,30 @@
                   (valueChange)="setMaxMixPrice($event)"
                 />
               </ui-field>
+              <ui-field
+                label="Sort"
+                controlId="combo-pool-sort"
+                hint="Orders the models of the pool."
+              >
+                <ui-select [value]="draft().poolSort" (valueChange)="setPoolSort($event)">
+                  <option value="price">price (cheapest model first)</option>
+                  <option value="quality">quality (best model first)</option>
+                </ui-select>
+              </ui-field>
+              <ui-field
+                label="Provider selection"
+                controlId="combo-provider-selection"
+                hint="Picks the provider of a model once it is chosen."
+              >
+                <ui-select
+                  [value]="draft().providerSelection"
+                  (valueChange)="setProviderSelection($event)"
+                >
+                  <option value="mix_price">mix_price (cheapest at the blend)</option>
+                  <option value="speed">speed (most throughput)</option>
+                  <option value="reliability">reliability (fewest failures)</option>
+                </ui-select>
+              </ui-field>
             </div>
             @if (constraintError()) {
               <p class="field-error" role="alert">{{ constraintError() }}</p>
@@ -384,8 +408,24 @@
                 <option value="header">header (X-Session-Id)</option>
               </ui-select>
             </ui-field>
+            <ui-field
+              label="Price tolerance (%)"
+              controlId="combo-stickiness-tolerance"
+              hint="Stay pinned while the alternative is within this much; move when it is cheaper."
+            >
+              <ui-input
+                type="number"
+                inputmode="decimal"
+                [value]="draft().stickinessTolerance"
+                placeholder="5"
+                (valueChange)="setStickinessTolerance($event)"
+              />
+            </ui-field>
           }
         </div>
+        @if (stickinessToleranceError()) {
+          <p class="field-error" role="alert">{{ stickinessToleranceError() }}</p>
+        }
         <p class="note">
           Re-picking a model every turn turns a cached agent into an uncached one — up to ~5× the
           price on the reference model (D35).

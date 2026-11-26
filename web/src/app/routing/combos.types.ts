@@ -26,12 +26,23 @@ export type ComboPool = 'members' | 'all';
 /** How a sticky pin finds its session (D35). */
 export type StickinessKeySource = 'auto' | 'header';
 
-/** Per-session stickiness as stored and returned (D35). */
+/** The `pool = all` ordering axis (D64). */
+export type PoolSort = 'price' | 'quality';
+
+/** How a catalog pool picks among the providers of one model (D64). */
+export type ProviderSelection = 'mix_price' | 'speed' | 'reliability';
+
+/** Per-session stickiness as stored and returned (D35, D64). */
 export interface ComboStickiness {
   enabled: boolean;
   /** Pin lifetime; the server accepts 60 s – 24 h (default 1800). */
   ttl_seconds: number;
   key_source: StickinessKeySource;
+  /**
+   * How much pricier the pin may be than the current best provider before the
+   * session moves (percent, 0–100; default 5).
+   */
+  price_tolerance_pct: number;
 }
 
 /** The named weight presets (decision D24). */
@@ -73,6 +84,10 @@ export interface Combo {
   min_quality: number | null;
   /** Inclusive maximum mix price per million tokens (`pool = all` only). */
   max_mix_price_per_m: number | null;
+  /** The `pool = all` ordering axis (D64). */
+  sort: PoolSort;
+  /** How the pool picks among the providers of one model (D64). */
+  provider_selection: ProviderSelection;
   /** Stored order: the fallback chain for `ordered`, the rotation for `round_robin`. */
   members: ComboMember[];
   enabled: boolean;
@@ -114,6 +129,10 @@ export interface ComboInput {
   mix_profile?: string | null;
   /** Session stickiness; absent means disabled with the defaults. */
   stickiness?: ComboStickiness;
+  /** The `pool = all` ordering axis; absent means `price` (D64). */
+  sort?: PoolSort;
+  /** How the pool picks among the providers of one model (D64). */
+  provider_selection?: ProviderSelection;
 }
 
 // ---------------------------------------------------------------------------
