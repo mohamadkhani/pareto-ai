@@ -18,13 +18,15 @@
 /*
  * The provider a request's offering belongs to, with the serving credential's
  * label under it: the provider is the filter control, the label names which key
- * of that provider was used (D64).
+ * of that provider was used (D64). The two lines stack because the label is a
+ * block while the link-style control stays inline — deliberately no `display:
+ * flex` here: that would replace the `<td>`'s table-cell box, so the cell would
+ * stop stretching to the row height and its bottom border would sit above the
+ * neighbouring cells'.
  */
 .col-access
-  display: flex
-  flex-direction: column
-  align-items: flex-start
   .credential-name
+    display: block
     font-size: var(--text-small)
 .col-cost
   white-space: nowrap
