@@ -22,6 +22,14 @@
 :host(.size-md) .button
   min-height: var(--control-height-md)
   padding: var(--space-2) var(--space-4)
+/*
+ * `align="start"` left-aligns the label and drops the horizontal padding, so a
+ * text action can line up with plain text beside it (a table cell). The size
+ * still supplies the min-height and the vertical padding.
+ */
+:host(.align-start) .button
+  justify-content: flex-start
+  padding-inline: 0
 .button:focus-visible
   outline: var(--focus-ring-width) solid var(--focus-ring)
   outline-offset: var(--focus-ring-offset)
