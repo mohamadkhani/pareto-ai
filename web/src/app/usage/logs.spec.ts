@@ -222,7 +222,7 @@ describe('Logs', () => {
     // Both refusals carry the row highlight and the labelled refusal badge.
     expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
     expect(
-      root.querySelectorAll('tbody tr.money-event td:nth-child(6) ui-badge.tone-danger').length,
+      root.querySelectorAll('tbody tr.money-event td:nth-child(5) ui-badge.tone-danger').length,
     ).toBe(2);
     expect(
       root.querySelector('ui-badge[title="Refused: access denied"]')?.textContent?.trim(),
@@ -392,8 +392,7 @@ describe('Logs', () => {
       'Time',
       'User',
       'Model',
-      'Provider',
-      'Credential',
+      'Provider / credential',
       'Status',
       'Error',
       'Cost',
@@ -401,6 +400,41 @@ describe('Logs', () => {
       'Latency',
       'Details',
     ]);
+  });
+
+  it('puts the credential under its provider in one cell, or the provider alone', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0),
+          // A request with a provider but no credential (settled before 0021).
+          entry(1, { credential_id: null, credential_name: null }),
+          // A pre-send refusal: neither.
+          entry(2, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            provider_id: null,
+            provider_name: null,
+            model_id: null,
+            model_canonical_name: null,
+            model_upstream_model_id: null,
+            credential_id: null,
+            credential_name: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-access'));
+    expect(cells).toHaveLength(3);
+    expect(cells[0]?.querySelector('ui-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[0]?.querySelector('.credential-name')?.textContent?.trim()).toBe('primary');
+    expect(cells[1]?.querySelector('ui-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[1]?.querySelector('.credential-name')).toBeNull();
+    expect(cells[2]?.textContent?.trim()).toBe('—');
   });
 
   it('collapses the model cell when the request and the target agree', async () => {

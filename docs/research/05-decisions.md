@@ -1384,12 +1384,19 @@ so the console never resolves catalog GUIDs itself:
   `model_id`, `model_canonical_name`, `model_upstream_model_id`, `credential_id`
   and `credential_name`. `list_attempts` returns the same shape per attempt. The
   raw offering/credential ids stay on the wire for filters, links, and debugging.
-- The console (`/logs`) drops the bare offering-GUID column, adds **Provider**
-  and **Credential** columns, and shows the model as the requested name plus the
-  resolved `canonical_name · upstream_model_id` when they differ. The resolved
-  model links to `/models?model=<id>`, an **exclusive** filter on the Models page
+- The console (`/logs`) drops the offering GUID column and replaces it with one
+  **Provider / credential** column: the provider's name (which doubles as the
+  control that narrows the log to that provider) with the serving credential's
+  label on a second line. A request that has a provider but no credential — one
+  settled before the migration — shows the provider alone, and a row with
+  neither shows a dash. Two facts with different owners therefore share one
+  cell without a second 36-character column. The model cell shows the requested
+  name plus the resolved `canonical_name · upstream_model_id` when they differ,
+  and links to `/models?model=<id>`, an **exclusive** filter on the Models page
   that ignores and clears the search and the price/quality caps and opens the
-  model's detail dialog. The Provider cell narrows the log to that provider.
+  model's detail dialog. The per-attempt table keeps Provider, Model and
+  Credential as separate columns: there each attempt's target genuinely is a
+  different fact.
 - Per-request cost uses adaptive precision (two decimals at `≥ $1`, four at
   `≥ $0.01`, up to six significant decimals below) so a sub-cent request no
   longer renders as `$0.00`; a pre-send refusal shows `—`, never a silent zero.

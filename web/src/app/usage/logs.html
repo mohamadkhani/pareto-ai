@@ -67,8 +67,7 @@
               <th scope="col">Time</th>
               <th scope="col">User</th>
               <th scope="col">Model</th>
-              <th scope="col">Provider</th>
-              <th scope="col">Credential</th>
+              <th scope="col">Provider / credential</th>
               <th scope="col">Status</th>
               <th scope="col">Error</th>
               <th scope="col">Cost</th>
@@ -106,7 +105,7 @@
                     }
                   }
                 </td>
-                <td>
+                <td class="col-access">
                   @if (entry.provider_name) {
                     <ui-button
                       size="sm"
@@ -114,13 +113,9 @@
                       (clicked)="filterByProvider(entry.provider_id)"
                       >{{ entry.provider_name }}</ui-button
                     >
-                  } @else {
-                    —
-                  }
-                </td>
-                <td>
-                  @if (entry.credential_name) {
-                    {{ entry.credential_name }}
+                    @if (entry.credential_name) {
+                      <span class="credential-name">{{ entry.credential_name }}</span>
+                    }
                   } @else {
                     —
                   }
@@ -170,7 +165,7 @@
               </tr>
               @if (expandedId() === entry.request_id) {
                 <tr class="details-row" [attr.id]="'details-' + entry.request_id">
-                  <td colspan="11">
+                  <td colspan="10">
                     @if (entry.error_class) {
                       <section class="origin-error">
                         <h3>Origin error</h3>
