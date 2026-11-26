@@ -65,18 +65,6 @@ describe('UiButton', () => {
     expect(host.classList.contains('size-sm')).toBe(true);
   });
 
-  it('aligns the label to the start when asked, and centres it by default', async () => {
-    const fixture = await create();
-    const host = fixture.nativeElement as HTMLElement;
-
-    expect(host.classList.contains('align-center')).toBe(true);
-
-    fixture.componentRef.setInput('align', 'start');
-    fixture.detectChanges();
-    expect(host.classList.contains('align-start')).toBe(true);
-    expect(host.classList.contains('align-center')).toBe(false);
-  });
-
   it('forwards aria-expanded and aria-controls to the inner button', async () => {
     const fixture = await create();
     fixture.componentRef.setInput('ariaExpanded', true);

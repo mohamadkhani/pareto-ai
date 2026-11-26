@@ -14,6 +14,7 @@ import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
 import { UiIconButton } from '../ui/icon-button';
 import { UiInput } from '../ui/input';
+import { UiLinkButton } from '../ui/link-button';
 import { UiMeter } from '../ui/meter';
 import { UiSelect } from '../ui/select';
 import { UiSparkline } from '../ui/sparkline';
@@ -51,6 +52,7 @@ interface TokenSwatch {
     UiField,
     UiIconButton,
     UiInput,
+    UiLinkButton,
     UiMeter,
     UiSelect,
     UiSparkline,

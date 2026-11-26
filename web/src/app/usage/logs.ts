@@ -13,6 +13,7 @@ import { UiButton } from '../ui/button';
 import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiLinkButton } from '../ui/link-button';
 import { UiSelect } from '../ui/select';
 import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
@@ -49,6 +50,7 @@ const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as
     UiCombobox,
     UiEmpty,
     UiField,
+    UiLinkButton,
     UiSelect,
     UiTable,
   ],
@@ -312,11 +314,16 @@ export class Logs {
     return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
   }
 
-  protected tokenText(entry: RequestLogEntry): string {
+  /** Input tokens on the first line, output tokens under it (D64). */
+  protected inputTokensText(entry: RequestLogEntry): string {
     if (entry.input_tokens === null && entry.output_tokens === null) {
       return '—';
     }
-    return `${entry.input_tokens ?? 0} in / ${entry.output_tokens ?? 0} out`;
+    return `${entry.input_tokens ?? 0} in`;
+  }
+
+  protected outputTokensText(entry: RequestLogEntry): string {
+    return `${entry.output_tokens ?? 0} out`;
   }
 
   protected userName(id: string | null): string {

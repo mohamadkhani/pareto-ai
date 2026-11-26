@@ -430,11 +430,29 @@ describe('Logs', () => {
 
     const cells = Array.from(root.querySelectorAll('td.col-access'));
     expect(cells).toHaveLength(3);
-    expect(cells[0]?.querySelector('ui-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[0]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
     expect(cells[0]?.querySelector('.credential-name')?.textContent?.trim()).toBe('primary');
-    expect(cells[1]?.querySelector('ui-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[1]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
     expect(cells[1]?.querySelector('.credential-name')).toBeNull();
     expect(cells[2]?.textContent?.trim()).toBe('—');
+  });
+
+  it('stacks the token counts on two lines, and shows a dash when there are none', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [entry(0), entry(1, { input_tokens: null, output_tokens: null })],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-tokens'));
+    expect(cells).toHaveLength(2);
+    expect(cells[0]?.querySelector('.tokens-in')?.textContent?.trim()).toBe('100 in');
+    expect(cells[0]?.querySelector('.tokens-out')?.textContent?.trim()).toBe('50 out');
+    expect(cells[1]?.querySelector('.tokens-in')?.textContent?.trim()).toBe('—');
+    expect(cells[1]?.querySelector('.tokens-out')).toBeNull();
   });
 
   it('collapses the model cell when the request and the target agree', async () => {

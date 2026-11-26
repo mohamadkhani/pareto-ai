@@ -10,12 +10,6 @@ import { UiSpinner } from './spinner';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
 export type ButtonSize = 'sm' | 'md';
-/**
- * Where the label sits inside the button. `center` is the default. `start`
- * drops the horizontal padding and left-aligns the label, for a text action
- * that must line up with plain text beside it (a table cell).
- */
-export type ButtonAlign = 'center' | 'start';
 
 /**
  * Native button wrapper. `type` defaults to `button` so a button inside a form
@@ -33,7 +27,6 @@ export type ButtonAlign = 'center' | 'start';
 export class UiButton {
   readonly variant = input<ButtonVariant>('secondary');
   readonly size = input<ButtonSize>('md');
-  readonly align = input<ButtonAlign>('center');
   readonly type = input<'button' | 'submit' | 'reset'>('button');
   readonly disabled = input(false);
   readonly loading = input(false);
@@ -56,12 +49,7 @@ export class UiButton {
   }
 
   protected hostClass(): string {
-    return [
-      'ui-button',
-      `variant-${this.variant()}`,
-      `size-${this.size()}`,
-      `align-${this.align()}`,
-    ].join(' ');
+    return ['ui-button', `variant-${this.variant()}`, `size-${this.size()}`].join(' ');
   }
 
   protected onClick(event: MouseEvent): void {

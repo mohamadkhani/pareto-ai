@@ -1387,10 +1387,15 @@ so the console never resolves catalog GUIDs itself:
 - The console (`/logs`) drops the offering GUID column and replaces it with one
   **Provider / credential** column: the provider's name (which doubles as the
   control that narrows the log to that provider) with the serving credential's
-  label on a second line. A request that has a provider but no credential — one
-  settled before the migration — shows the provider alone, and a row with
-  neither shows a dash. Two facts with different owners therefore share one
-  cell without a second 36-character column. The model cell shows the requested
+  label on a second line. The provider control is a new link-style primitive,
+  `<ui-link-button>` (documented on `/styleguide`, D28): it inherits the
+  surrounding font and line instead of carrying a `ui-button`'s control height
+  and padding, so both lines share one left edge and one text size. A request
+  that has a provider but no credential — one settled before the migration —
+  shows the provider alone, and a row with neither shows a dash. Two facts with
+  different owners therefore share one cell without a second 36-character
+  column. The token counts stack the same way: input tokens on the first line,
+  output under it. The model cell shows the requested
   name plus the resolved `canonical_name · upstream_model_id` when they differ,
   and links to `/models?model=<id>`, an **exclusive** filter on the Models page
   that ignores and clears the search and the price/quality caps and opens the

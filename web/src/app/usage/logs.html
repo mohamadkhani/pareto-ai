@@ -107,13 +107,9 @@
                 </td>
                 <td class="col-access">
                   @if (entry.provider_name) {
-                    <ui-button
-                      size="sm"
-                      variant="ghost"
-                      align="start"
-                      (clicked)="filterByProvider(entry.provider_id)"
-                      >{{ entry.provider_name }}</ui-button
-                    >
+                    <ui-link-button (clicked)="filterByProvider(entry.provider_id)">{{
+                      entry.provider_name
+                    }}</ui-link-button>
                     @if (entry.credential_name) {
                       <span class="credential-name">{{ entry.credential_name }}</span>
                     }
@@ -148,7 +144,12 @@
                   }
                 </td>
                 <td class="col-cost">{{ costText(entry) }}</td>
-                <td>{{ tokenText(entry) }}</td>
+                <td class="col-tokens">
+                  <span class="tokens-in">{{ inputTokensText(entry) }}</span>
+                  @if (entry.input_tokens !== null || entry.output_tokens !== null) {
+                    <span class="tokens-out">{{ outputTokensText(entry) }}</span>
+                  }
+                </td>
                 <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
                 <td class="actions">
                   <ui-button

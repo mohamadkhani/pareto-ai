@@ -174,7 +174,6 @@
       </div>
       <div class="row">
         <ui-button size="sm">Small</ui-button>
-        <ui-button size="sm" variant="ghost" align="start">Aligned start</ui-button>
         <ui-button [disabled]="true">Disabled</ui-button>
         <ui-button [loading]="true">Saving</ui-button>
         <ui-icon-button label="Refresh">
@@ -196,9 +195,12 @@
       </div>
       <p class="note">Hover for hover states; the disabled button ignores pointer events.</p>
       <p class="note">
-        <code>align="start"</code> drops the horizontal padding and left-aligns the label, for a
-        text action that must line up with plain text beside it (a table cell).
+        A text action uses <code>&lt;ui-link-button&gt;</code>: it reads like a link, keeps the
+        surrounding font and line, and stays a real button for keyboard and screen readers.
       </p>
+      <div class="row">
+        <span>Filtered by <ui-link-button>OpenRouter</ui-link-button> · 12 requests</span>
+      </div>
     </section>
 
     <section class="block">

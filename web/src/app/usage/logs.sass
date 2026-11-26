@@ -29,6 +29,17 @@
 .col-cost
   white-space: nowrap
 /*
+ * Tokens stack: input on the first line, output under it, like the model and
+ * provider cells (D64).
+ */
+.col-tokens
+  .tokens-in,
+  .tokens-out
+    display: block
+    white-space: nowrap
+  .tokens-out
+    font-size: var(--text-small)
+/*
  * 402/429/403 rows are money events: the request never reached a provider.
  */
 .ui-table tbody tr.money-event
