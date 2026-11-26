@@ -2,9 +2,10 @@
   <header class="page-head">
     <h1>Request logs</h1>
     <p class="hint">
-      Metadata and settled usage for every request, newest first — never request or response bodies.
-      Statuses <code>402</code>, <code>429</code>, and <code>403</code> are money events: the
-      request was refused before forwarding.
+      Metadata and settled usage for every request, newest first — request and response bodies are
+      never stored, but the provider's own error excerpt is kept bounded and redacted for the
+      operator. Statuses <code>402</code>, <code>429</code>, and <code>403</code> are money events:
+      the request was refused before forwarding.
     </p>
   </header>
 
@@ -66,7 +67,8 @@
               <th scope="col">Time</th>
               <th scope="col">User</th>
               <th scope="col">Model</th>
-              <th scope="col">Offering</th>
+              <th scope="col">Provider</th>
+              <th scope="col">Credential</th>
               <th scope="col">Status</th>
               <th scope="col">Error</th>
               <th scope="col">Cost</th>
@@ -80,16 +82,45 @@
               <tr [class.money-event]="isMoneyEvent(entry)">
                 <td class="col-time">{{ formatTime(entry.occurred_at) }}</td>
                 <td>{{ userName(entry.user_id) }}</td>
+                <td class="col-model">
+                  @if (showsRequestedModel(entry)) {
+                    <code class="requested-model">{{ entry.requested_model }}</code>
+                  }
+                  @if (entry.model_canonical_name) {
+                    @if (entry.model_id) {
+                      <a
+                        class="resolved-model"
+                        [routerLink]="['/models']"
+                        [queryParams]="{ model: entry.model_id }"
+                        [title]="'Open ' + resolvedModelText(entry) + ' in Models'"
+                        >{{ resolvedModelText(entry) }}</a
+                      >
+                    } @else {
+                      <span class="resolved-model">{{ resolvedModelText(entry) }}</span>
+                    }
+                  } @else if (!showsRequestedModel(entry)) {
+                    @if (entry.requested_model) {
+                      <code class="requested-model">{{ entry.requested_model }}</code>
+                    } @else {
+                      —
+                    }
+                  }
+                </td>
                 <td>
-                  @if (entry.requested_model) {
-                    <code>{{ entry.requested_model }}</code>
+                  @if (entry.provider_name) {
+                    <ui-button
+                      size="sm"
+                      variant="ghost"
+                      (clicked)="filterByProvider(entry.provider_id)"
+                      >{{ entry.provider_name }}</ui-button
+                    >
                   } @else {
                     —
                   }
                 </td>
                 <td>
-                  @if (entry.resolved_offering_id) {
-                    <code>{{ entry.resolved_offering_id }}</code>
+                  @if (entry.credential_name) {
+                    {{ entry.credential_name }}
                   } @else {
                     —
                   }
@@ -120,7 +151,7 @@
                     —
                   }
                 </td>
-                <td>{{ hasUsage(entry) ? formatUsd(entry.cost_usd) : '—' }}</td>
+                <td class="col-cost">{{ costText(entry) }}</td>
                 <td>{{ tokenText(entry) }}</td>
                 <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
                 <td class="actions">
@@ -139,11 +170,28 @@
               </tr>
               @if (expandedId() === entry.request_id) {
                 <tr class="details-row" [attr.id]="'details-' + entry.request_id">
-                  <td colspan="10">
-                    @if (entry.error_detail) {
-                      <section class="error-detail">
-                        <h3>Provider error</h3>
-                        <p class="detail-text">{{ entry.error_detail }}</p>
+                  <td colspan="11">
+                    @if (entry.error_class) {
+                      <section class="origin-error">
+                        <h3>Origin error</h3>
+                        <dl class="origin-facts">
+                          <dt>Class</dt>
+                          <dd>
+                            <code>{{ entry.error_class }}</code>
+                          </dd>
+                          <dt>Provider status</dt>
+                          <dd>{{ entry.upstream_status ?? '—' }}</dd>
+                          <dt>Provider code</dt>
+                          <dd>
+                            @if (entry.provider_error_code) {
+                              <code>{{ entry.provider_error_code }}</code>
+                            } @else {
+                              —
+                            }
+                          </dd>
+                          <dt>Message</dt>
+                          <dd class="detail-text">{{ entry.error_detail ?? '—' }}</dd>
+                        </dl>
                       </section>
                     }
 
@@ -158,7 +206,8 @@
                           <thead>
                             <tr>
                               <th scope="col">Time</th>
-                              <th scope="col">Offering</th>
+                              <th scope="col">Provider</th>
+                              <th scope="col">Model</th>
                               <th scope="col">Credential</th>
                               <th scope="col">Outcome</th>
                               <th scope="col">Provider status</th>
@@ -170,16 +219,21 @@
                             @for (attempt of expandedAttempts(); track attempt.id) {
                               <tr>
                                 <td class="col-time">{{ formatTime(attempt.occurred_at) }}</td>
+                                <td>{{ attempt.provider_name ?? '—' }}</td>
                                 <td>
-                                  <code>{{ attempt.offering_id }}</code>
-                                </td>
-                                <td>
-                                  @if (attempt.credential_id) {
-                                    <code>{{ attempt.credential_id }}</code>
+                                  @if (attempt.model_id) {
+                                    <a
+                                      class="resolved-model"
+                                      [routerLink]="['/models']"
+                                      [queryParams]="{ model: attempt.model_id }"
+                                      [title]="'Open ' + attemptModelText(attempt) + ' in Models'"
+                                      >{{ attemptModelText(attempt) }}</a
+                                    >
                                   } @else {
-                                    —
+                                    {{ attemptModelText(attempt) }}
                                   }
                                 </td>
+                                <td>{{ attempt.credential_name ?? '—' }}</td>
                                 <td>{{ attempt.outcome ?? 'completed' }}</td>
                                 <td>{{ attemptStatus(attempt) }}</td>
                                 <td>
@@ -207,6 +261,85 @@
                     } @else {
                       <p class="state-note">This entry carries no readable routing decision.</p>
                     }
+
+                    <details class="technical">
+                      <summary>Technical identifiers</summary>
+                      <dl class="technical-facts">
+                        <dt>Request</dt>
+                        <dd>
+                          <code>{{ entry.request_id }}</code>
+                        </dd>
+                        @if (entry.client_request_id) {
+                          <dt>Client request</dt>
+                          <dd>
+                            <code>{{ entry.client_request_id }}</code>
+                          </dd>
+                        }
+                        <dt>Offering</dt>
+                        <dd>
+                          @if (entry.resolved_offering_id) {
+                            <code>{{ entry.resolved_offering_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                        <dt>Model</dt>
+                        <dd>
+                          @if (entry.model_id) {
+                            <code>{{ entry.model_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                        <dt>Provider</dt>
+                        <dd>
+                          @if (entry.provider_id) {
+                            <code>{{ entry.provider_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                        <dt>User</dt>
+                        <dd>
+                          @if (entry.user_id) {
+                            <code>{{ entry.user_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                        <dt>API key</dt>
+                        <dd>
+                          @if (entry.api_key_id) {
+                            <code>{{ entry.api_key_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                        <dt>Credential</dt>
+                        <dd>
+                          @if (entry.credential_id) {
+                            <code>{{ entry.credential_id }}</code>
+                          } @else {
+                            —
+                          }
+                        </dd>
+                      </dl>
+                      @if (expandedAttempts().length > 0) {
+                        <ul class="technical-attempts">
+                          @for (attempt of expandedAttempts(); track attempt.id) {
+                            <li>
+                              attempt {{ attempt.id }}: offering
+                              <code>{{ attempt.offering_id }}</code>, credential
+                              @if (attempt.credential_id) {
+                                <code>{{ attempt.credential_id }}</code>
+                              } @else {
+                                —
+                              }
+                            </li>
+                          }
+                        </ul>
+                      }
+                    </details>
                   </td>
                 </tr>
               }

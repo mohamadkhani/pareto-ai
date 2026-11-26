@@ -390,6 +390,7 @@ describe('Models', () => {
     querySearch: string | null = null,
     queryMaxPrice: string | null = null,
     queryMinQuality: string | null = null,
+    queryModel: string | null = null,
   ): Promise<ComponentFixture<Models>> {
     const query: Record<string, string> = {};
     if (queryProvider !== null) {
@@ -406,6 +407,9 @@ describe('Models', () => {
     }
     if (queryMinQuality !== null) {
       query['min_quality'] = queryMinQuality;
+    }
+    if (queryModel !== null) {
+      query['model'] = queryModel;
     }
     TestBed.configureTestingModule({
       imports: [Models],
@@ -634,6 +638,36 @@ describe('Models', () => {
     expect(root.textContent).toContain('$6.12');
     expect(window.localStorage.getItem('pareto.models.priceBasis')).toBe('mix-chat');
     expect(TestBed.inject(Location).path()).toContain('mix=mix-chat');
+  });
+
+  it('scopes to one model and opens it from ?model=, ignoring the search and caps', async () => {
+    queueReload(fetchMock, allOverview);
+    // The URL also carries a search and caps; the exact model must win.
+    const fixture = await create('admin', null, null, 'claude', '99', '9999', 'm1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Only the named model is listed, and its detail dialog is already open.
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(detailDialog(root).textContent).toContain('openai/gpt-5');
+    // The search term and the caps are dropped from the URL.
+    const path = TestBed.inject(Location).path();
+    expect(path).toContain('model=m1');
+    expect(path).not.toContain('q=');
+    expect(path).not.toContain('max_price=');
+    expect(path).not.toContain('min_quality=');
+  });
+
+  it('leaves the exact-model view when the operator changes a filter', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, null, null, 'm1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(TestBed.inject(Location).path()).not.toContain('model=');
   });
 
   it('starts from ?mix= when the URL names a profile, and falls back on an unknown one', async () => {

@@ -1,10 +1,10 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap } from '@angular/router';
+import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/router';
 import { FetchMock, jsonResponse } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { UserView } from '../users/users.types';
-import type { RequestLogEntry } from './usage.types';
+import type { LogAttempt, RequestLogEntry } from './usage.types';
 import { Logs } from './logs';
 
 function authStub(role: 'admin' | 'user'): object {
@@ -45,10 +45,19 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     path: '/v1/chat/completions',
     requested_model: 'openai/gpt-5',
     resolved_offering_id: 'off1',
+    provider_id: 'p1',
+    provider_name: 'OpenRouter',
+    model_id: 'm1',
+    model_canonical_name: 'openai/gpt-5',
+    model_upstream_model_id: 'openai/gpt-5',
+    credential_id: 'c1',
+    credential_name: 'primary',
     decision_json: null,
     status: 200,
     error_class: null,
     error_detail: null,
+    upstream_status: null,
+    provider_error_code: null,
     bytes_in: 10,
     bytes_out: 20,
     user_id: 'u1',
@@ -58,6 +67,34 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     cost_usd: 0.25,
     tokens_estimated: 120,
     latency_ms: 800,
+    ...overrides,
+  };
+}
+
+/**
+ * One attempt of the fixture entry (D49): names come from the server join
+ * (D64), never from a client-side catalog lookup.
+ */
+function attemptFixture(overrides: Partial<LogAttempt> = {}): LogAttempt {
+  return {
+    id: 1,
+    request_id: 'r0',
+    occurred_at: '2026-01-01T00:00:01.000Z',
+    offering_id: 'off1',
+    provider_id: 'p1',
+    provider_name: 'OpenRouter',
+    model_id: 'm1',
+    model_canonical_name: 'openai/gpt-5',
+    model_upstream_model_id: 'openai/gpt-5-2025-01-01',
+    credential_id: 'c1',
+    credential_name: 'primary',
+    outcome: 'upstream_error',
+    upstream_status: 502,
+    provider_error_code: 'bad_gateway',
+    error_detail: 'boom',
+    latency_ms: 120,
+    ttft_ms: null,
+    output_tokens: null,
     ...overrides,
   };
 }
@@ -99,11 +136,14 @@ function buttonByText(scope: ParentNode, text: string): HTMLButtonElement {
 
 describe('Logs', () => {
   let fetchMock: FetchMock;
+  /** What the `/api/logs/{id}/attempts` route answers with. */
+  let attempts: LogAttempt[] = [];
 
   beforeEach(() => {
+    attempts = [];
     fetchMock = new FetchMock();
     fetchMock.respondTo('/api/providers', () => jsonResponse(200, []));
-    fetchMock.respondTo('/api/logs/', () => jsonResponse(200, []));
+    fetchMock.respondTo('/api/logs/', () => jsonResponse(200, attempts));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 
@@ -111,14 +151,18 @@ describe('Logs', () => {
     vi.unstubAllGlobals();
   });
 
-  async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Logs>> {
+  async function create(
+    role: 'admin' | 'user' = 'admin',
+    query: Record<string, string> = {},
+  ): Promise<ComponentFixture<Logs>> {
     TestBed.configureTestingModule({
       imports: [Logs],
       providers: [
+        provideRouter([]),
         { provide: AuthService, useValue: authStub(role) },
         {
           provide: ActivatedRoute,
-          useValue: { snapshot: { queryParamMap: convertToParamMap({}) } },
+          useValue: { snapshot: { queryParamMap: convertToParamMap(query) } },
         },
       ],
     });
@@ -178,7 +222,7 @@ describe('Logs', () => {
     // Both refusals carry the row highlight and the labelled refusal badge.
     expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
     expect(
-      root.querySelectorAll('tbody tr.money-event td:nth-child(5) ui-badge.tone-danger').length,
+      root.querySelectorAll('tbody tr.money-event td:nth-child(6) ui-badge.tone-danger').length,
     ).toBe(2);
     expect(
       root.querySelector('ui-badge[title="Refused: access denied"]')?.textContent?.trim(),
@@ -310,5 +354,194 @@ describe('Logs', () => {
 
     expect(root.querySelector('app-decision-panel')).toBeNull();
     expect(root.textContent).toContain('no readable routing decision');
+  });
+
+  it('shows the requested and the real target model, with names not GUIDs', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            requested_model: 'gpt-5',
+            model_canonical_name: 'openai/gpt-5',
+            model_upstream_model_id: 'openai/gpt-5-2025-01-01',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const text = root.textContent ?? '';
+
+    // Both models are visible: the request and the real target.
+    expect(text).toContain('gpt-5');
+    expect(text).toContain('openai/gpt-5 · openai/gpt-5-2025-01-01');
+    // Provider and credential show their names; no offering/provider GUID.
+    expect(text).toContain('OpenRouter');
+    expect(text).toContain('primary');
+    expect(text).not.toContain('off1');
+    // The resolved model opens the exact Models filter.
+    const link = root.querySelector<HTMLAnchorElement>('a.resolved-model');
+    expect(link?.getAttribute('href')).toBe('/models?model=m1');
+
+    const headers = Array.from(root.querySelectorAll('thead th')).map((th) =>
+      th.textContent?.trim(),
+    );
+    expect(headers).not.toContain('Offering');
+    expect(headers).toEqual([
+      'Time',
+      'User',
+      'Model',
+      'Provider',
+      'Credential',
+      'Status',
+      'Error',
+      'Cost',
+      'Tokens',
+      'Latency',
+      'Details',
+    ]);
+  });
+
+  it('collapses the model cell when the request and the target agree', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Requested and canonical are both `openai/gpt-5`: one line, one link.
+    expect(root.querySelectorAll('.col-model .resolved-model').length).toBe(1);
+    expect(root.querySelector('.col-model .requested-model')).toBeNull();
+    expect(root.querySelector('.col-model a.resolved-model')?.textContent?.trim()).toBe(
+      'openai/gpt-5',
+    );
+  });
+
+  it('narrows the log to the provider clicked in a row', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    fetchMock.respond(jsonResponse(200, { entries: [entry(1)] }));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'OpenRouter').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const url = new URL(fetchMock.requests[2].url, 'https://example.test');
+    expect(url.pathname).toBe('/api/logs');
+    expect(url.searchParams.get('provider')).toBe('p1');
+  });
+
+  it('shows sub-cent costs with adaptive precision instead of $0.00', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, { cost_usd: 0.000123 }),
+          entry(1, { cost_usd: 0.0234 }),
+          entry(2, { cost_usd: 2.1 }),
+          entry(3, { cost_usd: null }),
+          entry(4, { status: 402, error_class: 'budget_exceeded', cost_usd: 0 }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-cost')).map((cell) =>
+      cell.textContent?.trim(),
+    );
+    expect(cells).toEqual(['$0.000123', '$0.0234', '$2.10', '—', '—']);
+  });
+
+  it('shows the origin error with the provider status, code, and message', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 502,
+            error_class: 'upstream_error',
+            error_detail: 'the provider exploded',
+            upstream_status: 502,
+            provider_error_code: 'bad_gateway',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('Origin error');
+    expect(text).toContain('upstream_error');
+    expect(text).toContain('502');
+    expect(text).toContain('bad_gateway');
+    expect(text).toContain('the provider exploded');
+  });
+
+  it('omits the origin error block when the request itself succeeded', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('names the provider, model, and credential on every attempt', async () => {
+    attempts = [attemptFixture()];
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const row = root.querySelector('.attempts-table tbody tr');
+    const text = row?.textContent ?? '';
+    expect(text).toContain('OpenRouter');
+    expect(text).toContain('openai/gpt-5 · openai/gpt-5-2025-01-01');
+    expect(text).toContain('primary');
+    expect(text).toContain('upstream_error');
+    expect(text).not.toContain('off1');
+
+    const link = row?.querySelector<HTMLAnchorElement>('a.resolved-model');
+    expect(link?.getAttribute('href')).toBe('/models?model=m1');
+  });
+
+  it('keeps the raw identifiers in a collapsed technical block', async () => {
+    fetchMock.respond(
+      jsonResponse(200, { entries: [entry(0, { client_request_id: 'client-9' })] }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const details = root.querySelector<HTMLDetailsElement>('details.technical');
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    const text = details?.textContent ?? '';
+    expect(text).toContain('r0');
+    expect(text).toContain('client-9');
+    expect(text).toContain('off1');
+    expect(text).toContain('m1');
   });
 });

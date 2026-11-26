@@ -568,11 +568,24 @@ pub struct RequestLogEntry {
     pub path: Option<String>,
     pub requested_model: Option<String>,
     pub resolved_offering_id: Option<String>,
+    /// The provider that served the request (resolved through the offering).
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
+    /// The model the offering resolves to, and the id sent upstream.
+    pub model_id: Option<String>,
+    pub model_canonical_name: Option<String>,
+    pub model_upstream_model_id: Option<String>,
+    /// The credential that served the request (D64).
+    pub credential_id: Option<String>,
+    pub credential_name: Option<String>,
     pub decision_json: Option<String>,
     pub status: Option<i64>,
     pub error_class: Option<String>,
     /// The final failure's bounded, redacted provider text (D49).
     pub error_detail: Option<String>,
+    /// The origin error's provider HTTP status and code (D64).
+    pub upstream_status: Option<i64>,
+    pub provider_error_code: Option<String>,
     pub bytes_in: Option<i64>,
     pub bytes_out: Option<i64>,
     pub user_id: Option<String>,
@@ -602,14 +615,25 @@ pub struct LogListResponse {
 }
 
 /// One attempt of a request, as the operator sees it (D49): the taxonomy
-/// outcome plus the provider's own status, code, and bounded redacted text.
+/// outcome plus the provider's own status, code, and bounded redacted text,
+/// with the failed attempt's target names (provider, model, credential) joined
+/// from the catalog (D64).
 #[derive(Debug, Clone, Serialize, ToSchema, sqlx::FromRow)]
 pub struct AttemptEntry {
     pub id: i64,
     pub request_id: String,
     pub occurred_at: String,
     pub offering_id: String,
+    /// The provider that owns the offering, and its name.
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
+    /// The model the offering resolves to, and the id sent upstream.
+    pub model_id: Option<String>,
+    pub model_canonical_name: Option<String>,
+    pub model_upstream_model_id: Option<String>,
     pub credential_id: Option<String>,
+    /// The credential's label (D64).
+    pub credential_name: Option<String>,
     /// Taxonomy code; `None` when the attempt completed.
     pub outcome: Option<String>,
     pub upstream_status: Option<i64>,
@@ -634,7 +658,10 @@ pub struct ErrorSummaryRow {
 /// One page of request logs, newest first, with the same exclusive
 /// `(occurred_at, request_id)` cursor pattern as `/api/audit`. The optional
 /// filters narrow to one user, one settled status, one taxonomy class, one
-/// provider, or one offering (D49). Failure mode: [`sqlx::Error`].
+/// provider, or one offering (D49). Each entry carries the resolved target's
+/// names and ids (provider, model, credential) joined from the catalog, so the
+/// console renders names without a client-side lookup (D64). Failure mode:
+/// [`sqlx::Error`].
 #[allow(clippy::too_many_arguments)]
 pub async fn list_request_logs(
     pool: &SqlitePool,
@@ -651,10 +678,18 @@ pub async fn list_request_logs(
         "SELECT l.request_id, l.client_request_id, l.occurred_at, l.method, l.path, \
                 l.requested_model, l.resolved_offering_id, l.decision_json, l.status, \
                 l.error_class, l.error_detail, l.bytes_in, l.bytes_out, l.user_id, l.api_key_id, \
+                l.credential_id, l.upstream_status, l.provider_error_code, \
+                o.provider_id, pr.name AS provider_name, o.model_id, \
+                m.canonical_name AS model_canonical_name, \
+                o.upstream_model_id AS model_upstream_model_id, \
+                c.label AS credential_name, \
                 u.input_tokens, u.output_tokens, u.cost_usd, u.tokens_estimated, u.latency_ms \
          FROM request_logs l \
          LEFT JOIN usage_events u ON u.request_id = l.request_id \
          LEFT JOIN offerings o ON o.id = l.resolved_offering_id \
+         LEFT JOIN providers pr ON pr.id = o.provider_id \
+         LEFT JOIN models m ON m.id = o.model_id \
+         LEFT JOIN provider_credentials c ON c.id = l.credential_id \
          WHERE (?1 IS NULL OR l.user_id = ?1) \
            AND (?5 IS NULL OR l.status = ?5) \
            AND (?6 IS NULL OR l.error_class = ?6) \
@@ -697,12 +732,20 @@ pub async fn list_attempts(
     request_id: &str,
 ) -> Result<Vec<AttemptEntry>, sqlx::Error> {
     sqlx::query_as::<_, AttemptEntry>(
-        "SELECT id, request_id, occurred_at, offering_id, credential_id, outcome, \
-                upstream_status, provider_error_code, error_detail, latency_ms, ttft_ms, \
-                output_tokens \
-         FROM telemetry_attempts \
-         WHERE request_id = ? \
-         ORDER BY id ASC",
+        "SELECT t.id, t.request_id, t.occurred_at, t.offering_id, t.credential_id, t.outcome, \
+                t.upstream_status, t.provider_error_code, t.error_detail, t.latency_ms, t.ttft_ms, \
+                t.output_tokens, \
+                o.provider_id, pr.name AS provider_name, o.model_id, \
+                m.canonical_name AS model_canonical_name, \
+                o.upstream_model_id AS model_upstream_model_id, \
+                c.label AS credential_name \
+         FROM telemetry_attempts t \
+         LEFT JOIN offerings o ON o.id = t.offering_id \
+         LEFT JOIN providers pr ON pr.id = o.provider_id \
+         LEFT JOIN models m ON m.id = o.model_id \
+         LEFT JOIN provider_credentials c ON c.id = t.credential_id \
+         WHERE t.request_id = ? \
+         ORDER BY t.id ASC",
     )
     .bind(request_id)
     .fetch_all(pool)

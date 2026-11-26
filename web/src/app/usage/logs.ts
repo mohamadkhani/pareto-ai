@@ -1,10 +1,10 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
 import { CatalogService } from '../catalog/catalog.service';
 import type { Provider } from '../catalog/catalog.types';
 import { describeError, isForbidden } from '../catalog/errors';
-import { formatTime, formatUsd } from '../catalog/format';
+import { formatTime, formatUsdPrecise } from '../catalog/format';
 import { DecisionPanel } from '../routing/decision-panel';
 import { parseDecision } from '../routing/routing.types';
 import { UiBadge } from '../ui/badge';
@@ -42,6 +42,7 @@ const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as
   selector: 'app-logs',
   imports: [
     DecisionPanel,
+    RouterLink,
     UiBadge,
     UiBanner,
     UiButton,
@@ -114,7 +115,6 @@ export class Logs {
   );
 
   protected readonly formatTime = formatTime;
-  protected readonly formatUsd = formatUsd;
 
   constructor() {
     // Non-admins never call the API: it would answer 403 and the read is audited.
@@ -193,6 +193,19 @@ export class Logs {
     void this.reload();
   }
 
+  /**
+   * Narrows the log to the provider that served one row (the Provider cell).
+   * Reuses the existing filter so the operator stays in context; the control
+   * and the URL-less state agree because both drive `providerFilter`.
+   */
+  protected filterByProvider(providerId: string | null): void {
+    if (providerId === null || providerId === this.providerFilter()) {
+      return;
+    }
+    this.providerFilter.set(providerId);
+    void this.reload();
+  }
+
   /** Paging ends on a short page or when the server omits `next_cursor`. */
   private cursorOf(page: LogPage): LogCursor | null {
     return page.entries.length < PAGE_SIZE ? null : page.next_cursor;
@@ -253,6 +266,52 @@ export class Logs {
     return entry.cost_usd !== null || entry.input_tokens !== null || entry.output_tokens !== null;
   }
 
+  /**
+   * Cost text for the row: a pre-send refusal (402/429/403) consumed nothing,
+   * so it reads '—' rather than a silent `$0.00`; otherwise the settled cost
+   * uses adaptive precision so sub-cent requests do not collapse to `$0.00`
+   * (D64). Unknown cost is '—' (decision D10).
+   */
+  protected costText(entry: RequestLogEntry): string {
+    if (this.isMoneyEvent(entry)) {
+      return '—';
+    }
+    return this.hasUsage(entry) ? formatUsdPrecise(entry.cost_usd) : '—';
+  }
+
+  /**
+   * The resolved model's display text: `canonical · upstream`, with the
+   * upstream id shown only when it differs from the canonical name (D64).
+   * '—' when no model resolved (a pre-send refusal, or a deleted row).
+   */
+  protected resolvedModelText(entry: RequestLogEntry): string {
+    const canonical = entry.model_canonical_name;
+    if (canonical === null) {
+      return '—';
+    }
+    const upstream = entry.model_upstream_model_id;
+    return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
+  }
+
+  /**
+   * True when the requested model is worth its own line: the client asked for
+   * something other than the canonical model that served, so a rewrite or an
+   * alias is visible (D64).
+   */
+  protected showsRequestedModel(entry: RequestLogEntry): boolean {
+    return entry.requested_model !== null && entry.requested_model !== entry.model_canonical_name;
+  }
+
+  /** One attempt's target model, same `canonical · upstream` shape (D64). */
+  protected attemptModelText(attempt: LogAttempt): string {
+    const canonical = attempt.model_canonical_name;
+    if (canonical === null) {
+      return '—';
+    }
+    const upstream = attempt.model_upstream_model_id;
+    return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
+  }
+
   protected tokenText(entry: RequestLogEntry): string {
     if (entry.input_tokens === null && entry.output_tokens === null) {
       return '—';
@@ -265,10 +324,6 @@ export class Logs {
       return '—';
     }
     return this.users().find((user) => user.id === id)?.email ?? id;
-  }
-
-  protected providerName(id: string): string {
-    return this.providers().find((provider) => provider.id === id)?.name ?? id.slice(0, 8);
   }
 
   /** `open_for_ms` is relative; show it as seconds still to wait, not a time. */

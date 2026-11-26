@@ -3605,6 +3605,14 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         },
         None => None,
     };
+    // The final attempt's identity and origin-error fields are copied onto
+    // the durable request row (D64): the credential that served the
+    // request, and the provider's own HTTP status / error code. `samples` is
+    // in attempt order, so the last one is the final attempt.
+    let last_attempt = settlement.decision.samples.last();
+    let served_credential_id = last_attempt.and_then(|attempt| attempt.credential_id.clone());
+    let upstream_status = last_attempt.and_then(|attempt| attempt.upstream_status);
+    let provider_error_code = last_attempt.and_then(|attempt| attempt.provider_error_code.clone());
     let cost = money::compute_cost(price.as_ref(), usage.as_ref());
     let tokens = usage.as_ref().map(money::total_tokens).unwrap_or(0);
     let started_at = chrono::DateTime::parse_from_rfc3339(&settlement.meta.started_at)
@@ -3662,8 +3670,9 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         "INSERT INTO request_logs \
          (request_id, client_request_id, occurred_at, method, path, requested_model, \
           resolved_offering_id, decision_json, status, error_class, bytes_in, bytes_out, user_id, \
-          api_key_id, has_request_body, error_detail) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          api_key_id, has_request_body, error_detail, credential_id, upstream_status, \
+          provider_error_code) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.client_request_id)
@@ -3681,6 +3690,9 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     .bind(&api_key_id)
     .bind(i64::from(settlement.has_request_body))
     .bind(&settlement.error_detail)
+    .bind(&served_credential_id)
+    .bind(upstream_status)
+    .bind(&provider_error_code)
     .execute(&mut *tx)
     .await;
 
@@ -4261,6 +4273,10 @@ mod tests {
         bytes_in: Option<i64>,
         bytes_out: Option<i64>,
         has_request_body: i64,
+        /// The credential that served the request, durable on the row (D64).
+        credential_id: Option<String>,
+        upstream_status: Option<i64>,
+        provider_error_code: Option<String>,
     }
 
     async fn usage_rows(app: &TestApp) -> Vec<UsageRow> {
@@ -4278,7 +4294,8 @@ mod tests {
     async fn log_rows(app: &TestApp) -> Vec<LogRow> {
         sqlx::query_as::<_, LogRow>(
             "SELECT request_id, client_request_id, requested_model, resolved_offering_id, \
-             decision_json, status, error_class, bytes_in, bytes_out, has_request_body \
+             decision_json, status, error_class, bytes_in, bytes_out, has_request_body, \
+             credential_id, upstream_status, provider_error_code \
              FROM request_logs ORDER BY rowid",
         )
         .fetch_all(&app.state.pool)
@@ -4416,6 +4433,14 @@ mod tests {
         assert_eq!(log.bytes_in, Some(body.to_string().len() as i64));
         assert!(log.bytes_out.unwrap() > 0);
         assert_eq!(log.has_request_body, 1);
+        // The serving credential is durable on the request row (D64); a
+        // success has no origin error to record.
+        assert!(
+            log.credential_id.is_some(),
+            "the serving credential is recorded"
+        );
+        assert!(log.upstream_status.is_none());
+        assert!(log.provider_error_code.is_none());
 
         let decision = decision_of(log);
         let candidates = decision["candidates"].as_array().expect("candidates");
@@ -5811,6 +5836,14 @@ mod tests {
         let row = &usage_rows(&s.app).await[0];
         assert_eq!(row.error_class.as_deref(), Some("upstream_error"));
         assert_eq!(row.status, Some(502));
+
+        // The origin error's provider status is durable on the request row,
+        // together with the credential that produced it (D64).
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.error_class.as_deref(), Some("upstream_error"));
+        assert!(log.credential_id.is_some());
+        assert_eq!(log.upstream_status, Some(500));
+        assert_eq!(log.provider_error_code, None);
     }
 
     // -----------------------------------------------------------------------

@@ -68,7 +68,9 @@ export interface UsageReport {
 
 /**
  * One request-log entry: request metadata plus the settled usage counters
- * when a ledger row exists. Never carries request or response bodies.
+ * when a ledger row exists. Never carries request or response bodies. The
+ * resolved target's names and ids are joined server-side (D64), so the
+ * console renders names instead of offering/credential GUIDs.
  */
 export interface RequestLogEntry {
   request_id: string;
@@ -78,6 +80,16 @@ export interface RequestLogEntry {
   path: string | null;
   requested_model: string | null;
   resolved_offering_id: string | null;
+  /** The provider that served the request, resolved through the offering. */
+  provider_id: string | null;
+  provider_name: string | null;
+  /** The model the offering resolves to, and the id sent upstream. */
+  model_id: string | null;
+  model_canonical_name: string | null;
+  model_upstream_model_id: string | null;
+  /** The credential that served the request (D64). */
+  credential_id: string | null;
+  credential_name: string | null;
   /** JSON object with the routing decision, when one was recorded. */
   decision_json: string | null;
   status: number | null;
@@ -88,6 +100,9 @@ export interface RequestLogEntry {
    * removing secrets.
    */
   error_detail: string | null;
+  /** The origin error's provider HTTP status and code (D64). */
+  upstream_status: number | null;
+  provider_error_code: string | null;
   bytes_in: number | null;
   bytes_out: number | null;
   user_id: string | null;
@@ -119,14 +134,21 @@ export interface LogPage {
 
 /**
  * One attempt of a request (D49): the gateway's taxonomy outcome plus the
- * provider's own status, code, and bounded redacted text.
+ * provider's own status, code, and bounded redacted text, with the failed
+ * attempt's target names joined server-side (D64).
  */
 export interface LogAttempt {
   id: number;
   request_id: string;
   occurred_at: string;
   offering_id: string;
+  provider_id: string | null;
+  provider_name: string | null;
+  model_id: string | null;
+  model_canonical_name: string | null;
+  model_upstream_model_id: string | null;
   credential_id: string | null;
+  credential_name: string | null;
   /** Taxonomy code; null when the attempt completed. */
   outcome: string | null;
   upstream_status: number | null;

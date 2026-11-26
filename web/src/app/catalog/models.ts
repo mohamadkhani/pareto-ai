@@ -225,6 +225,13 @@ export class Models {
   protected readonly providers = signal<Provider[]>([]);
   protected readonly overview = signal<ModelsOverview | null>(null);
   protected readonly providerId = signal<string>('all');
+  /**
+   * An exact model from `?model=<id>` (a link from the request log, D64). When
+   * set, the page shows only that model and opens its detail dialog; the
+   * operator's own search and caps are ignored and cleared, because an exact
+   * id plus a text search or a price cap can silently show nothing.
+   */
+  protected readonly exactModelId = signal('');
   /** The text in the search box; the API sees the debounced `searchTerm`. */
   protected readonly searchInput = signal('');
   /** The debounced, trimmed term the overview was last filtered with. */
@@ -340,12 +347,21 @@ export class Models {
   private readonly overviewRows = computed<OverviewRow[]>(() => this.overview()?.rows ?? []);
   protected readonly maxPrice = computed(() => parseOptionalNumber(this.maxPriceInput()));
   protected readonly minQuality = computed(() => parseOptionalNumber(this.minQualityInput()));
-  protected readonly rows = computed<OverviewRow[]>(() =>
-    this.overviewRows()
+  protected readonly rows = computed<OverviewRow[]>(() => {
+    // An exact model link (D64) is exclusive: it bypasses the enabled-only
+    // view and the caps so the deep link always lands on the model, whichever
+    // state it is in.
+    const exact = this.exactModelId();
+    if (exact !== '') {
+      return this.overviewRows()
+        .filter((row) => row.model_id === exact)
+        .sort((a, b) => this.compareRows(a, b));
+    }
+    return this.overviewRows()
       .filter((row) => this.showDisabled() || this.rowEnabled(row))
       .filter((row) => this.matchesRefinements(row))
-      .sort((a, b) => this.compareRows(a, b)),
-  );
+      .sort((a, b) => this.compareRows(a, b));
+  });
   /** Checked rows that are still visible; keys of hidden rows are ignored. */
   protected readonly selectedRows = computed<OverviewRow[]>(() => {
     const keys = this.selectedKeys();
@@ -432,7 +448,7 @@ export class Models {
     () => this.maxPrice() !== null || this.minQuality() !== null,
   );
   protected readonly anyFilterActive = computed(
-    () => this.filterActive() || this.refinementActive(),
+    () => this.filterActive() || this.refinementActive() || this.exactModelId() !== '',
   );
   /** Disabled rows the default "enabled only" view hides. */
   protected readonly hiddenDisabledCount = computed(
@@ -466,6 +482,17 @@ export class Models {
     if (filter !== null && filter !== '') {
       this.providerId.set(filter);
     }
+    // An exact model deep link from the request log arrives as `?model=<id>`
+    // (D64). It is exclusive: adopt the id, then drop any search and caps from
+    // the URL so the exact view cannot be silently emptied by them.
+    const exactModel = this.route.snapshot.queryParamMap.get('model')?.trim() ?? '';
+    if (exactModel !== '') {
+      this.exactModelId.set(exactModel);
+      this.removeUrlParams(['q', 'max_price', 'min_quality']);
+      // Re-state the id so the URL keeps it after the removals above, even
+      // when only a bare location backs the page.
+      this.writeUrlParam('model', exactModel);
+    }
     // The price basis: an explicit `?mix=` wins, then the stored choice, then
     // the resolved default profile (D34).
     this.priceBasis.set(this.initialBasis());
@@ -473,11 +500,14 @@ export class Models {
       this.route.snapshot.queryParamMap.get('mix') !== null || this.storedBasis() !== null,
     ); // Non-admins never call the API: it would answer 403 and the read is audited.
     // A `?q=` deep link (or reload/back) restores the applied search as-is.
-    const term = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
-    this.searchInput.set(term);
-    this.searchTerm.set(term);
-    this.maxPriceInput.set(this.route.snapshot.queryParamMap.get('max_price')?.trim() ?? '');
-    this.minQualityInput.set(this.route.snapshot.queryParamMap.get('min_quality')?.trim() ?? '');
+    // The exact-model view ignores the search and the caps (D64).
+    if (this.exactModelId() === '') {
+      const term = this.route.snapshot.queryParamMap.get('q')?.trim() ?? '';
+      this.searchInput.set(term);
+      this.searchTerm.set(term);
+      this.maxPriceInput.set(this.route.snapshot.queryParamMap.get('max_price')?.trim() ?? '');
+      this.minQualityInput.set(this.route.snapshot.queryParamMap.get('min_quality')?.trim() ?? '');
+    }
     this.syncDetailsOpen.set(this.storedSyncDetails());
     this.destroyRef.onDestroy(() => {
       if (this.searchTimer !== null) {
@@ -506,6 +536,7 @@ export class Models {
       this.canonicaliseBasis(profiles);
       await this.loadOverviewData();
       await this.loadSyncStatuses();
+      this.openExactModelIfLinked();
     } catch (err) {
       this.handleError(err);
     } finally {
@@ -519,6 +550,7 @@ export class Models {
     try {
       await this.loadOverviewData();
       this.detailOpen.set(false);
+      this.openExactModelIfLinked();
     } catch (err) {
       this.handleError(err);
     } finally {
@@ -779,6 +811,45 @@ export class Models {
       params.delete(key);
     } else {
       params.set(key, value);
+    }
+    // Any other parameter write is the operator changing a filter, which ends
+    // the exact-model view (D64): from there the model id would silently
+    // narrow a new search to nothing.
+    if (key !== 'model' && this.exactModelId() !== '') {
+      params.delete('model');
+      this.exactModelId.set('');
+    }
+    this.location.replaceState(pathname === '' ? '/' : pathname, params.toString());
+  }
+
+  /**
+   * Ends the exact-model view (D64): the operator changed a control that does
+   * not live in the URL (the show-disabled switch), so the deep link no longer
+   * describes what is on screen.
+   */
+  private exitExactModelView(): void {
+    if (this.exactModelId() !== '') {
+      this.exactModelId.set('');
+      this.writeUrlParam('model', null);
+    }
+  }
+
+  /** The "Show disabled" switch: reveals disabled rows and ends any exact view. */
+  protected setShowDisabled(value: boolean): void {
+    this.showDisabled.set(value);
+    this.exitExactModelView();
+  }
+
+  /**
+   * Removes query parameters without ending the exact-model view (D64); used
+   * when adopting `?model=<id>` so dropping the search and caps is not read as
+   * the operator leaving it.
+   */
+  private removeUrlParams(keys: readonly string[]): void {
+    const [pathname, query = ''] = this.location.path().split('?');
+    const params = new URLSearchParams(query);
+    for (const key of keys) {
+      params.delete(key);
     }
     this.location.replaceState(pathname === '' ? '/' : pathname, params.toString());
   }
@@ -1294,6 +1365,22 @@ export class Models {
     this.detailOpen.set(false);
     this.detailKey.set(null);
     this.removeOfferingOpen.set(false);
+  }
+
+  /**
+   * Opens the detail dialog for the exact model a `?model=<id>` link named
+   * (D64). A stale id — the model was deleted — leaves the table empty and no
+   * dialog opens, which is the honest result rather than a guess.
+   */
+  private openExactModelIfLinked(): void {
+    const exact = this.exactModelId();
+    if (exact === '') {
+      return;
+    }
+    const row = this.rows().find((candidate) => candidate.model_id === exact);
+    if (row !== undefined) {
+      this.openDetail(row);
+    }
   }
 
   protected setModelValue(field: ModelField, value: string): void {

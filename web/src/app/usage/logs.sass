@@ -6,6 +6,18 @@
 .col-time
   white-space: nowrap
 /*
+ * Requested and resolved model: the requested name on its own line only when it
+ * differs from the canonical model that served (D64).
+ */
+.col-model
+  .requested-model
+    display: block
+  .resolved-model
+    display: block
+    font-size: var(--text-small)
+.col-cost
+  white-space: nowrap
+/*
  * 402/429/403 rows are money events: the request never reached a provider.
  */
 .ui-table tbody tr.money-event
@@ -23,11 +35,11 @@
   background: var(--bg)
   padding: var(--space-3) var(--space-4)
 .attempts,
-.error-detail,
+.origin-error,
 .routing
   margin-bottom: var(--space-4)
 .attempts h3,
-.error-detail h3,
+.origin-error h3,
 .routing h3
   font-size: var(--text-h3)
   margin: 0 0 var(--space-2)
@@ -36,6 +48,35 @@
   font-size: var(--text-small)
   overflow-wrap: anywhere
   white-space: pre-wrap
+/*
+ * The origin error and the technical identifiers: label/value rows.
+ */
+.origin-facts,
+.technical-facts
+  display: grid
+  grid-template-columns: max-content 1fr
+  gap: var(--space-1) var(--space-3)
+  margin: 0
+  dt
+    color: var(--text-muted)
+    font-size: var(--text-small)
+    font-weight: 600
+  dd
+    margin: 0
+    overflow-wrap: anywhere
+.technical
+  margin-bottom: var(--space-4)
+  summary
+    color: var(--text-muted)
+    cursor: pointer
+    font-size: var(--text-small)
+  &[open] summary
+    margin-bottom: var(--space-2)
+.technical-attempts
+  color: var(--text-muted)
+  font-size: var(--text-small)
+  margin: var(--space-2) 0 0
+  padding-left: var(--space-4)
 .attempts-table
   border-collapse: collapse
   width: 100%

@@ -1368,6 +1368,50 @@ prompt still succeeds while a large-context member is eligible. `pool = "all"`
 combos stay null because their candidate set is the whole catalog and a minimum
 there would advertise the smallest catalog model's window.
 
+### D64. The request log names its real target, and its origin error is durable
+
+**Decision (2026-11-26):** `request_logs` records the identity of the target that
+actually served a request, and `GET /api/logs` returns it with the resolved names,
+so the console never resolves catalog GUIDs itself:
+
+- Migration `0021_request_log_target.sql` adds three nullable columns:
+  `credential_id`, `upstream_status`, `provider_error_code`, written by settle
+  from the request's **final attempt** (`decision.samples.last()`).
+  `credential_id` references `provider_credentials` with `ON DELETE SET NULL`.
+  No backfill: rows written earlier read as unknown.
+- `list_request_logs` joins `offerings → models, providers` and
+  `provider_credentials`, so each entry carries `provider_id`, `provider_name`,
+  `model_id`, `model_canonical_name`, `model_upstream_model_id`, `credential_id`
+  and `credential_name`. `list_attempts` returns the same shape per attempt. The
+  raw offering/credential ids stay on the wire for filters, links, and debugging.
+- The console (`/logs`) drops the bare offering-GUID column, adds **Provider**
+  and **Credential** columns, and shows the model as the requested name plus the
+  resolved `canonical_name · upstream_model_id` when they differ. The resolved
+  model links to `/models?model=<id>`, an **exclusive** filter on the Models page
+  that ignores and clears the search and the price/quality caps and opens the
+  model's detail dialog. The Provider cell narrows the log to that provider.
+- Per-request cost uses adaptive precision (two decimals at `≥ $1`, four at
+  `≥ $0.01`, up to six significant decimals below) so a sub-cent request no
+  longer renders as `$0.00`; a pre-send refusal shows `—`, never a silent zero.
+- Expanded details show **all** raw identifiers in a collapsed block, and an
+  **Origin error** block (class, provider status, provider code, bounded redacted
+  provider message) when the request itself failed.
+
+**Why:** the request log is the operator's only window into a bad request, and a
+row that showed a 36-character offering GUID and two-decimal cost told them
+neither what was actually called nor what it cost. The credential and the
+provider's own status/code existed only in `telemetry_attempts`, which keeps the
+newest 200 rows per offering and prunes the rest (D49), so the log lost the
+identity of anything older than that window.
+
+**Consequences:** an additive schema change and an additive wire change; every
+existing field stays, so `/api/logs` clients other than the console are
+unaffected. The durable `credential_id` is the *final* credential — a request
+that failed over tried several, and those remain visible per attempt. No request
+or response body is stored: the "origin error" is the bounded, redacted provider
+message D49 already captures, surfaced at request level with its status and code
+(D11 stays in force for bodies).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

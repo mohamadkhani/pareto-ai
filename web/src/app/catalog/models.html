@@ -95,7 +95,7 @@
         <ui-switch
           [checked]="showDisabled()"
           [label]="showDisabledLabel()"
-          (checkedChange)="showDisabled.set($event)"
+          (checkedChange)="setShowDisabled($event)"
         />
 
         @if (refinementActive()) {
@@ -292,7 +292,7 @@
           description="Every model in this view is disabled. Enable one, or show the disabled models."
         >
           <span ui-empty-action>
-            <ui-button size="sm" (clicked)="showDisabled.set(true)">Show disabled</ui-button>
+            <ui-button size="sm" (clicked)="setShowDisabled(true)">Show disabled</ui-button>
           </span>
         </ui-empty>
       } @else if (providers().length === 0) {
