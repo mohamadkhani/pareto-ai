@@ -277,6 +277,21 @@
             [(value)]="compactCombobox"
           />
         </ui-field>
+        <ui-field label="Disabled combobox">
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+            [disabled]="true"
+          />
+        </ui-field>
+        <ui-field label="Combobox with error" [error]="'Pick a model before saving.'">
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+          />
+        </ui-field>
         <ui-field label="Compact input">
           <ui-input size="sm" value="1,000" />
         </ui-field>

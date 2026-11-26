@@ -19,6 +19,7 @@
         [attr.aria-label]="item.link.reason"
         (click)="select(item.link)"
         (keydown.enter)="select(item.link)"
+        (keydown.space)="select(item.link); $event.preventDefault()"
       >
         <title>{{ item.link.reason }}</title>
       </path>
