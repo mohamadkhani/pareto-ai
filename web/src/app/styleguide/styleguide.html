@@ -259,6 +259,39 @@
             <option value="block">block</option>
           </ui-select>
         </ui-field>
+        <ui-field
+          label="Searchable model"
+          hint="Type to filter by name, family, or provider; arrow keys and Enter pick."
+        >
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+          />
+        </ui-field>
+        <ui-field label="Compact combobox" hint="Same control at toolbar height.">
+          <ui-combobox
+            size="sm"
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="compactCombobox"
+          />
+        </ui-field>
+        <ui-field label="Disabled combobox">
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+            [disabled]="true"
+          />
+        </ui-field>
+        <ui-field label="Combobox with error" [error]="'Pick a model before saving.'">
+          <ui-combobox
+            [options]="comboboxOptions"
+            placeholder="Search models…"
+            [(value)]="comboboxValue"
+          />
+        </ui-field>
         <ui-field label="Compact input">
           <ui-input size="sm" value="1,000" />
         </ui-field>
@@ -431,8 +464,14 @@
         <ui-checkbox [checked]="true" label="Allow this model" />
         <ui-checkbox [checked]="false" label="Unchecked" />
         <ui-checkbox [checked]="true" [disabled]="true" label="Disabled" />
+        <ui-checkbox [checked]="false" [indeterminate]="true" label="Partially selected" />
+        <ui-checkbox [checked]="true" [ariaLabel]="'Select this row'" />
       </div>
-      <p class="note">The input is the focus target; the label is the accessible name.</p>
+      <p class="note">
+        The input is the focus target; the label is the accessible name. Use
+        <code>ariaLabel</code> for a bare checkbox in a table column, and
+        <code>indeterminate</code> for the mixed state of a select-all control.
+      </p>
     </section>
   </div>
 </ng-template>

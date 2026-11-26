@@ -57,6 +57,12 @@ export const routes: Routes = [
       { path: 'audit', component: Audit },
       { path: 'users', component: Users },
       { path: 'grants', component: Grants },
+      // Lazy-loaded: the access map pulls in the graph and is not needed on
+      // first paint (keeps the initial bundle under budget).
+      {
+        path: 'access-map',
+        loadComponent: () => import('./access/access-map').then((m) => m.AccessMapPage),
+      },
       { path: 'logs', component: Logs },
       // Review surface for the design system; development builds only. The
       // shell hides the nav link and the component renders Forbidden in a

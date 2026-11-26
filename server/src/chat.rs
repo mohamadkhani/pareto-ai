@@ -4014,7 +4014,8 @@ mod tests {
     use super::*;
     use crate::auth::Role;
     use crate::catalog::{
-        self, Actor, CredentialInput, ModelInput, OfferingInput, PriceInput, ProviderInput,
+        self, Actor, CredentialInput, ModelInput, ModelPatch, OfferingInput, PriceInput,
+        ProviderInput,
     };
     use crate::config::Config;
     use crate::test_support::{TestApp, api_request, body_text, login, send, send_streaming};
@@ -5466,6 +5467,88 @@ mod tests {
                 .expect("candidates")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn a_model_disabled_for_all_providers_cannot_route_through_any_offering() {
+        let stub = Stub::spawn(vec![]).await;
+        let s = seeded().await;
+        let (first_provider, _) =
+            provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (second_provider, _) =
+            provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let model_id = model(&s.app, &s.uid, "m", None, None).await;
+        offering(
+            &s.app,
+            &s.uid,
+            &first_provider,
+            &model_id,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+
+        // Disable the model itself (D61), then add another provider's offering
+        // after the switch was flipped: it must inherit the disabled state.
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        catalog::update_model(
+            &s.app.state.pool,
+            &actor,
+            &model_id,
+            &ModelPatch {
+                enabled: Some(false),
+                ..ModelPatch::default()
+            },
+        )
+        .await
+        .expect("disable model");
+        offering(
+            &s.app,
+            &s.uid,
+            &second_provider,
+            &model_id,
+            "test-model-copy",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+
+        let response = send(
+            s.app.router(),
+            chat_request(&s.cookie, chat_body("m", true)),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+        assert_eq!(response.body["error"]["code"], "model_not_found");
+        assert_eq!(
+            stub.request_count(),
+            0,
+            "a disabled model never reaches an upstream"
+        );
+
+        // Enabling the model restores both offerings without touching their
+        // own flags.
+        catalog::update_model(
+            &s.app.state.pool,
+            &actor,
+            &model_id,
+            &ModelPatch {
+                enabled: Some(true),
+                ..ModelPatch::default()
+            },
+        )
+        .await
+        .expect("enable model");
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM offerings WHERE enabled = 1 ORDER BY id")
+                .fetch_all(&s.app.state.pool)
+                .await
+                .expect("offerings");
+        assert_eq!(rows.len(), 2, "the offering flags were never rewritten");
     }
 
     #[tokio::test]

@@ -1,8 +1,10 @@
 <label class="checkbox">
   <input
+    #box
     type="checkbox"
     [checked]="checked()"
     [disabled]="disabled()"
+    [attr.aria-label]="ariaLabel() || null"
     (change)="onChange($event)"
   />
   <span class="label">{{ label() }}</span>

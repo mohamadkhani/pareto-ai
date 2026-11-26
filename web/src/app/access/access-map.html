@@ -1,0 +1,70 @@
+<div class="access-map">
+  <header class="page-head">
+    <h1>Access map</h1>
+    <p class="hint">
+      Every account connected to the models it can actually reach. An edge is the final result — a
+      model, an offering, and a credential that together pass the access check (D9) — never the raw
+      grants. Hover an edge to see the credentials that open that model for the account.
+    </p>
+  </header>
+
+  @if (forbidden()) {
+    <ui-empty title="Forbidden" description="The access map is restricted to administrators." />
+  } @else {
+    @if (loadError()) {
+      <ui-banner tone="danger" actionLabel="Try again" (actioned)="reload()">
+        {{ loadError() }}
+      </ui-banner>
+    } @else if (loading() && users().length === 0) {
+      <p class="empty-note">Loading…</p>
+    } @else {
+      <div class="access-map-toolbar">
+        <ui-field label="Search" [controlId]="'access-map-search'">
+          <ui-input
+            [id]="'access-map-search'"
+            type="search"
+            placeholder="Filter by account or model…"
+            [value]="search()"
+            (valueChange)="onSearch($event)"
+          />
+        </ui-field>
+        <span class="spacer"></span>
+        <ui-button [disabled]="loading()" (clicked)="reload()">Refresh</ui-button>
+      </div>
+
+      @if (filteredUsers().length === 0) {
+        <ui-empty
+          title="Nothing to map"
+          description="No accounts match the search. Clear it to see the full map."
+        />
+      } @else if (rightNodes().length === 0) {
+        <ui-empty
+          title="No reachable models"
+          description="No account reaches any model: no offering and credential combination is allowed."
+        />
+      } @else {
+        <div class="access-summary">
+          <ui-badge tone="success">{{ allowedCount() }} reachable pairs</ui-badge>
+        </div>
+        <div class="access-graph-scroll">
+          <app-access-graph
+            [leftNodes]="leftNodes()"
+            [rightNodes]="rightNodes()"
+            [links]="links()"
+            [selectedId]="selectedLink()?.id ?? null"
+            (linkSelect)="selectLink($event)"
+          />
+        </div>
+        <div class="access-legend">
+          <span class="access-swatch access-swatch--allow"></span>
+          account → model it reaches
+        </div>
+        @if (selectedLink(); as link) {
+          <div class="access-detail">{{ link.reason }}</div>
+        } @else {
+          <p class="note">Hover or select a line to see the credentials behind it.</p>
+        }
+      }
+    }
+  }
+</div>

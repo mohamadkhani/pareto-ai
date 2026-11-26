@@ -119,6 +119,8 @@ pub struct ProviderModelRow {
     /// Effective max output: the offering override wins over the model value.
     pub max_output_tokens: Option<i64>,
     pub offering_id: String,
+    /// The provider that owns the offering; the console names it in notices.
+    pub provider_id: String,
     pub upstream_model_id: String,
     /// The offering's own flag. A globally disabled model overrides it (see
     /// `model_enabled`).
@@ -331,6 +333,7 @@ pub async fn load_with_search(
                             context_length: row.context_override.or(row.context_length),
                             max_output_tokens: row.max_output_override.or(row.max_output_tokens),
                             offering_id: row.offering_id.clone(),
+                            provider_id: row.provider_id.clone(),
                             upstream_model_id: row.upstream_model_id.clone(),
                             enabled: row.enabled != 0,
                             model_enabled: row.model_enabled != 0,
@@ -892,6 +895,56 @@ mod tests {
         assert_eq!(rows[1].offering_id, "off-a3");
         assert!(rows[1].price.is_none(), "unpriced offering");
         assert_eq!(rows[1].context_length, Some(128_000), "model fallback");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_model_is_reported_in_both_scopes_and_keeps_offering_flags() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+        sqlx::query("UPDATE models SET enabled = 0 WHERE id = 'model-a'")
+            .execute(&app.state.pool)
+            .await
+            .expect("disable model");
+
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        let model_a = all
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                OverviewRow::All(row) if row.model_id == "model-a" => Some(row),
+                _ => None,
+            })
+            .expect("model-a row");
+        assert!(!model_a.model_enabled, "the switch is on the model row");
+        let model_b = all
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                OverviewRow::All(row) if row.model_id == "model-b" => Some(row),
+                _ => None,
+            })
+            .expect("model-b row");
+        assert!(model_b.model_enabled, "other models are untouched");
+
+        let provider = load_with_search(&app.state.pool, Some("prov-a"), None, None, None)
+            .await
+            .expect("provider scope");
+        let offering = provider
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                OverviewRow::Provider(row) if row.offering_id == "off-a1" => Some(row),
+                _ => None,
+            })
+            .expect("off-a1 row");
+        assert_eq!(offering.provider_id, "prov-a");
+        assert!(!offering.model_enabled, "the console can block the switch");
+        assert!(
+            offering.enabled,
+            "the offering's own flag is not rewritten by the model switch"
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ import type { ApiKeyView } from '../keys/keys.types';
 import { UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -21,12 +22,6 @@ import { UsersService } from '../users/users.service';
 import type { UserView } from '../users/users.types';
 import { GrantsService } from './grants.service';
 import type { GrantMode, GrantResourceType, GrantSubjectType, GrantView } from './grants.types';
-
-/** One selectable subject or resource in the create form. */
-interface Option {
-  id: string;
-  label: string;
-}
 
 /** A readable API-key subject: name, visible prefix, and its owner. */
 interface KeyLabel {
@@ -51,6 +46,7 @@ function describeGrantError(err: unknown): string {
     UiBadge,
     UiBanner,
     UiButton,
+    UiCombobox,
     UiDialog,
     UiEmpty,
     UiField,
@@ -109,28 +105,40 @@ export class Grants {
   });
 
   /** Subjects of the picked kind: every user, or the picked owner's keys. */
-  protected readonly subjectOptions = computed<Option[]>(() => {
+  protected readonly subjectOptions = computed<ComboboxOption[]>(() => {
     if (this.subjectType() === 'user') {
-      return this.users().map((user) => ({ id: user.id, label: user.email }));
+      return this.users().map((user) => ({ value: user.id, label: user.email }));
     }
-    return this.keys().map((key) => ({ id: key.id, label: `${key.name} (${key.prefix})` }));
+    return this.keys().map((key) => ({
+      value: key.id,
+      label: `${key.name} (${key.prefix})`,
+    }));
   });
 
+  /** Key owners offered when an API-key subject is picked. */
+  protected readonly ownerOptions = computed<ComboboxOption[]>(() =>
+    this.users().map((user) => ({ value: user.id, label: user.email })),
+  );
+
   /** Resources of the picked kind, with friendly names. */
-  protected readonly resourceOptions = computed<Option[]>(() => {
+  protected readonly resourceOptions = computed<ComboboxOption[]>(() => {
     switch (this.resourceType()) {
       case 'model':
-        return this.models().map((model) => ({ id: model.id, label: model.canonical_name }));
+        return this.models().map((model) => ({
+          value: model.id,
+          label: model.canonical_name,
+          searchText: model.family ?? '',
+        }));
       case 'offering':
         return this.offerings().map((offering) => ({
-          id: offering.id,
+          value: offering.id,
           label: `${this.providerName(offering.provider_id)} → ${this.modelName(
             offering.model_id,
           )} (${offering.upstream_model_id})`,
         }));
       case 'credential':
         return this.credentials().map((credential) => ({
-          id: credential.id,
+          value: credential.id,
           label: `${this.providerName(credential.provider_id)} · ${credential.label}`,
         }));
     }

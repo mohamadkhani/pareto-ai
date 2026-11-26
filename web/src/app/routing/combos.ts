@@ -10,6 +10,7 @@ import { UiBadge, type BadgeTone } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -119,6 +120,7 @@ type PreviewSource = { kind: 'draft'; input: ComboInput } | { kind: 'saved'; com
     UiBanner,
     UiButton,
     UiCard,
+    UiCombobox,
     UiDialog,
     UiEmpty,
     UiField,
@@ -192,6 +194,15 @@ export class Combos {
     this.offerings().filter(
       (offering) => !this.members().some((member) => member.offering_id === offering.id),
     ),
+  );
+
+  /** Searchable options for the member picker (provider / model / upstream id). */
+  protected readonly addableOfferingOptions = computed<ComboboxOption[]>(() =>
+    this.addableOfferings().map((offering) => ({
+      value: offering.id,
+      label: this.offeringLabel(offering.id),
+      searchText: offering.upstream_model_id,
+    })),
   );
 
   protected readonly nameError = computed(() => {

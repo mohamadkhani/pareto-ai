@@ -121,16 +121,13 @@
 
           <div class="cap-add">
             <ui-field label="Model" [controlId]="'drawer-cap-model'">
-              <ui-select
+              <ui-combobox
                 [id]="'drawer-cap-model'"
                 [value]="newCap().modelId"
+                placeholder="Choose a model…"
+                [options]="capModelOptions()"
                 (valueChange)="setNewCapModel($event)"
-              >
-                <option value="">Choose a model…</option>
-                @for (model of models(); track model.id) {
-                  <option [value]="model.id">{{ model.canonical_name }}</option>
-                }
-              </ui-select>
+              />
             </ui-field>
             <ui-field label="Period" [controlId]="'drawer-cap-period'">
               <ui-select
@@ -232,16 +229,13 @@
                     </ui-select>
                   </ui-field>
                   <ui-field label="Resource" [controlId]="'drawer-grant-resource'">
-                    <ui-select
+                    <ui-combobox
                       [id]="'drawer-grant-resource'"
                       [value]="resourceId()"
+                      placeholder="Choose…"
+                      [options]="resourceOptions()"
                       (valueChange)="setResourceId($event)"
-                    >
-                      <option value="">Choose…</option>
-                      @for (option of resourceOptions(); track option.id) {
-                        <option [value]="option.id">{{ option.label }}</option>
-                      }
-                    </ui-select>
+                    />
                   </ui-field>
                   <ui-field label="Mode" [controlId]="'drawer-grant-mode'">
                     <ui-select
@@ -292,6 +286,58 @@
                   </ui-table>
                 }
               </div>
+            }
+          }
+        </section>
+      }
+
+      @case ('access') {
+        <section class="drawer-section">
+          <h3>Access map</h3>
+          <p class="drawer-note">
+            The models this account can actually use, and the credentials it reaches them through. A
+            model is reachable when one offering, one credential, and the model together pass the
+            access check (D9): any <code>deny</code> on that triple wins, else any
+            <code>allow</code>, else the role default. This is the final result, not the raw grants.
+          </p>
+          @if (accessError()) {
+            <ui-banner tone="danger" actionLabel="Retry" (actioned)="loadAccess()">
+              {{ accessError() }}
+            </ui-banner>
+          } @else if (accessLoading() && accessRows().length === 0) {
+            <div class="drawer-loading">
+              <ui-spinner size="sm" label="Loading access map" /> Loading access map…
+            </div>
+          } @else {
+            <div class="access-summary">
+              <ui-badge tone="success">{{ accessibleModelCount() }} models</ui-badge>
+              <ui-badge tone="neutral">{{ accessibleCredentialCount() }} credentials</ui-badge>
+            </div>
+            @if (accessibleRows().length === 0) {
+              <p class="drawer-note">
+                This account reaches no models: no offering and credential combination is allowed.
+              </p>
+            } @else {
+              <div class="access-graph-scroll">
+                <app-access-graph
+                  [leftNodes]="accessLeftNodes()"
+                  [rightNodes]="accessRightNodes()"
+                  [links]="accessLinks()"
+                  [selectedId]="selectedLink()?.id ?? null"
+                  (linkSelect)="selectLink($event)"
+                />
+              </div>
+              <div class="access-legend">
+                <span class="access-swatch access-swatch--allow"></span>
+                credential → model it reaches
+              </div>
+              @if (selectedLink(); as link) {
+                <div class="access-detail">
+                  <strong>{{ link.reason }}</strong>
+                </div>
+              } @else {
+                <p class="drawer-note">Select a line to see the rule behind that connection.</p>
+              }
             }
           }
         </section>

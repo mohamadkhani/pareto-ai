@@ -220,6 +220,22 @@ function selectInto(root: HTMLElement, selector: string, value: string): void {
   select.dispatchEvent(new Event('change'));
 }
 
+/** Picks a combobox option by its `data-value` (focus, then click the row). */
+function comboboxInto(root: HTMLElement, selector: string, value: string): void {
+  const input = root.querySelector<HTMLInputElement>(selector);
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error(`no combobox input matching ${selector}`);
+  }
+  input.dispatchEvent(new FocusEvent('focus'));
+  const option = Array.from(root.querySelectorAll<HTMLElement>('[role="option"]')).find(
+    (candidate) => candidate.dataset['value'] === value,
+  );
+  if (!option) {
+    throw new Error(`no combobox option with value ${value}`);
+  }
+  option.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 function typeInto(root: HTMLElement, selector: string, value: string): void {
   const input = root.querySelector(selector);
   if (!(input instanceof HTMLInputElement)) {
@@ -308,7 +324,7 @@ describe('Combos', () => {
     fixture.detectChanges();
     typeInto(root, '#combo-name', 'shared-fast');
     selectInto(root, '#combo-weights-mode', 'cheapest');
-    selectInto(root, '#combo-member-picker', 'off1');
+    comboboxInto(root, '#combo-member-picker', 'off1');
     fixture.detectChanges();
     submit(root);
     await fixture.whenStable();
@@ -350,7 +366,7 @@ describe('Combos', () => {
     typeInto(root, '#combo-weight-speed', '0.2');
     typeInto(root, '#combo-weight-quality', '0.3');
     typeInto(root, '#combo-weight-reliability', '0.4');
-    selectInto(root, '#combo-member-picker', 'off1');
+    comboboxInto(root, '#combo-member-picker', 'off1');
     fixture.detectChanges();
     submit(root);
     await fixture.whenStable();
@@ -382,8 +398,8 @@ describe('Combos', () => {
     fixture.detectChanges();
     typeInto(root, '#combo-name', 'chain');
     selectInto(root, '#combo-strategy', 'ordered');
-    selectInto(root, '#combo-member-picker', 'off1');
-    selectInto(root, '#combo-member-picker', 'off2');
+    comboboxInto(root, '#combo-member-picker', 'off1');
+    comboboxInto(root, '#combo-member-picker', 'off2');
     fixture.detectChanges();
 
     // Move the second member above the first: the stored order is the fallback chain.
@@ -526,7 +542,7 @@ describe('Combos', () => {
     buttonByText(root, 'New combo').click();
     fixture.detectChanges();
     typeInto(root, '#combo-name', 'doomed');
-    selectInto(root, '#combo-member-picker', 'off1');
+    comboboxInto(root, '#combo-member-picker', 'off1');
     fixture.detectChanges();
     submit(root);
     await fixture.whenStable();

@@ -34,20 +34,23 @@
               "budgets": [
                 {
                   "type": "initial",
-                  // 850 kB: the initial total (~811 kB) includes the richer
+                  // 880 kB: the initial total (~853 kB) includes the richer
                   // dashboard (sparkline, attention strip, activity card), the
-                  // user drawer, the design system's fonts
+                  // user drawer (now with the SVG access map), the searchable
+                  // combobox primitive, the design system's fonts
                   // (`@fontsource-variable`), the global token and primitive
-                  // CSS, and the shared primitive chunk. The `/styleguide`
-                  // route itself is lazy-loaded and not part of this number.
-                  "maximumWarning": "850kB",
+                  // CSS, and the shared primitive chunk. The `/styleguide` and
+                  // `/access-map` routes are lazy-loaded and not part of this
+                  // number.
+                  "maximumWarning": "880kB",
                   "maximumError": "1MB"
                 },
                 {
                   "type": "anyComponentStyle",
-                  // 6 kB: the Models page alone carries the provider chips, the
-                  // collapsible sync panel, the sortable table, and three dialogs.
-                  "maximumWarning": "6kB",
+                  // 6.5 kB: the Models page alone carries the provider chips, the
+                  // collapsible sync panel, the sortable table with its selection
+                  // column and batch bar, and three dialogs.
+                  "maximumWarning": "6.5kB",
                   "maximumError": "8kB"
                 }
               ],

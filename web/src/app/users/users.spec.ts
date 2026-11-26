@@ -376,7 +376,7 @@ describe('Users drawer', () => {
 
     const drawer = root.querySelector('app-user-drawer');
     expect(drawer).not.toBeNull();
-    expect(drawer?.querySelectorAll('[role="tab"]')).toHaveLength(4);
+    expect(drawer?.querySelectorAll('[role="tab"]')).toHaveLength(5);
 
     drawer?.querySelector('dialog')?.dispatchEvent(new Event('cancel', { cancelable: true }));
     await fixture.whenStable();

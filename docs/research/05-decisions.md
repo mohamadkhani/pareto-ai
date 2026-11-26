@@ -1275,6 +1275,45 @@ redistributing derived data. An operator who deliberately creates two rows
 under one canonical id gets no automatic merge, and a later discovery for that
 id is ambiguous rather than a guess.
 
+### D61. The model-level enable flag is the cross-provider routing switch
+
+**Decision (2026-11-25):** `models.enabled` is the kill switch for a catalog
+model. When it is 0, every offering of the model is excluded from routing,
+combos, the catalog-pool preview, and `/v1/models`, including offerings created
+after the switch was flipped. `offerings.enabled` stays the per-provider choice;
+the model flag overrides it without rewriting it, so enabling the model again
+restores each provider's own setting. The admin console writes the offering
+flag when a provider is selected and the model flag when **All providers** is
+selected.
+
+**Why:** `offerings.enabled` alone cannot express "no provider may route this
+model". A provider discovered later creates a new offering that defaults to
+enabled, so a disable applied only to today's offerings would silently come
+back on tomorrow. The catalog already identifies one model across provider
+spellings (D60), so the model row is the correct entity for a switch that must
+cover future offerings. Keeping the two flags independent also preserves
+operator intent: a model disabled globally does not erase which providers were
+individually disabled.
+
+**Consequences, accepted deliberately:** a disabled model is invisible to
+`/v1/models` and to routing even while its providers and offerings stay enabled
+in the admin catalog; the Models page hides disabled rows by default (the
+**Show disabled** switch, labelled with the hidden count, reveals them), shows
+`disabled (all)` on the revealed row, and blocks a per-provider enable until the
+model is enabled again. The page's row selection and its batch **Enable
+selected** / **Disable selected** actions follow the same scope rule as the
+single-row switch: with a provider selected they flip that provider's offerings,
+with **All providers** selected they flip the model flag, and a model disabled
+for every provider is skipped (and called out) when a provider-scoped batch
+tries to enable it. Discovery and the price
+sync still record new offerings and prices for a disabled model — the catalog
+stays complete — but they are not routable. A genuinely new model identity gets
+its own row and is enabled by default; only a spelling or registry match to the
+disabled row inherits the switch.
+
+**Source:** commit
+[`b7fe1db`](https://github.com/mohamadkhani/pareto-ai/commit/b7fe1db6b8a2d88fd2ab8c6d6cd8f5d12530025f).
+
 ### D62. No message-count limit on `/v1/chat/completions`; the body size is the bound
 
 **Decision (2026-11-25):** the data plane accepts any number of `messages` in a
@@ -1304,6 +1343,30 @@ unchanged: `max_tokens` is still clamped to the offering's output limit, and
 non-streaming responses still buffer at most 32 MiB. The test that proved
 "exactly 200 passes, 201 fails" is replaced by one proving a 1000-message
 conversation is accepted.
+
+### D63. A combo advertises the smallest eligible member's context window
+
+**Decision (2026-11-25):** the `context_length` of an advertised `combo:<name>`
+entry in `GET /v1/models` is the minimum effective context over the combo's
+**eligible** members — an enabled offering of an enabled provider and an enabled
+model (D61), with the offering's `context_override` winning over the model value,
+exactly as for a plain model entry. Members with an unknown context are ignored;
+when no eligible member has a known context the field stays null.
+`max_output_tokens` and price stay null. A `pool = "all"` combo has no explicit
+members, so its context stays null. The advertised value is informational only:
+routing still filters context per candidate (`context_fits`), so a request larger
+than the minimum is served by the members whose window fits it, not refused.
+
+**Why:** a combo is addressable like a model, so a client sizes its prompt from
+the advertised window. A null gives the client nothing, and any single member
+overstates what the smallest one can accept. The minimum is the window a client
+can rely on no matter which member the router picks.
+
+**Consequences, accepted deliberately:** the value tracks a member's context and
+enabled state and is not a hard gate; a caller that ignores it and sends a larger
+prompt still succeeds while a large-context member is eligible. `pool = "all"`
+combos stay null because their candidate set is the whole catalog and a minimum
+there would advertise the smallest catalog model's window.
 
 ## Open questions
 

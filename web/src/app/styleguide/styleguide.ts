@@ -8,6 +8,7 @@ import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
 import { UiCheckbox } from '../ui/checkbox';
 import { UiChip } from '../ui/chip';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
@@ -44,6 +45,7 @@ interface TokenSwatch {
     UiCard,
     UiCheckbox,
     UiChip,
+    UiCombobox,
     UiDialog,
     UiEmpty,
     UiField,
@@ -124,6 +126,15 @@ export class Styleguide {
   protected readonly textareaValue = signal('One offering per provider/model pair.');
   protected readonly selectValue = signal('openrouter');
   protected readonly compactSelect = signal('warn');
+  protected readonly comboboxValue = signal('m1');
+  protected readonly compactCombobox = signal('m1');
+  protected readonly comboboxOptions: readonly ComboboxOption[] = [
+    { value: 'm1', label: 'openai/gpt-5', searchText: 'openrouter' },
+    { value: 'm2', label: 'anthropic/claude-opus', searchText: 'openrouter' },
+    { value: 'm3', label: 'qwen/qwen3-235b', searchText: 'sailresearch' },
+    { value: 'm4', label: 'meta/llama-3.1-405b', searchText: 'sailresearch' },
+    { value: 'm5', label: 'mistral/large', searchText: 'openrouter' },
+  ];
   protected readonly switchOn = signal(true);
   protected readonly switchDisabled = signal(false);
   protected readonly tab = signal('one');

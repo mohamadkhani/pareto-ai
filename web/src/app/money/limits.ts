@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import {
   AbstractControl,
   FormControl,
@@ -15,6 +15,7 @@ import { formatTime, formatUsd } from '../catalog/format';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { UiCard } from '../ui/card';
+import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiDialog } from '../ui/dialog';
 import { UiField } from '../ui/field';
 import { UiInput } from '../ui/input';
@@ -53,6 +54,7 @@ function progressPercent(used: number, limit: number): number {
     UiBanner,
     UiButton,
     UiCard,
+    UiCombobox,
     UiDialog,
     UiField,
     UiInput,
@@ -91,6 +93,20 @@ export class Limits {
   protected readonly formatUsd = formatUsd;
   protected readonly progressPercent = progressPercent;
   protected readonly isAdmin = this.auth.isAdmin;
+
+  /** Model options for the token-cap model picker, searchable by name/family. */
+  protected readonly modelOptions = computed<ComboboxOption[]>(() =>
+    this.models().map((model) => ({
+      value: model.id,
+      label: model.canonical_name,
+      searchText: model.family ?? '',
+    })),
+  );
+
+  /** Account options for the user picker, searchable by email. */
+  protected readonly userOptions = computed<ComboboxOption[]>(() =>
+    this.users().map((user) => ({ value: user.id, label: user.email })),
+  );
 
   /** Token counts with grouping separators. */
   protected formatTokens(value: number): string {
