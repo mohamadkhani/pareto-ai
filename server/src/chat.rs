@@ -65,7 +65,7 @@
 //! onto a partial upstream line, followed by `data: [DONE]`, then the stream
 //! ends.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -310,6 +310,12 @@ struct Candidate {
     provider_id: String,
     provider_name: String,
     base_url: String,
+    /// OpenRouter upstream provider slug (`''` when the offering is unrouted,
+    /// D64). Set together with `routing_json`.
+    route: String,
+    /// Body fragment merged into the upstream request to pin the provider, e.g.
+    /// `{"provider":{"order":["azure"],"allow_fallbacks":false}}` (D64).
+    routing_json: Option<String>,
     /// The offering and its provider are both enabled (D35 pools include
     /// disabled rows so the preview can explain them).
     enabled: bool,
@@ -335,6 +341,10 @@ struct OfferingJoin {
     offering_id: String,
     model_id: String,
     upstream_model_id: String,
+    /// OpenRouter upstream provider slug; `''` for an unrouted offering (D64).
+    offering_route: String,
+    /// Body fragment merged into the upstream request (provider pinning).
+    offering_routing_json: Option<String>,
     context_override: Option<i64>,
     max_output_override: Option<i64>,
     offering_headers_json: Option<String>,
@@ -351,6 +361,7 @@ struct OfferingJoin {
 }
 
 const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream_model_id, \
+     o.route AS offering_route, o.routing_json AS offering_routing_json, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
@@ -361,6 +372,7 @@ const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream
      JOIN providers pr ON pr.id = o.provider_id";
 
 const SELECT_OFFERING_JOIN: &str = "SELECT o.id AS offering_id, o.model_id, o.upstream_model_id, \
+     o.route AS offering_route, o.routing_json AS offering_routing_json, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
@@ -397,6 +409,8 @@ fn build_candidate(
         provider_id: row.provider_id,
         provider_name: row.provider_name,
         base_url: row.base_url,
+        route: row.offering_route,
+        routing_json: row.offering_routing_json,
         enabled: row.offering_enabled == 1 && row.provider_enabled == 1 && row.model_enabled == 1,
         context_length: row.context_override.or(row.context_length),
         max_output_tokens: row.max_output_override.or(row.max_output_tokens),
@@ -405,6 +419,40 @@ fn build_candidate(
         credential,
         credentials,
     }
+}
+
+impl Candidate {
+    /// The provider label a decision or preview shows: the provider name, plus
+    /// the OpenRouter route slug when the offering is pinned to a provider
+    /// (D64), so two offerings of one provider stay distinguishable.
+    fn provider_label(&self) -> String {
+        match self.route.is_empty() {
+            true => self.provider_name.clone(),
+            false => format!("{}/{}", self.provider_name, self.route),
+        }
+    }
+}
+
+/// Drops the route-less aggregate offering of any model that also has a routed
+/// (per-provider) offering: when the per-provider prices are known, routing
+/// must pick a provider we can pin, not the aggregate that lets OpenRouter
+/// choose (D64). Member pools are left alone — the operator picked those rows.
+fn drop_superseded_aggregates(rows: Vec<OfferingJoin>) -> Vec<OfferingJoin> {
+    let mut routed: HashSet<(String, String)> = HashSet::new();
+    for row in &rows {
+        if !row.offering_route.is_empty() {
+            routed.insert((row.provider_id.clone(), row.upstream_model_id.clone()));
+        }
+    }
+    if routed.is_empty() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter(|row| {
+            !(row.offering_route.is_empty()
+                && routed.contains(&(row.provider_id.clone(), row.upstream_model_id.clone())))
+        })
+        .collect()
 }
 
 /// Loads the credentials of every candidate provider in **one** query
@@ -472,7 +520,7 @@ async fn resolve_candidates(
 
     let mut credentials = load_credentials(pool, &rows).await?;
     let mut candidates = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in drop_superseded_aggregates(rows) {
         candidates.push(build_candidate(breaker, row, &mut credentials, now));
     }
     Ok(candidates)
@@ -543,7 +591,7 @@ async fn resolve_pool_candidates(
     })?;
     let mut credentials = load_credentials(&state.pool, &rows).await?;
     let mut candidates = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in drop_superseded_aggregates(rows) {
         candidates.push(build_candidate(&state.breaker, row, &mut credentials, now));
     }
     Ok(candidates)
@@ -1541,7 +1589,7 @@ pub async fn execute(
                             combos::PoolItem {
                                 offering_id: candidate.offering_id.clone(),
                                 model: candidate.canonical_name.clone(),
-                                provider: candidate.provider_name.clone(),
+                                provider: candidate.provider_label(),
                                 quality: quality.get(&candidate.model_id).copied().unwrap_or(
                                     routing::QualityScore {
                                         score: 0.5,
@@ -1757,7 +1805,7 @@ pub async fn execute(
             });
         decision.candidates.push(CandidateRecord {
             id: candidate.offering_id.clone(),
-            provider: candidate.provider_name.clone(),
+            provider: candidate.provider_label(),
             model: candidate.canonical_name.clone(),
             upstream_model_id: candidate.upstream_model_id.clone(),
             price,
@@ -1827,12 +1875,19 @@ pub async fn execute(
             ));
             continue;
         }
+        // D64: an offering's routing fragment pins the upstream provider (for
+        // OpenRouter, `provider.order`). Invalid JSON is ignored, never fatal.
+        let routing = candidate
+            .routing_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
         let body = crate::upstream::build_body(
             &parsed.extra,
             &parsed.messages,
             &candidate.upstream_model_id,
             parsed.stream,
             max_tokens,
+            routing.as_ref(),
         );
         if attempts.is_empty() {
             // The output estimate (M4's `max_tokens` term; see
@@ -3883,7 +3938,7 @@ pub(crate) async fn preview_combo(
         items.push(combos::PoolItem {
             offering_id: candidate.offering_id.clone(),
             model: candidate.canonical_name.clone(),
-            provider: candidate.provider_name.clone(),
+            provider: candidate.provider_label(),
             quality: quality_score,
             mix_price,
             signal,

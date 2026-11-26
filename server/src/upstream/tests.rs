@@ -127,7 +127,7 @@ fn build_body_rewrites_the_wire_fields_and_keeps_extras() {
     );
     let messages = vec![serde_json::json!({"role": "user", "content": "hi"})];
 
-    let body = build_body(&extra, &messages, "upstream-model", true, Some(128));
+    let body = build_body(&extra, &messages, "upstream-model", true, Some(128), None);
     assert_eq!(body["model"], "upstream-model");
     assert_eq!(body["stream"], true);
     assert_eq!(body["max_tokens"], 128);
@@ -139,7 +139,7 @@ fn build_body_rewrites_the_wire_fields_and_keeps_extras() {
         "include_usage is forced on and existing keys survive"
     );
 
-    let non_stream = build_body(&extra, &messages, "upstream-model", false, None);
+    let non_stream = build_body(&extra, &messages, "upstream-model", false, None, None);
     assert_eq!(non_stream["stream"], false);
     assert!(
         non_stream.get("max_tokens").is_none(),
@@ -150,6 +150,48 @@ fn build_body_rewrites_the_wire_fields_and_keeps_extras() {
         serde_json::json!({"include_usage": false, "x": 1}),
         "stream_options is untouched when not streaming"
     );
+}
+
+#[test]
+fn build_body_merges_the_offering_routing_fragment_and_it_wins() {
+    let mut extra = serde_json::Map::new();
+    extra.insert("temperature".to_string(), 0.5.into());
+    // A client-supplied provider object must be overridden by the offering pin.
+    extra.insert(
+        "provider".to_string(),
+        serde_json::json!({"order": ["client"], "allow_fallbacks": true}),
+    );
+    let messages = vec![serde_json::json!({"role": "user", "content": "hi"})];
+    let routing = serde_json::json!({
+        "provider": {"order": ["azure"], "allow_fallbacks": false}
+    });
+
+    let body = build_body(
+        &extra,
+        &messages,
+        "openai/gpt-4o",
+        false,
+        None,
+        Some(&routing),
+    );
+    assert_eq!(
+        body["provider"],
+        serde_json::json!({"order": ["azure"], "allow_fallbacks": false}),
+        "the offering routing fragment wins over the caller's provider"
+    );
+    assert_eq!(body["temperature"], 0.5, "other extras survive");
+    assert_eq!(body["model"], "openai/gpt-4o");
+
+    // A non-object fragment is ignored rather than corrupting the body.
+    let body = build_body(
+        &extra,
+        &messages,
+        "openai/gpt-4o",
+        false,
+        None,
+        Some(&serde_json::json!("nonsense")),
+    );
+    assert_eq!(body["provider"]["order"][0], "client");
 }
 
 #[test]

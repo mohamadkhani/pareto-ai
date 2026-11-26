@@ -28,10 +28,22 @@
 //! `docs/research/09-environment.md`), so every test drives this module
 //! through the fixture `server/tests/fixtures/openrouter_models.json` or a
 //! failing fetcher; live verification is a documented follow-up.
+//!
+//! Decision D64: besides the aggregated catalog, each managed model is asked
+//! for its per-provider endpoints (`GET .../models/{id}/endpoints`) and every
+//! upstream provider becomes its own offering under the one `openrouter`
+//! provider row. The offering carries the provider slug in `offerings.route`
+//! and the request-body routing fragment in `offerings.routing_json`
+//! (`{"provider":{"order":["azure"],"allow_fallbacks":false}}`), so the
+//! request path can pin the provider the price was quoted for. A model whose
+//! endpoint lookup fails keeps its aggregated (route-less) offering.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
+use futures_util::stream::{self, StreamExt};
 use sqlx::SqlitePool;
 
 use crate::catalog::{self, Actor, SyncPrice};
@@ -433,6 +445,75 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
         managed: crate::catalog::is_discoverable_model_id(id),
     })
 }
+/// One upstream provider behind an OpenRouter model, from
+/// `GET /api/v1/models/{id}/endpoints` (D64).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrEndpoint {
+    /// OpenRouter provider slug (the endpoint's `tag`, e.g. `azure`); falls
+    /// back to the lower-cased `provider_name`. Empty entries are dropped, so
+    /// this is never empty.
+    pub route: String,
+    pub price: OrPrice,
+    /// The raw endpoint `pricing` object, kept for the run's `detail_json`.
+    pub raw_pricing: Option<serde_json::Value>,
+}
+
+/// Parses one model's `.../endpoints` body into its usable providers.
+///
+/// Fails only when the body is not JSON or has no `data.endpoints` array;
+/// individual unusable entries (no `tag`/`provider_name`) are skipped.
+pub fn parse_endpoints(raw: &str) -> Result<Vec<OrEndpoint>, SyncError> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| SyncError::Json(e.to_string()))?;
+    let list = value
+        .get("data")
+        .and_then(|data| data.get("endpoints"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or(SyncError::Shape)?;
+    Ok(list.iter().filter_map(parse_endpoint).collect())
+}
+
+fn parse_endpoint(entry: &serde_json::Value) -> Option<OrEndpoint> {
+    let route = entry
+        .get("tag")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            entry
+                .get("provider_name")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value.trim().to_lowercase())
+                .filter(|value| !value.is_empty())
+        })?;
+    let pricing = entry.get("pricing").filter(|p| p.is_object());
+    Some(OrEndpoint {
+        route,
+        price: OrPrice {
+            input_per_m: per_million_field(pricing, "prompt"),
+            output_per_m: per_million_field(pricing, "completion"),
+            cache_read_per_m: per_million_field(pricing, "input_cache_read"),
+            cache_write_per_m: per_million_field(pricing, "input_cache_write"),
+            request_fee: usd_amount_field(pricing, "request"),
+            variable: has_negative_component(pricing),
+        },
+        raw_pricing: pricing.cloned(),
+    })
+}
+
+/// The per-provider endpoints URL of one OpenRouter model.
+pub fn endpoints_url(model_id: &str) -> String {
+    format!("{MODELS_URL}/{model_id}/endpoints")
+}
+
+/// Fetches one model's per-provider endpoints. Same hardening and failure
+/// modes as [`fetch_models`]. Takes the id by value so the returned future is
+/// `'static`, which the sync's generic endpoint fetcher requires.
+pub fn fetch_endpoints(model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+    Box::pin(async move { fetch_catalog_from(&endpoints_url(&model_id)).await })
+}
+
 /// Registry aliases from an OpenRouter catalog: the base id and the
 /// repository id both point at the repository id. Tagged variants
 /// (`:free`, `:batch`, `-free`, `-batch`, `-thinking`) are distinct offerings,
@@ -604,31 +685,82 @@ fn modalities(entry: &serde_json::Value) -> (Vec<String>, Vec<String>) {
     }
 }
 
-/// Runs one sync attempt: fetch, parse, and apply the catalog inside one
-/// transaction that also records the `price_sync_runs` row and exactly one
-/// `sync.openrouter` audit row.
+/// Runs one sync attempt: fetch the catalog, then each managed model's
+/// per-provider endpoints (D64), then apply everything inside one transaction
+/// that also records the `price_sync_runs` row and exactly one `sync.openrouter`
+/// audit row.
 ///
-/// A fetch or parse failure is not an `Err`: the previous snapshot keeps
-/// serving (outcome `stale-if-error`, or `error` when none exists) and the
-/// failed run is still recorded. `Err` is reserved for database failures.
-/// `fetch` is injected so tests drive it from a fixture instead of the live
-/// endpoint.
-pub async fn run_sync<F, Fut>(
+/// A fetch or parse failure of the *catalog* is not an `Err`: the previous
+/// snapshot keeps serving (outcome `stale-if-error`, or `error` when none
+/// exists) and the failed run is still recorded. A failed *endpoints* lookup
+/// for a single model is logged and that model keeps its aggregated offering;
+/// the run still succeeds. `Err` is reserved for database failures. The two
+/// fetchers are injected so tests drive them from fixtures instead of the live
+/// endpoints.
+pub async fn run_sync<M, MF, E>(
     pool: &SqlitePool,
-    fetch: F,
+    fetch_models: M,
+    fetch_endpoints: E,
     actor: &Actor<'_>,
 ) -> Result<SyncOutcome, SyncError>
 where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<String, SyncError>>,
+    M: FnOnce() -> MF,
+    MF: Future<Output = Result<String, SyncError>>,
+    E: Fn(String) -> BoxFuture<'static, Result<String, SyncError>>,
 {
     let started_at = catalog::now_ts();
-    let attempt = fetch().await.and_then(|raw| parse_catalog(&raw));
+    let parsed = match fetch_models().await.and_then(|raw| parse_catalog(&raw)) {
+        Ok(parsed) => parsed,
+        Err(error) => return apply_failure(pool, actor, &started_at, &error.to_string()).await,
+    };
 
-    match attempt {
-        Ok(parsed) => apply_success(pool, actor, &started_at, parsed).await,
-        Err(error) => apply_failure(pool, actor, &started_at, &error.to_string()).await,
+    // Network work happens before the transaction: the per-model lookups must
+    // not hold the write lock. Models whose lookup fails are simply absent
+    // from the map and keep their aggregated offering.
+    let routes = fetch_routes(&parsed.models, &fetch_endpoints).await;
+
+    apply_success(pool, actor, &started_at, parsed, routes).await
+}
+
+/// Bounded concurrency for the per-model endpoint lookups.
+const ENDPOINT_CONCURRENCY: usize = 8;
+
+/// Fetches every managed model's endpoints, tolerating per-model failures.
+async fn fetch_routes<E>(models: &[OrModel], fetch: &E) -> HashMap<String, Vec<OrEndpoint>>
+where
+    E: Fn(String) -> BoxFuture<'static, Result<String, SyncError>>,
+{
+    let ids: Vec<String> = models
+        .iter()
+        .filter(|model| model.managed)
+        .map(|model| model.id.clone())
+        .collect();
+    let fetched: Vec<(String, Result<Vec<OrEndpoint>, SyncError>)> = stream::iter(ids)
+        .map(|id| async move {
+            let parsed = fetch(id.clone())
+                .await
+                .and_then(|raw| parse_endpoints(&raw));
+            (id, parsed)
+        })
+        .buffer_unordered(ENDPOINT_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut routes = HashMap::new();
+    for (id, parsed) in fetched {
+        match parsed {
+            Ok(endpoints) if !endpoints.is_empty() => {
+                routes.insert(id, endpoints);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                upstream_model_id = %id,
+                error = %error,
+                "the OpenRouter endpoint lookup failed; keeping the aggregated offering"
+            ),
+        }
     }
+    routes
 }
 
 /// The successful path: upsert everything, record the run and the audit row,
@@ -638,6 +770,7 @@ async fn apply_success(
     actor: &Actor<'_>,
     started_at: &str,
     parsed: Catalog,
+    routes: HashMap<String, Vec<OrEndpoint>>,
 ) -> Result<SyncOutcome, SyncError> {
     let finished_at = catalog::now_ts();
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -669,63 +802,67 @@ async fn apply_success(
     let mut models = catalog::identity::load_index(&mut tx).await?;
     let mut skipped_manual = 0usize;
     let mut filtered_not_created = 0usize;
+    let mut routed_models = 0usize;
     let mut raw_prices = serde_json::Map::new();
+    let mut route_prices = serde_json::Map::new();
     let mut variable_prices: Vec<&str> = Vec::new();
     for model in &parsed.models {
         // Discovery's id filter is the single source of truth: a filtered id
         // never creates a model or offering. It may still refresh the price of
         // an offering that already exists (for example one the operator
         // created by hand), because that row is not ours to hide.
-        let offering_id = if model.managed {
+        let resolved = if model.managed {
             match models.resolve(&model.id) {
                 crate::model_identity::IdentityMatch::Exact(model_id) => {
                     refresh_model(&mut tx, model, &model_id, true).await?;
-                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                    let id = upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?;
+                    Some((model_id, id))
                 }
                 crate::model_identity::IdentityMatch::Unique(model_id) => {
                     // A registry or spelling join: the existing row's
                     // connector/admin metadata wins, only empty fields fill.
                     refresh_model(&mut tx, model, &model_id, false).await?;
-                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                    let id = upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?;
+                    Some((model_id, id))
                 }
                 crate::model_identity::IdentityMatch::Ambiguous => {
                     match existing_offering(&mut tx, &provider_id, &model.id).await? {
-                        Some(offering_id) => {
+                        Some((id, model_id)) => {
                             // Never repoint an operator's offering on a guess:
                             // keep its model, refresh only its price below.
                             tracing::warn!(
                                 upstream_model_id = %model.id,
-                                offering_id = %offering_id,
+                                offering_id = %id,
                                 "ambiguous model identity; keeping the existing offering's model"
                             );
-                            Some(offering_id)
+                            Some((model_id, id))
                         }
                         None => {
                             // A genuinely new ambiguous id may still become its
                             // own row (D60); there is nothing to repoint.
                             let model_id = create_model(&mut tx, model, &mut models).await?;
-                            Some(
-                                upsert_offering(&mut tx, &provider_id, &model_id, &model.id)
-                                    .await?,
-                            )
+                            let id = upsert_offering(&mut tx, &provider_id, &model_id, &model.id)
+                                .await?;
+                            Some((model_id, id))
                         }
                     }
                 }
                 crate::model_identity::IdentityMatch::Unknown => {
                     let model_id = create_model(&mut tx, model, &mut models).await?;
-                    Some(upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?)
+                    let id = upsert_offering(&mut tx, &provider_id, &model_id, &model.id).await?;
+                    Some((model_id, id))
                 }
             }
         } else {
             match existing_offering(&mut tx, &provider_id, &model.id).await? {
-                Some(offering_id) => Some(offering_id),
+                Some((id, model_id)) => Some((model_id, id)),
                 None => {
                     filtered_not_created += 1;
                     None
                 }
             }
         };
-        let Some(offering_id) = offering_id else {
+        let Some((model_id, offering_id)) = resolved else {
             continue;
         };
         let outcome = catalog::apply_sync_price(
@@ -766,6 +903,49 @@ async fn apply_success(
         if model.price.variable {
             variable_prices.push(model.id.as_str());
         }
+
+        // D64: every upstream provider of this model becomes its own offering,
+        // priced from its endpoint, and carries the routing fragment that pins
+        // it in the upstream request. The aggregated (route-less) offering is
+        // kept but excluded from routing while a routed sibling exists.
+        if let Some(endpoints) = routes.get(&model.id) {
+            routed_models += 1;
+            for endpoint in endpoints {
+                let route_offering_id =
+                    upsert_route_offering(&mut tx, &provider_id, &model_id, &model.id, endpoint)
+                        .await?;
+                let routed_outcome = catalog::apply_sync_price(
+                    &mut tx,
+                    &route_offering_id,
+                    &SyncPrice {
+                        input_per_m: endpoint.price.input_per_m,
+                        output_per_m: endpoint.price.output_per_m,
+                        cache_read_per_m: endpoint.price.cache_read_per_m,
+                        cache_write_per_m: endpoint.price.cache_write_per_m,
+                        request_fee: endpoint.price.request_fee,
+                        reasoning_per_m: None,
+                        currency: "USD".to_string(),
+                        variable_price: endpoint.price.variable,
+                    },
+                    SOURCE,
+                    &endpoints_url(&model.id),
+                    &finished_at,
+                )
+                .await?;
+                if routed_outcome == catalog::SyncPriceOutcome::SkippedManual {
+                    skipped_manual += 1;
+                }
+                if routed_outcome != catalog::SyncPriceOutcome::Unchanged {
+                    route_prices.insert(
+                        format!("{}@{}", model.id, endpoint.route),
+                        endpoint
+                            .raw_pricing
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+        }
     }
 
     let detail = serde_json::json!({
@@ -776,6 +956,10 @@ async fn apply_success(
         // Ids whose source price was a negative sentinel: the components are
         // stored NULL and `prices.variable_price = 1`.
         "variable_prices": variable_prices,
+        // D64: models that gained per-provider offerings, and the raw pricing
+        // of every route whose stored price changed (or was skipped manual).
+        "routed_models": routed_models,
+        "route_prices": serde_json::Value::Object(route_prices),
     });
 
     let model_count = parsed.models.iter().filter(|model| model.managed).count();
@@ -1133,20 +1317,90 @@ async fn upsert_offering(
     }
 }
 
-/// An existing offering of this provider for `upstream_model_id`, if any.
-/// Used by filtered ids, which may refresh a price but never create a row.
+/// An existing offering of this provider for `upstream_model_id`, as
+/// `(offering_id, model_id)`. Used by filtered/ambiguous ids, which may refresh
+/// a price but never create a row and must keep the offering's own model.
 async fn existing_offering(
     conn: &mut sqlx::SqliteConnection,
     provider_id: &str,
     upstream_model_id: &str,
-) -> Result<Option<String>, SyncError> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
+) -> Result<Option<(String, String)>, SyncError> {
+    Ok(sqlx::query_as(
+        "SELECT id, model_id FROM offerings \
+         WHERE provider_id = ? AND upstream_model_id = ? AND route = ''",
     )
     .bind(provider_id)
     .bind(upstream_model_id)
     .fetch_optional(&mut *conn)
     .await?)
+}
+
+/// The request-body routing fragment that pins OpenRouter to one upstream
+/// provider. `allow_fallbacks` is false so the price we ranked is the price
+/// that runs; a failing provider fails over through our own candidate list.
+fn routing_json_for_route(route: &str) -> String {
+    serde_json::json!({
+        "provider": { "order": [route], "allow_fallbacks": false }
+    })
+    .to_string()
+}
+
+/// Upserts the routed offering row keyed on
+/// `(provider_id, upstream_model_id, route)`, refreshing its `routing_json`.
+/// Admin-set overrides, `enabled`, and headers survive the sync.
+async fn upsert_route_offering(
+    conn: &mut sqlx::SqliteConnection,
+    provider_id: &str,
+    model_id: &str,
+    upstream_model_id: &str,
+    endpoint: &OrEndpoint,
+) -> Result<String, SyncError> {
+    let routing_json = routing_json_for_route(&endpoint.route);
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM offerings \
+         WHERE provider_id = ? AND upstream_model_id = ? AND route = ?",
+    )
+    .bind(provider_id)
+    .bind(upstream_model_id)
+    .bind(&endpoint.route)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let now = catalog::now_ts();
+    match existing {
+        Some(id) => {
+            sqlx::query(
+                "UPDATE offerings SET model_id = ?, routing_json = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(model_id)
+            .bind(&routing_json)
+            .bind(&now)
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+            Ok(id)
+        }
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO offerings \
+                   (id, provider_id, model_id, upstream_model_id, route, routing_json, \
+                    enabled, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            )
+            .bind(&id)
+            .bind(provider_id)
+            .bind(model_id)
+            .bind(upstream_model_id)
+            .bind(&endpoint.route)
+            .bind(&routing_json)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+            Ok(id)
+        }
+    }
 }
 
 /// `capabilities_json` for a synced model: the display name (the spec schema
@@ -1208,6 +1462,29 @@ mod tests {
 
     fn fixture_fetch() -> impl Future<Output = Result<String, SyncError>> {
         std::future::ready(Ok(FIXTURE.to_string()))
+    }
+
+    /// An endpoints lookup that finds no per-provider endpoints, so the sync
+    /// keeps one aggregated offering per model (the pre-D64 behaviour). Tests
+    /// that exercise routes use [`endpoints_fetch`] instead.
+    fn no_endpoints(_model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+        Box::pin(std::future::ready(Ok(
+            r#"{"data":{"endpoints":[]}}"#.to_string()
+        )))
+    }
+
+    /// The recorded `.../endpoints` lookup for the fixture models: keys are
+    /// OpenRouter model ids, values are the endpoint documents. An id absent
+    /// from the map yields no endpoints, like a live model with none.
+    const ENDPOINTS_FIXTURE: &str = include_str!("../../tests/fixtures/openrouter_endpoints.json");
+
+    fn endpoints_fetch(model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+        let body = serde_json::from_str::<serde_json::Value>(ENDPOINTS_FIXTURE)
+            .ok()
+            .and_then(|value| value.get(&model_id).cloned())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| r#"{"data":{"endpoints":[]}}"#.to_string());
+        Box::pin(std::future::ready(Ok(body)))
     }
 
     // -----------------------------------------------------------------------
@@ -1394,6 +1671,7 @@ mod tests {
         let outcome = run_sync(
             &app.state.pool,
             move || std::future::ready(Ok::<_, SyncError>(body.clone())),
+            no_endpoints,
             &actor,
         )
         .await
@@ -1451,6 +1729,7 @@ mod tests {
         let outcome = run_sync(
             &app.state.pool,
             move || std::future::ready(Ok::<_, SyncError>(body.clone())),
+            no_endpoints,
             &actor,
         )
         .await
@@ -1487,7 +1766,7 @@ mod tests {
             ip: "127.0.0.1",
         };
 
-        let outcome = run_sync(&app.state.pool, fixture_fetch, &actor)
+        let outcome = run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("sync");
         assert_eq!(outcome.status, SyncStatus::Success);
@@ -1561,6 +1840,7 @@ mod tests {
         let outcome = run_sync(
             &app.state.pool,
             || std::future::ready(Ok::<_, SyncError>(VARIABLE_FIXTURE.to_string())),
+            no_endpoints,
             &actor,
         )
         .await
@@ -1658,7 +1938,7 @@ mod tests {
         };
 
         for _ in 0..2 {
-            run_sync(&app.state.pool, fixture_fetch, &actor)
+            run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
                 .await
                 .expect("sync");
         }
@@ -1705,7 +1985,7 @@ mod tests {
             "context_length":65536,
             "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        run_sync(&app.state.pool, fetch, &actor)
+        run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -1745,7 +2025,7 @@ mod tests {
              "pricing":{"prompt":"0","completion":"0"}}
         ]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        run_sync(&app.state.pool, fetch, &actor)
+        run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -1793,7 +2073,7 @@ mod tests {
             "hugging_face_id":"Org/Repo-9X",
             "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        let outcome = run_sync(&app.state.pool, fetch, &actor)
+        let outcome = run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("a refused registry refresh must not fail the price sync");
         assert_eq!(outcome.status, SyncStatus::Success);
@@ -1842,7 +2122,7 @@ mod tests {
             "hugging_face_id":"deepseek-ai/DeepSeek-V4.1-Flash-1017",
             "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        run_sync(&app.state.pool, fetch, &actor)
+        run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -1901,7 +2181,7 @@ mod tests {
             "supported_parameters":["temperature"],
             "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        run_sync(&app.state.pool, fetch, &actor)
+        run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -2000,7 +2280,7 @@ mod tests {
         let body = r#"{"data":[{"id":"vendor/x-9x",
             "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#;
         let fetch = || std::future::ready(Ok(body.to_string()));
-        run_sync(&app.state.pool, fetch, &actor)
+        run_sync(&app.state.pool, fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -2033,7 +2313,7 @@ mod tests {
         };
 
         // First sync: every price is new (changed), so every raw value is kept.
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("first sync");
         let first: String =
@@ -2049,7 +2329,7 @@ mod tests {
         );
 
         // Second sync: nothing changed, so no raw values are kept (D19).
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("second sync");
         let mut details: Vec<String> =
@@ -2075,7 +2355,7 @@ mod tests {
         .execute(&app.state.pool)
         .await
         .expect("mark manual");
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("third sync");
         let mut details: Vec<String> =
@@ -2120,7 +2400,7 @@ mod tests {
             .expect("synthetic run");
         }
 
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("sync");
 
@@ -2154,7 +2434,7 @@ mod tests {
             ip: "127.0.0.1",
         };
 
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("first sync");
 
@@ -2176,7 +2456,7 @@ mod tests {
         .await
         .expect("mark manual");
 
-        let outcome = run_sync(&app.state.pool, fixture_fetch, &actor)
+        let outcome = run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("second sync");
         assert_eq!(outcome.status, SyncStatus::Success);
@@ -2208,11 +2488,11 @@ mod tests {
             ip: "127.0.0.1",
         };
 
-        run_sync(&app.state.pool, fixture_fetch, &actor)
+        run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("good sync");
 
-        let outcome = run_sync(&app.state.pool, erroring_fetch, &actor)
+        let outcome = run_sync(&app.state.pool, erroring_fetch, no_endpoints, &actor)
             .await
             .expect("failed sync is still an outcome");
         assert_eq!(outcome.status, SyncStatus::StaleIfError);
@@ -2248,7 +2528,7 @@ mod tests {
             ip: "127.0.0.1",
         };
 
-        let outcome = run_sync(&app.state.pool, erroring_fetch, &actor)
+        let outcome = run_sync(&app.state.pool, erroring_fetch, no_endpoints, &actor)
             .await
             .expect("failed sync is still an outcome");
         assert_eq!(outcome.status, SyncStatus::Error);
@@ -2273,7 +2553,7 @@ mod tests {
             ip: "127.0.0.1",
         };
 
-        run_sync(&app.state.pool, erroring_fetch, &actor)
+        run_sync(&app.state.pool, erroring_fetch, no_endpoints, &actor)
             .await
             .expect("outcome");
         let audits: i64 =
@@ -2388,5 +2668,157 @@ mod tests {
             !snapshot_is_fresh(Some("2026-11-17T12:00:00.000Z"), &now),
             "a timestamp in the future is not fresh"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-provider endpoints (D64)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn per_provider_endpoints_parse_into_routes_and_prices() {
+        let raw = r#"{"data":{"id":"openai/gpt-4o","endpoints":[
+            {"tag":"azure","provider_name":"Azure","pricing":{"prompt":"0.0000025","completion":"0.00001","input_cache_read":"0.00000125"}},
+            {"tag":"openai","provider_name":"OpenAI","pricing":{"prompt":"0.0000022","completion":"0.000009"}}
+        ]}}"#;
+        let endpoints = parse_endpoints(raw).expect("parses");
+        assert_eq!(endpoints.len(), 2);
+        let azure = endpoints
+            .iter()
+            .find(|e| e.route == "azure")
+            .expect("azure");
+        assert_eq!(azure.price.input_per_m, Some(2.5));
+        assert_eq!(azure.price.output_per_m, Some(10.0));
+        assert_eq!(azure.price.cache_read_per_m, Some(1.25));
+        let openai = endpoints
+            .iter()
+            .find(|e| e.route == "openai")
+            .expect("openai");
+        assert_eq!(openai.price.input_per_m, Some(2.2));
+        assert_eq!(openai.price.cache_read_per_m, None);
+        assert!(endpoints.iter().all(|e| !e.price.variable));
+    }
+
+    #[test]
+    fn an_endpoint_without_a_tag_falls_back_to_the_provider_name() {
+        let raw = r#"{"data":{"endpoints":[
+            {"provider_name":"Together","pricing":{"prompt":"0.000001"}},
+            {"provider_name":"   ","pricing":{"prompt":"0.000001"}}
+        ]}}"#;
+        let endpoints = parse_endpoints(raw).expect("parses");
+        assert_eq!(endpoints.len(), 1, "an unnamed provider is skipped");
+        assert_eq!(endpoints[0].route, "together");
+    }
+
+    #[test]
+    fn malformed_endpoint_bodies_fail_parse() {
+        assert!(matches!(
+            parse_endpoints("not json"),
+            Err(SyncError::Json(_))
+        ));
+        assert!(matches!(parse_endpoints("{}"), Err(SyncError::Shape)));
+        assert!(matches!(
+            parse_endpoints(r#"{"data":{}}"#),
+            Err(SyncError::Shape)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_sync_creates_one_offering_per_upstream_provider() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+
+        let outcome = run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
+            .await
+            .expect("sync");
+        assert_eq!(outcome.status, SyncStatus::Success);
+
+        // The recorded run reports the routed models.
+        let detail: String = sqlx::query_scalar("SELECT detail_json FROM price_sync_runs")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("run row");
+        let detail: serde_json::Value = serde_json::from_str(&detail).expect("detail json");
+        assert_eq!(detail["routed_models"], 2, "gpt-4o and deepseek-r1");
+
+        // gpt-4o gained one offering per provider, priced from its endpoint.
+        let mut rows: Vec<(String, Option<f64>, Option<String>)> = sqlx::query_as(
+            "SELECT o.route, p.input_per_m, o.routing_json \
+             FROM offerings o JOIN prices p ON p.offering_id = o.id \
+             JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route <> '' \
+             ORDER BY o.route",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("route offerings");
+        assert_eq!(rows.len(), 2);
+        let azure = rows.remove(0);
+        assert_eq!(azure.0, "azure");
+        assert_eq!(azure.1, Some(2.5));
+        let routing: serde_json::Value =
+            serde_json::from_str(&azure.2.expect("routing json")).expect("routing parses");
+        assert_eq!(routing["provider"]["order"][0], "azure");
+        assert_eq!(routing["provider"]["allow_fallbacks"], false);
+        let openai = rows.remove(0);
+        assert_eq!((openai.0.as_str(), openai.1), ("openai", Some(2.2)));
+
+        // The aggregated (route-less) offering is kept as the fallback.
+        let aggregate: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route = ''",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("aggregate count");
+        assert_eq!(aggregate, 1);
+
+        // A model absent from the endpoint fixture keeps only its aggregate.
+        let llama_offerings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'meta-llama/llama-3.3-70b-instruct'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("llama offerings");
+        assert_eq!(llama_offerings, 1);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_lookup_failure_keeps_the_aggregated_offering() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        fn failing_endpoints(_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(std::future::ready(Err(SyncError::Fetch(
+                "endpoints timed out".to_string(),
+            ))))
+        }
+
+        let outcome = run_sync(&app.state.pool, fixture_fetch, failing_endpoints, &actor)
+            .await
+            .expect("sync");
+        assert_eq!(
+            outcome.status,
+            SyncStatus::Success,
+            "the catalog still synced"
+        );
+
+        let routed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM offerings WHERE route <> ''")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("routed count");
+        assert_eq!(routed, 0, "a failed lookup creates no route offerings");
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM offerings")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("offering count");
+        assert_eq!(total, 5, "every model keeps its aggregated offering");
     }
 }

@@ -60,9 +60,14 @@ pub async fn trigger(
         user_id: &admin.user_id,
         ip: &ip.0,
     };
-    let outcome = openrouter::run_sync(&state.pool, openrouter::fetch_models, &actor)
-        .await
-        .map_err(|e| ApiError::internal("openrouter sync", e).with_request_id(rid))?;
+    let outcome = openrouter::run_sync(
+        &state.pool,
+        openrouter::fetch_models,
+        openrouter::fetch_endpoints,
+        &actor,
+    )
+    .await
+    .map_err(|e| ApiError::internal("openrouter sync", e).with_request_id(rid))?;
 
     Ok(Json(SyncOutcomeView {
         run_id: outcome.run_id,
@@ -129,6 +134,16 @@ mod tests {
         std::future::ready(Ok(FIXTURE.to_string()))
     }
 
+    /// An endpoints fetcher that finds no per-provider endpoints, so the sync
+    /// keeps one aggregated offering per model (the pre-D64 behaviour).
+    fn no_endpoints(
+        _model_id: String,
+    ) -> futures_util::future::BoxFuture<'static, Result<String, openrouter::SyncError>> {
+        Box::pin(std::future::ready(Ok(
+            "{\"data\":{\"endpoints\":[]}}".to_string()
+        )))
+    }
+
     #[tokio::test]
     async fn sync_status_reports_the_last_run_and_snapshot_freshness() {
         let app = TestApp::new().await;
@@ -160,6 +175,7 @@ mod tests {
         let outcome = openrouter::run_sync(
             &app.state.pool,
             fixture_fetch,
+            no_endpoints,
             &Actor {
                 user_id: &admin_id,
                 ip: "127.0.0.1",
@@ -195,6 +211,7 @@ mod tests {
         openrouter::run_sync(
             &app.state.pool,
             || std::future::ready(Err(openrouter::SyncError::Fetch("timed out".to_string()))),
+            no_endpoints,
             &Actor {
                 user_id: &admin_id,
                 ip: "127.0.0.1",
@@ -277,7 +294,7 @@ mod tests {
         };
 
         // The fixture sync creates the openrouter provider and offerings.
-        openrouter::run_sync(&app.state.pool, fixture_fetch, &actor)
+        openrouter::run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("first sync");
         let offering_id: String = sqlx::query_scalar(
@@ -309,7 +326,7 @@ mod tests {
         assert_eq!(override_response.body["source"], "manual");
 
         // A later sync updates everything else but leaves the manual row.
-        openrouter::run_sync(&app.state.pool, fixture_fetch, &actor)
+        openrouter::run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("second sync");
         let (source, input, output): (String, Option<f64>, Option<f64>) = sqlx::query_as(

@@ -1367,6 +1367,52 @@ enabled state and is not a hard gate; a caller that ignores it and sends a large
 prompt still succeeds while a large-context member is eligible. `pool = "all"`
 combos stay null because their candidate set is the whole catalog and a minimum
 there would advertise the smallest catalog model's window.
+### D64. OpenRouter per-provider offerings, pinned provider, and combo ordering knobs
+
+**Decision (2026-11-27):** OpenRouter fronts many upstream providers and quotes
+a *different price per provider* for the same model through
+`GET /api/v1/models/{author}/{slug}/endpoints`. The gateway stops treating an
+OpenRouter model as one aggregated offering:
+
+1. **Storage.** Each upstream provider becomes its own offering under the
+   single managed `openrouter` provider row (one credential, many offerings).
+   Two columns carry it: `offerings.route` (the provider slug from the
+   endpoint's `tag`, e.g. `azure`; `''` for every non-routed offering) and
+   `offerings.routing_json` (the request-body fragment that pins it, e.g.
+   `{"provider":{"order":["azure"],"allow_fallbacks":false}}`). The unique key
+   becomes `(provider_id, upstream_model_id, route)`; the aggregated
+   route-less offering is still written so a model whose endpoint lookup
+   fails keeps serving.
+2. **Sync.** `run_sync` fetches the catalog, then every managed model's
+   endpoints (bounded concurrency, per-model failures logged and tolerated)
+   *before* the transaction, and writes one priced offering per route. The
+   routed models and any changed route prices are recorded in the run's
+   `detail_json`.
+3. **Routing.** The request path merges `routing_json` into the upstream body
+   (the fragment wins over a client-supplied `provider`; `model`, `messages`,
+   `stream`, and `max_tokens` are written last and never overridden), so the
+   provider whose price we ranked is the provider that runs. When a model has
+   routed offerings, its route-less aggregate is dropped from plain-model and
+   catalog-pool candidates (`drop_superseded_aggregates`); explicit combo
+   members are left alone because the operator named those rows.
+4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
+   (`price` — cheapest model first — or `quality` — best model first) orders
+   the models, and `provider_selection` (`mix_price` — cheapest at the combo's
+   own blend — `speed`, or `reliability`) orders the providers of one model
+   once it is chosen. Both default to the cheapest behaviour that matches the
+   pre-D64 pool order. A member pool keeps its explicit strategy order.
+5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0-100, default
+   5) keeps a session on its pinned provider while it costs no more than that
+   much over the cheapest ready candidate; a bigger gap moves the session and
+   rewrites the pin (the decision records `replaced_why: "price_moved"`).
+
+**Why:** without the provider pin, the price we score is not the price that
+runs — OpenRouter would pick a provider itself. Storing the fragment instead of
+hard-coding `provider.order` in the request builder keeps the hot path generic
+for other routers. The two axes are separate because quality is constant across
+a model's providers: a combo that ranks models by quality still wants the
+cheapest (or fastest) provider of the chosen model, which a single weight
+vector cannot express.
 
 ### D64. The request log names its real target, and its origin error is durable
 
