@@ -405,11 +405,11 @@ mod tests {
             "headers": { "authorization": "Bearer {{secret}}" },
             "allow_private": true,
             "catalog": {
-                "entries": "/data",
-                "model_id": "/id",
-                "input": "/pricing_usd_per_million_tokens/balanced/input",
-                "output": "/pricing_usd_per_million_tokens/balanced/output",
-                "cache_read": "/pricing_usd_per_million_tokens/balanced/cached_input",
+                "entries": "$.data",
+                "model_id": "$.id",
+                "input": "$.pricing_usd_per_million_tokens.balanced.input",
+                "output": "$.pricing_usd_per_million_tokens.balanced.output",
+                "cache_read": "$.pricing_usd_per_million_tokens.balanced.cached_input",
                 "unit": {
                     "source": "custom",
                     "multiplier": 0.01,
@@ -418,10 +418,10 @@ mod tests {
                     "display": { "symbol": "$", "decimals": 4 },
                     "note": "quoted in cents — verify against an invoice"
                 },
-                "modalities_input": "/input_modalities",
-                "modalities_output": "/output_modalities",
-                "context_length": "/context_length",
-                "max_output": "/max_output_tokens",
+                "modalities_input": "$.input_modalities",
+                "modalities_output": "$.output_modalities",
+                "context_length": "$.context_length",
+                "max_output": "$.max_output_tokens",
                 "apply_on_discovery": apply_on_discovery
             }
         })
@@ -432,12 +432,12 @@ mod tests {
             "url": url,
             "allow_private": true,
             "balance": {
-                "balance": "/balance",
-                "available": "/available",
-                "currency": "/currency",
-                "period_spend": "/period_spend",
-                "burn_rate": "/burn_rate",
-                "days_remaining": "/days_remaining",
+                "balance": "$.balance",
+                "available": "$.available",
+                "currency": "$.currency",
+                "period_spend": "$.period_spend",
+                "burn_rate": "$.burn_rate",
+                "days_remaining": "$.days_remaining",
                 "refresh_seconds": 900
             }
         })
@@ -516,7 +516,7 @@ mod tests {
         )
         .await;
         assert_eq!(fetched.status, StatusCode::OK);
-        assert_eq!(fetched.body["config"]["catalog"]["entries"], "/data");
+        assert_eq!(fetched.body["config"]["catalog"]["entries"], "$.data");
 
         let absent = send(
             s.router.clone(),
@@ -597,7 +597,7 @@ mod tests {
         );
         assert_eq!(
             response.body[0]["configs"]["balance"]["balance"]["balance"],
-            "/balance"
+            "$.balance"
         );
         // OpenRouter's balance is best effort and documented as such.
         assert_eq!(
@@ -606,11 +606,11 @@ mod tests {
         );
         assert_eq!(
             response.body[1]["configs"]["balance"]["balance"]["balance"],
-            "/data/total_credits"
+            "$.data.total_credits - $.data.total_usage"
         );
         assert_eq!(
             response.body[1]["configs"]["balance"]["balance"]["period_spend"],
-            "/data/total_usage"
+            "$.data.total_usage"
         );
     }
 
@@ -695,7 +695,7 @@ mod tests {
             "config": {
                 "url": "/models",
                 "allow_private": true,
-                "catalog": { "entries": "/data", "model_id": "/id" }
+                "catalog": { "entries": "$.data", "model_id": "$.id" }
             }
         });
         let sample = send(
@@ -960,10 +960,10 @@ mod tests {
             "url": "/models",
             "allow_private": true,
             "catalog": {
-                "entries": "/data",
-                "model_id": "/id",
-                "input": "/price/input",
-                "output": "/price/output",
+                "entries": "$.data",
+                "model_id": "$.id",
+                "input": "$.price.input",
+                "output": "$.price.output",
                 "units": "per_million_tokens"
             }
         });
@@ -1016,10 +1016,10 @@ mod tests {
             "url": "/models",
             "allow_private": true,
             "catalog": {
-                "entries": "/data",
-                "model_id": "/id",
-                "input": "/price/input",
-                "output": "/price/output",
+                "entries": "$.data",
+                "model_id": "$.id",
+                "input": "$.price.input",
+                "output": "$.price.output",
                 "unit": {
                     "source": "per_million_tokens",
                     "currency": "EUR",
@@ -1093,6 +1093,148 @@ mod tests {
         )
         .await;
         assert!(preview.body.get("prices").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_retired_pointer_syntax_is_refused_by_put() {
+        let s = seeded("https://api.example.com/v1").await;
+        let mut config = catalog_config("/models", false);
+        config["catalog"]["input"] = json!("/pricing/input");
+        let response = send(
+            s.router.clone(),
+            api_request(
+                Method::PUT,
+                &format!("/api/providers/{}/connectors/catalog", s.provider_id),
+                Some(json!({ "config": config })),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            response.body
+        );
+        let message = response.body["error"]["message"].as_str().expect("message");
+        assert!(message.contains("catalog.input"), "{message}");
+        assert!(
+            message.contains("$/") || message.contains("column") || message.contains("unexpected"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_arithmetic_price_field_scales_the_extracted_value() {
+        let (addr, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"alpha","price":{"prompt":"0.0003","completion":"0.0006"}}]}"#,
+        )
+        .await;
+        let base = format!("http://{addr}/v1");
+        let s = seeded(&base).await;
+        let mut config = catalog_config("/models", false);
+        config["catalog"]["input"] = json!("$.price.prompt * 1000000");
+        config["catalog"]["output"] = json!("$.price.completion * 1000000");
+        config["catalog"]["unit"]["source"] = json!("per_million_tokens");
+        config["catalog"]["unit"]["multiplier"] = json!(1.0);
+        put_connector(&s, "catalog", config).await;
+
+        let test = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/test", s.provider_id),
+                Some(json!({})),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(test.status, StatusCode::OK, "{}", test.body);
+        assert_eq!(test.body["entries_seen"], 1);
+        assert_eq!(test.body["samples"][0]["input_per_m"], 300.0);
+        assert_eq!(test.body["samples"][0]["output_per_m"], 600.0);
+        assert_eq!(test.body["samples"][0]["error"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_text_price_skips_the_entry_and_null_is_not_zero() {
+        let (addr, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"free","price":{"prompt":null,"completion":null}},{"id":"text","price":{"prompt":"call us","completion":2}}]}"#,
+        )
+        .await;
+        let base = format!("http://{addr}/v1");
+        let s = seeded(&base).await;
+        let mut config = catalog_config("/models", false);
+        config["catalog"]["input"] = json!("$.price.prompt");
+        config["catalog"]["output"] = json!("$.price.completion");
+        put_connector(&s, "catalog", config).await;
+
+        let test = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/test", s.provider_id),
+                Some(json!({})),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(test.status, StatusCode::OK, "{}", test.body);
+        assert_eq!(test.body["entries_seen"], 2);
+        assert_eq!(test.body["matched"], 0, "neither entry is priced");
+        assert_eq!(test.body["skipped"], 2);
+        let errors = test.body["errors"].as_array().expect("errors");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.as_str().is_some_and(|text| text.contains("null"))),
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.as_str().is_some_and(|text| text.contains("call us"))),
+            "{errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_negative_calculated_price_becomes_variable_not_a_number() {
+        let (addr, _) = spawn_static_server(
+            "200 OK",
+            r#"{"data":[{"id":"auto","price":{"prompt":-5,"completion":2}}]}"#,
+        )
+        .await;
+        let base = format!("http://{addr}/v1");
+        let s = seeded(&base).await;
+        let mut config = catalog_config("/models", false);
+        config["catalog"]["input"] = json!("$.price.prompt * 2");
+        config["catalog"]["output"] = json!("$.price.completion");
+        put_connector(&s, "catalog", config).await;
+
+        let test = send(
+            s.router.clone(),
+            api_request(
+                Method::POST,
+                &format!("/api/providers/{}/connectors/catalog/test", s.provider_id),
+                Some(json!({})),
+                Some(&s.cookie),
+                Some(&s.csrf),
+            ),
+        )
+        .await;
+        assert_eq!(test.status, StatusCode::OK, "{}", test.body);
+        assert_eq!(test.body["matched"], 1, "a variable entry is still mapped");
+        assert_eq!(test.body["samples"][0]["variable_price"], true);
+        assert_eq!(
+            test.body["samples"][0]["input_per_m"],
+            serde_json::Value::Null
+        );
     }
 
     #[tokio::test]
@@ -1465,7 +1607,7 @@ mod tests {
                 Method::PUT,
                 &format!("/api/providers/{}/connectors/catalog", s.provider_id),
                 Some(json!({
-                    "config": { "url": "/models", "catalog": { "entries": "data", "model_id": "/id", "input": "/price" } }
+                    "config": { "url": "/models", "catalog": { "entries": "data", "model_id": "$.id", "input": "$.price" } }
                 })),
                 Some(&s.cookie),
                 Some(&s.csrf),

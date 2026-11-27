@@ -1610,10 +1610,10 @@ mod tests {
                             "url": "/models",
                             "allow_private": true,
                             "catalog": {
-                                "entries": "/data",
-                                "model_id": "/id",
-                                "input": "/price/input",
-                                "output": "/price/output"
+                                "entries": "$.data",
+                                "model_id": "$.id",
+                                "input": "$.price.input",
+                                "output": "$.price.output"
                             }
                         }
                     }
@@ -1637,7 +1637,7 @@ mod tests {
         .fetch_one(&app.state.pool)
         .await
         .expect("catalog");
-        assert!(catalog.contains("/price/input"), "{catalog}");
+        assert!(catalog.contains("$.price.input"), "{catalog}");
         assert!(
             !catalog.contains("pricing_usd_per_million_tokens"),
             "{catalog}"
@@ -1679,10 +1679,10 @@ mod tests {
                     "config": {
                         "url": "/models",
                         "catalog": {
-                            "entries": "/data",
-                            "model_id": "/id",
-                            "input": "/price/input",
-                            "output": "/price/output"
+                            "entries": "$.data",
+                            "model_id": "$.id",
+                            "input": "$.price.input",
+                            "output": "$.price.output"
                         }
                     },
                     "enabled": true
@@ -1724,7 +1724,7 @@ mod tests {
         .fetch_one(&app.state.pool)
         .await
         .expect("catalog");
-        assert!(catalog.contains("/price/input"), "edit kept: {catalog}");
+        assert!(catalog.contains("$.price.input"), "edit kept: {catalog}");
 
         // With force: the preset replaces the edit.
         let forced = send(

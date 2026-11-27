@@ -43,7 +43,11 @@ export interface PriceUnit {
   note: string | null;
 }
 
-/** JSON Pointers into one model entry of the catalog payload (D41). */
+/**
+ * Paths and numeric expressions into one model entry of the catalog payload
+ * (D41, D61). The five price fields may be expressions; the metadata fields
+ * are lone paths.
+ */
 export interface CatalogConfig {
   entries: string;
   model_id: string;
@@ -75,16 +79,16 @@ export interface BalanceUnit {
   note: string | null;
 }
 
-/** Pointers into the balance payload (all relative to the response root). */
+/** Expressions into the balance payload (all relative to the response root). */
 export interface BalanceConfig {
-  balance: string;
   /**
-   * Optional pointer subtracted from `balance` before the multiplier, e.g.
-   * OpenRouter's remaining = total_credits − total_usage.
+   * A numeric expression, e.g. `$.balance`. A payload that publishes a total
+   * and a usage separately uses `$.total_credits - $.total_usage`; there is no
+   * separate `subtract` field (D61).
    */
-  subtract: string | null;
+  balance: string;
   available: string | null;
-  /** Literal currency code or a pointer to a currency string. */
+  /** Literal currency code, or a `$.path` to a currency string. */
   currency: string | null;
   period_spend: string | null;
   burn_rate: string | null;
@@ -201,7 +205,7 @@ export interface ExtractedBalance {
   /** USD when routable, otherwise the amount in `currency`. */
   balance_usd: number | null;
   currency: string;
-  /** The value after `subtract`, before the unit multiplier. */
+  /** The value the balance expression produced, before the unit multiplier. */
   raw: number | null;
   /** `raw × multiplier`, in the source currency. */
   converted: number | null;
@@ -296,7 +300,6 @@ export function emptyConnectorConfig(kind: ConnectorKind): ConnectorConfig {
       kind === 'balance'
         ? {
             balance: '/balance',
-            subtract: null,
             available: null,
             currency: 'USD',
             period_spend: null,

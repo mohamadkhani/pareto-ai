@@ -334,8 +334,7 @@ mod tests {
             .and_then(|configs| configs.balance.as_ref())
             .and_then(|config| config.balance.as_ref())
             .expect("openrouter balance");
-        assert_eq!(balance.balance, "/data/total_credits");
-        assert_eq!(balance.subtract.as_deref(), Some("/data/total_usage"));
+        assert_eq!(balance.balance, "$.data.total_credits - $.data.total_usage");
         assert_eq!(balance.unit.multiplier, 1.0);
 
         let sail = get("sailresearch").expect("sailresearch");
@@ -352,8 +351,8 @@ mod tests {
             Some("quoted in cents — verify against an invoice")
         );
         assert_eq!(
-            sail_balance.balance, "/balance",
-            "pointers are unchanged; only the unit differs"
+            sail_balance.balance, "$.balance",
+            "only the path syntax differs; the unit is the same"
         );
         let sail_catalog = sail
             .configs

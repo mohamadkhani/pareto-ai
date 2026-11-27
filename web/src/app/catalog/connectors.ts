@@ -25,6 +25,7 @@ import {
   detectTemplateId,
   detectTier,
   entryRelativePointer,
+  expressionIssue,
   formatConverted,
   resolvePointer,
   rewriteTier,
@@ -90,7 +91,6 @@ interface CatalogForm {
 
 interface BalanceForm {
   balance: string;
-  subtract: string;
   available: string;
   currency: string;
   period_spend: string;
@@ -186,7 +186,6 @@ function emptyCatalogForm(): CatalogForm {
 function emptyBalanceForm(): BalanceForm {
   return {
     balance: '/balance',
-    subtract: '',
     available: '',
     currency: 'USD',
     period_spend: '',
@@ -243,8 +242,10 @@ function normalizeTab(tab: string): string {
 /**
  * Provider connectors dialog (D42): prices, balance, and health documents,
  * each configured by pointing at the provider's own payload. Fetching a sample
- * and clicking a value fills the active pointer; a preview shows the converted
- * prices before anything is saved. The dialog writes only on Save/Refresh.
+ * and clicking a value fills the active field with a `$.` path; the price and
+ * balance fields also accept arithmetic over paths (D61). A preview shows the
+ * converted prices before anything is saved. The dialog writes only on
+ * Save/Refresh.
  */
 @Component({
   selector: 'app-connectors',
@@ -296,7 +297,6 @@ export class Connectors implements OnInit {
   ];
   protected readonly balanceFields: readonly { key: BalancePointerField; label: string }[] = [
     { key: 'balance', label: 'Balance (required)' },
-    { key: 'subtract', label: 'Subtract (optional)' },
     { key: 'available', label: 'Available flag' },
     { key: 'period_spend', label: 'Period spend' },
     { key: 'burn_rate', label: 'Burn rate' },
@@ -432,6 +432,35 @@ export class Connectors implements OnInit {
       .map((assignment) => assignment.pointer)
       .filter((pointer) => pointer !== '');
     return detectTier(this.samples().catalog?.document, pointers);
+  });
+
+  /**
+   * Per-field expression checks for the active kind. Only the obvious mistakes
+   * are caught here (D61); the server validates the whole document on save and
+   * its message names the field and the column.
+   */
+  protected readonly fieldIssues = computed<Record<string, string | null>>(() => {
+    const kind = this.kind();
+    const forms = this.forms();
+    const issues: Record<string, string | null> = {};
+    if (kind === 'catalog') {
+      const form = forms.catalog.catalog;
+      for (const field of this.catalogFields) {
+        const numeric = PRICE_POINTER_FIELDS.some((price) => price === field.key);
+        issues[field.key] = expressionIssue(form[field.key], !numeric);
+      }
+      return issues;
+    }
+    if (kind === 'balance') {
+      const form = forms.balance.balance;
+      for (const field of this.balanceFields) {
+        const numeric = field.key !== 'available';
+        issues[field.key] = expressionIssue(form[field.key], !numeric);
+      }
+      return issues;
+    }
+    issues['ok_pointer'] = expressionIssue(forms.health.health.ok_pointer, true);
+    return issues;
   });
 
   protected readonly allWarnings = computed<readonly string[]>(() => {
@@ -949,21 +978,27 @@ export class Connectors implements OnInit {
     if (form.url.trim() === '') {
       return 'A URL is required. Use an absolute URL or a path beginning with /.';
     }
+    // The client check catches the obvious mistakes; the server validates the
+    // whole expression grammar and names the field and column (D61).
+    const issue = Object.values(this.fieldIssues()).find((value) => value !== null);
+    if (issue !== undefined) {
+      return issue;
+    }
     if (kind === 'catalog') {
       const catalog = form.catalog;
       if (catalog.entries.trim() === '' || catalog.model_id.trim() === '') {
-        return 'The entries and model id pointers are required.';
+        return 'The entries and model id paths are required.';
       }
       const prices = priceAssignments(catalog).filter((assignment) => assignment.pointer !== '');
       if (prices.length === 0) {
-        return 'Pick at least one price pointer (input or output).';
+        return 'Pick at least one price field (input or output).';
       }
       if (catalog.unit_source === 'custom' && numberOr(catalog.unit_multiplier, 0) <= 0) {
         return 'A custom multiplier must be greater than zero.';
       }
     }
     if (kind === 'balance' && form.balance.balance.trim() === '') {
-      return 'The balance pointer is required.';
+      return 'The balance expression is required.';
     }
     return null;
   }
@@ -1157,7 +1192,6 @@ function catalogFormFromConfig(config: CatalogConfig): CatalogForm {
 function balanceFormFromConfig(config: BalanceConfig): BalanceForm {
   return {
     balance: config.balance,
-    subtract: config.subtract ?? '',
     available: config.available ?? '',
     currency: config.currency ?? '',
     period_spend: config.period_spend ?? '',
@@ -1207,7 +1241,6 @@ function catalogConfigFromForm(form: CatalogForm): CatalogConfig {
 function balanceConfigFromForm(form: BalanceForm): BalanceConfig {
   return {
     balance: form.balance.trim(),
-    subtract: pointerOrNull(form.subtract),
     available: pointerOrNull(form.available),
     currency: form.currency.trim() === '' ? null : form.currency.trim(),
     period_spend: pointerOrNull(form.period_spend),

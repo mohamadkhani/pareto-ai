@@ -544,7 +544,6 @@ describe('Providers', () => {
           allow_private: false,
           balance: {
             balance: '/balance',
-            subtract: null,
             available: null,
             currency: 'USD',
             period_spend: null,
@@ -575,9 +574,9 @@ describe('Providers', () => {
           headers: {},
           allow_private: false,
           catalog: {
-            entries: '/data',
-            model_id: '/id',
-            input: '/price/input',
+            entries: '$.data',
+            model_id: '$.id',
+            input: '$.price.input',
             output: null,
             cache_read: null,
             cache_write: null,

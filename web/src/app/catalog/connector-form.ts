@@ -1,6 +1,7 @@
 /**
- * Pure helpers for the connector dialog: JSON Pointer building/resolution,
- * unit conversion and display (D44), tier detection, and template detection.
+ * Pure helpers for the connector dialog: `$.` path building/resolution,
+ * expression syntax checks (D61), unit conversion and display (D44), tier
+ * detection, and template detection.
  *
  * Kept free of Angular so the picking and conversion rules are unit-testable.
  */
@@ -27,7 +28,7 @@ export interface PointerAssignment {
 export interface TierInfo {
   /** Segment index shared by every picked pointer. */
   index: number;
-  /** Pointer of the parent object, e.g. `/pricing_usd_per_million_tokens`. */
+  /** Pointer of the parent object, e.g. `$.pricing_usd_per_million_tokens`. */
   parentPointer: string;
   /** The tier currently selected, e.g. `balanced`. */
   current: string;
@@ -35,42 +36,67 @@ export interface TierInfo {
   options: string[];
 }
 
-/** Escapes one RFC 6901 segment (`~` → `~0`, `/` → `~1`). */
-export function escapePointerSegment(segment: string | number): string {
-  return String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
-}
-
-/** Unescapes one RFC 6901 segment. */
-export function unescapePointerSegment(segment: string): string {
-  return segment.replace(/~1/g, '/').replace(/~0/g, '~');
-}
-
-/** Builds an RFC 6901 pointer from tree path segments; the root is `''`. */
+/**
+ * Builds the expression-language path from tree segments (`D61`): the root is
+ * `$`, object keys are joined with `.`, and a numeric array index uses `[n]`.
+ */
 export function pointerFromPath(path: readonly (string | number)[]): string {
-  return path.map((segment) => `/${escapePointerSegment(segment)}`).join('');
+  let out = '$';
+  for (const segment of path) {
+    if (typeof segment === 'number' || /^\d+$/.test(String(segment))) {
+      out += `[${segment}]`;
+    } else {
+      out += `.${segment}`;
+    }
+  }
+  return out;
 }
 
-/** Splits a pointer into unescaped segments; the root yields `[]`. */
+/** Splits `$.data[0].pricing.input` into `['data', '0', 'pricing', 'input']`. */
 export function splitPointer(pointer: string): string[] {
-  if (pointer === '') {
+  const trimmed = pointer.trim();
+  if (trimmed === '' || trimmed === '$') {
     return [];
   }
-  return pointer
-    .split('/')
-    .slice(1)
-    .map((segment) => unescapePointerSegment(segment));
+  if (!trimmed.startsWith('$')) {
+    return [];
+  }
+  const segments: string[] = [];
+  const rest = trimmed.slice(1);
+  const token = /^(?:\.([A-Za-z0-9_-]+))|(?:\[(\d+)\])/;
+  let consumed = 0;
+  while (consumed < rest.length) {
+    const match = token.exec(rest.slice(consumed));
+    if (match === null) {
+      return [];
+    }
+    const key = match[1];
+    const index = match[2];
+    segments.push(key ?? index ?? '');
+    consumed += match[0].length;
+  }
+  return segments;
 }
 
 /**
- * Resolves an RFC 6901 pointer against a parsed JSON document; returns
- * `undefined` when a step is missing or an array index is malformed.
+ * Resolves a lone path against a parsed JSON document; returns `undefined`
+ * when a step is missing or an array index is malformed. An expression with
+ * arithmetic is not resolvable here, so it yields `undefined`.
  */
 export function resolvePointer(document: unknown, pointer: string): unknown {
-  if (pointer === '') {
+  const trimmed = pointer.trim();
+  if (trimmed === '$') {
     return document;
   }
+  if (!trimmed.startsWith('$')) {
+    return undefined;
+  }
+  const segments = splitPointer(trimmed);
+  if (segments.length === 0 && trimmed !== '$') {
+    return undefined;
+  }
   let current: unknown = document;
-  for (const segment of splitPointer(pointer)) {
+  for (const segment of segments) {
     if (Array.isArray(current)) {
       if (!/^\d+$/.test(segment)) {
         return undefined;
@@ -89,6 +115,59 @@ export function resolvePointer(document: unknown, pointer: string): unknown {
     }
   }
   return current;
+}
+
+/** True when the field is a lone path the tree could resolve. */
+export function isPath(expression: string): boolean {
+  return expression.trim().startsWith('$');
+}
+
+/**
+ * A light client-side check of one field, so the operator sees the obvious
+ * mistakes before the server validates the whole document (D61). The server
+ * (`server/src/expression.rs`) is authoritative; this only catches an illegal
+ * character, an unbalanced parenthesis, a malformed path, and an operator in a
+ * field that must be a lone path.
+ */
+export function expressionIssue(source: string, mustBePath = false): string | null {
+  const text = source.trim();
+  if (text === '') {
+    return null;
+  }
+  if (text.startsWith('/')) {
+    return 'Paths start with $, not /. Use $.pricing.prompt.';
+  }
+  const illegal = /[^A-Za-z0-9_$.[\]+\-*/(), \t\n]/.exec(text);
+  if (illegal !== null) {
+    return `The character ${JSON.stringify(illegal[0])} is not part of an expression.`;
+  }
+  let depth = 0;
+  for (const character of text) {
+    if (character === '(') {
+      depth += 1;
+    } else if (character === ')') {
+      depth -= 1;
+      if (depth < 0) {
+        return 'A closing parenthesis has no opening one.';
+      }
+    }
+  }
+  if (depth !== 0) {
+    return 'A parenthesis is not closed.';
+  }
+  if (!text.includes('$')) {
+    return 'An expression needs a path, e.g. $.pricing.prompt.';
+  }
+  // Every `$` must begin a path with at least one key or index.
+  const bare = /\$(?![.[A-Za-z0-9_-])/.test(text) || /\$(?=[\s)]|$)/.test(text);
+  const first = /\$(?:\.([A-Za-z0-9_-]+)|\[(\d+)\])*/.exec(text);
+  if (first === null || first[0] === '$' || bare) {
+    return 'A path needs a key after $, e.g. $.data or $.data[0].id.';
+  }
+  if (mustBePath && text.replace(first[0], '').trim() !== '') {
+    return 'This field takes one path only; remove the operator.';
+  }
+  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -228,7 +307,7 @@ export function unitSourceLabel(unit: PriceUnit): string {
  */
 export function detectTier(document: unknown, pointers: readonly string[]): TierInfo | null {
   const split = pointers
-    .filter((pointer) => pointer.startsWith('/'))
+    .filter((pointer) => isPath(pointer))
     .map((pointer) => splitPointer(pointer));
   if (split.length < 2) {
     return null;
@@ -283,12 +362,27 @@ export function entryRelativePointer(entries: string, pointer: string): string {
   if (prefix === '' || pointer === prefix) {
     return pointer;
   }
-  if (!pointer.startsWith(`${prefix}/`)) {
+  const prefixSegments = splitPointer(prefix);
+  const pointerSegments = splitPointer(pointer);
+  if (prefixSegments.length === 0) {
     return pointer;
   }
-  const rest = pointer.slice(prefix.length);
-  const entryIndex = /^\/\d+(?=\/|$)/.exec(rest);
-  return entryIndex === null ? rest : rest.slice(entryIndex[0].length);
+  if (pointerSegments.length <= prefixSegments.length) {
+    return pointer;
+  }
+  const matchesPrefix = prefixSegments.every(
+    (segment, index) => pointerSegments[index] === segment,
+  );
+  if (!matchesPrefix) {
+    return pointer;
+  }
+  const entryIndex = pointerSegments[prefixSegments.length];
+  // `entries` may already point at one entry (`$.data[0]`), in which case the
+  // next segment is the field itself; otherwise it is the array index to drop.
+  if (entryIndex === undefined || !/^\d+$/.test(entryIndex)) {
+    return pointerFromPath(pointerSegments.slice(prefixSegments.length));
+  }
+  return pointerFromPath(pointerSegments.slice(prefixSegments.length + 1));
 }
 
 /** Rewrites the shared tier segment of every matching pointer. */
@@ -387,4 +481,4 @@ export type CatalogPointerField =
   | 'max_output';
 
 export type BalancePointerField =
-  'balance' | 'subtract' | 'available' | 'period_spend' | 'burn_rate' | 'days_remaining';
+  'balance' | 'available' | 'period_spend' | 'burn_rate' | 'days_remaining';

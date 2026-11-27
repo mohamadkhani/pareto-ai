@@ -1,0 +1,22 @@
+-- 0020_expression_fields: connector fields are expressions, not JSON Pointers
+-- (decision D61).
+--
+-- A connector field used to be an RFC 6901 JSON Pointer (`/pricing/prompt`).
+-- It is now a small numeric expression (`$.pricing.prompt`, or
+-- `$.pricing.prompt * 1000000`), and the server refuses the retired `/path`
+-- form so there is exactly one syntax to read and to document.
+--
+-- The rewrite is a one-time data repair in Rust
+-- (`connectors::migrate_pointer_fields`) run at the migration boundary, because
+-- SQLite has no built-in function that rewrites a path string. The repair is
+-- guarded by a `db_meta` key, so this migration stays a no-op and only records
+-- that the boundary happened.
+--
+-- `balance.subtract` is removed: `$.total_credits - $.total_usage` expresses
+-- the same thing and needs no second field. The repair folds a stored
+-- `subtract` into `balance` before rewriting the paths.
+--
+-- Nothing to change in the physical schema: `provider_connectors.config_json`
+-- is already `TEXT`, and the meaning of its strings is what changed.
+
+SELECT 1;

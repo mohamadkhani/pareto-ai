@@ -65,6 +65,9 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
     crate::catalog::repair_duplicate_models(&pool)
         .await
         .context("repairing duplicate catalog models")?;
+    crate::connectors::migrate_pointer_fields(&pool)
+        .await
+        .context("rewriting connector fields to expression syntax")?;
 
     Ok(pool)
 }

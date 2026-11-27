@@ -63,7 +63,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Collapsible JSON tree. Container rows expand and collapse; number and string
- * leaves are buttons that emit their RFC 6901 pointer when `pickable`.
+ * leaves are buttons that emit their `$.` path when `pickable`.
  */
 @Component({
   selector: 'app-json-tree',

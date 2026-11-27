@@ -15,6 +15,7 @@ mod config;
 mod connectors;
 mod db;
 mod error;
+mod expression;
 mod ip;
 #[cfg(test)]
 mod load_test;

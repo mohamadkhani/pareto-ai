@@ -37,6 +37,20 @@
 //! * A connector failure never changes prices or routing: catalog/balance work
 //!   runs in its own transaction and a failed fetch writes only a
 //!   `connector_runs` row.
+//!
+//! # Field expressions (D61)
+//!
+//! Every field that used to be a bare JSON Pointer is now a small numeric
+//! expression: a lone path (`$.pricing.prompt`, `$.data[0].input`) or
+//! arithmetic over paths and constants (`$.pricing.prompt * 1000000`,
+//! `$.total_credits - $.total_usage`, `max($.balance, 0)`). [`crate::expression`]
+//! owns the grammar. Fields that read a string, an array, or a boolean
+//! (`entries`, `model_id`, `modalities_*`, `available`, `ok_pointer`, and the
+//! read-only `context_length`/`max_output`) accept a lone path only, because
+//! arithmetic on a string has no meaning. The retired `/path` JSON-Pointer
+//! syntax is refused; migration `0020_expression_fields` rewrote stored
+//! documents. Numeric strings are normalised (`"2$"` → `2`), and `null` or
+//! unparseable text is an error, never zero (D10).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -48,6 +62,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use utoipa::ToSchema;
 
 use crate::catalog::{self, Actor, CatalogError, SyncPrice, SyncPriceOutcome, headers};
+use crate::expression::{self, Expression, ExpressionError};
 use crate::secrets::SecretBox;
 
 /// One fetch round trip, from connect to body.
@@ -253,15 +268,10 @@ fn four() -> u8 {
 /// Balance document pointers (all relative to the response root).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct BalanceConfig {
-    /// Pointer to the remaining balance; required and numeric.
+    /// Numeric expression for the remaining balance; required. A lone path
+    /// (`$.balance`) is the common case; `$.total_credits - $.total_usage`
+    /// replaces the old `subtract` field (D61).
     pub balance: String,
-    /// Optional pointer subtracted from `balance` **before** the unit
-    /// multiplier, for payloads that publish a total and a usage separately
-    /// (OpenRouter's credits endpoint: remaining = total_credits −
-    /// total_usage). A missing or non-numeric value is an error naming the
-    /// pointer, never a silent zero.
-    #[serde(default)]
-    pub subtract: Option<String>,
     #[serde(default)]
     pub available: Option<String>,
     /// Literal currency or a pointer to a currency string. When absent the
@@ -344,21 +354,27 @@ impl ConnectorConfig {
                 let catalog = self.catalog.as_ref().ok_or_else(|| {
                     ConnectorError::Invalid("a catalog connector needs a catalog section".into())
                 })?;
-                validate_pointer(&catalog.entries, "catalog.entries")?;
-                validate_pointer(&catalog.model_id, "catalog.model_id")?;
+                validate_path(&catalog.entries, "catalog.entries")?;
+                validate_path(&catalog.model_id, "catalog.model_id")?;
                 for (value, field) in [
                     (&catalog.input, "catalog.input"),
                     (&catalog.output, "catalog.output"),
                     (&catalog.cache_read, "catalog.cache_read"),
                     (&catalog.cache_write, "catalog.cache_write"),
                     (&catalog.reasoning, "catalog.reasoning"),
+                ] {
+                    if let Some(pointer) = value {
+                        validate_numeric(pointer, field)?;
+                    }
+                }
+                for (value, field) in [
                     (&catalog.modalities_input, "catalog.modalities_input"),
                     (&catalog.modalities_output, "catalog.modalities_output"),
                     (&catalog.context_length, "catalog.context_length"),
                     (&catalog.max_output, "catalog.max_output"),
                 ] {
                     if let Some(pointer) = value {
-                        validate_pointer(pointer, field)?;
+                        validate_path(pointer, field)?;
                     }
                 }
                 if catalog.input.is_none() && catalog.output.is_none() {
@@ -389,16 +405,17 @@ impl ConnectorConfig {
                 let balance = self.balance.as_ref().ok_or_else(|| {
                     ConnectorError::Invalid("a balance connector needs a balance section".into())
                 })?;
-                validate_pointer(&balance.balance, "balance.balance")?;
+                validate_numeric(&balance.balance, "balance.balance")?;
+                if let Some(pointer) = balance.available.as_deref() {
+                    validate_path(pointer, "balance.available")?;
+                }
                 for (value, field) in [
-                    (&balance.subtract, "balance.subtract"),
-                    (&balance.available, "balance.available"),
                     (&balance.period_spend, "balance.period_spend"),
                     (&balance.burn_rate, "balance.burn_rate"),
                     (&balance.days_remaining, "balance.days_remaining"),
                 ] {
                     if let Some(pointer) = value {
-                        validate_pointer(pointer, field)?;
+                        validate_numeric(pointer, field)?;
                     }
                 }
                 if balance.unit.currency.trim().is_empty() {
@@ -417,9 +434,9 @@ impl ConnectorConfig {
                     ));
                 }
                 if let Some(pointer) = balance.currency.as_deref()
-                    && pointer.starts_with('/')
+                    && pointer.trim_start().starts_with('$')
                 {
-                    validate_pointer(pointer, "balance.currency")?;
+                    validate_path(pointer, "balance.currency")?;
                 }
                 if let Some(seconds) = balance.refresh_seconds {
                     validate_refresh_seconds(seconds, "balance.refresh_seconds")?;
@@ -431,7 +448,7 @@ impl ConnectorConfig {
                     .as_ref()
                     .and_then(|health| health.ok_pointer.as_deref())
                 {
-                    validate_pointer(pointer, "health.ok_pointer")?;
+                    validate_path(pointer, "health.ok_pointer")?;
                 }
             }
         }
@@ -461,23 +478,54 @@ impl ConnectorConfig {
                     ]);
                 };
                 for (value, field) in [
-                    (Some(catalog.entries.as_str()), "catalog.entries"),
-                    (Some(catalog.model_id.as_str()), "catalog.model_id"),
-                    (catalog.input.as_deref(), "catalog.input"),
-                    (catalog.output.as_deref(), "catalog.output"),
-                    (catalog.cache_read.as_deref(), "catalog.cache_read"),
-                    (catalog.cache_write.as_deref(), "catalog.cache_write"),
-                    (catalog.reasoning.as_deref(), "catalog.reasoning"),
+                    (Some(catalog.entries.to_string()), "catalog.entries"),
+                    (Some(catalog.model_id.to_string()), "catalog.model_id"),
+                ] {
+                    match value.filter(|value| !value.trim().is_empty()) {
+                        Some(pointer) => validate_path(&pointer, field)?,
+                        None => warnings.push(format!(
+                            "set {field} before previewing; it is required for an extraction"
+                        )),
+                    }
+                }
+                for (value, field, numeric) in [
+                    (catalog.input.as_deref(), "catalog.input", Some(true)),
+                    (catalog.output.as_deref(), "catalog.output", Some(true)),
+                    (
+                        catalog.cache_read.as_deref(),
+                        "catalog.cache_read",
+                        Some(true),
+                    ),
+                    (
+                        catalog.cache_write.as_deref(),
+                        "catalog.cache_write",
+                        Some(true),
+                    ),
+                    (
+                        catalog.reasoning.as_deref(),
+                        "catalog.reasoning",
+                        Some(true),
+                    ),
                     (
                         catalog.modalities_input.as_deref(),
                         "catalog.modalities_input",
+                        Some(false),
                     ),
                     (
                         catalog.modalities_output.as_deref(),
                         "catalog.modalities_output",
+                        Some(false),
                     ),
-                    (catalog.context_length.as_deref(), "catalog.context_length"),
-                    (catalog.max_output.as_deref(), "catalog.max_output"),
+                    (
+                        catalog.context_length.as_deref(),
+                        "catalog.context_length",
+                        Some(false),
+                    ),
+                    (
+                        catalog.max_output.as_deref(),
+                        "catalog.max_output",
+                        Some(false),
+                    ),
                 ] {
                     match value {
                         Some(pointer) if pointer.trim().is_empty() => {
@@ -485,7 +533,10 @@ impl ConnectorConfig {
                                 "set {field} before previewing; it is required for an extraction"
                             ));
                         }
-                        Some(pointer) => validate_pointer(pointer, field)?,
+                        Some(pointer) => match numeric {
+                            Some(true) => validate_numeric(pointer, field)?,
+                            _ => validate_path(pointer, field)?,
+                        },
                         None => {}
                     }
                 }
@@ -514,13 +565,34 @@ impl ConnectorConfig {
                             .to_string(),
                     ]);
                 };
-                for (value, field) in [
-                    (Some(balance.balance.as_str()), "balance.balance"),
-                    (balance.subtract.as_deref(), "balance.subtract"),
-                    (balance.available.as_deref(), "balance.available"),
-                    (balance.period_spend.as_deref(), "balance.period_spend"),
-                    (balance.burn_rate.as_deref(), "balance.burn_rate"),
-                    (balance.days_remaining.as_deref(), "balance.days_remaining"),
+                match Some(balance.balance.trim()).filter(|value| !value.is_empty()) {
+                    Some(pointer) => validate_numeric(pointer, "balance.balance")?,
+                    None => warnings.push(
+                        "set balance.balance before previewing; it is required for an extraction"
+                            .to_string(),
+                    ),
+                }
+                for (value, field, numeric) in [
+                    (
+                        balance.available.as_deref(),
+                        "balance.available",
+                        Some(false),
+                    ),
+                    (
+                        balance.period_spend.as_deref(),
+                        "balance.period_spend",
+                        Some(true),
+                    ),
+                    (
+                        balance.burn_rate.as_deref(),
+                        "balance.burn_rate",
+                        Some(true),
+                    ),
+                    (
+                        balance.days_remaining.as_deref(),
+                        "balance.days_remaining",
+                        Some(true),
+                    ),
                 ] {
                     match value {
                         Some(pointer) if pointer.trim().is_empty() => {
@@ -528,7 +600,10 @@ impl ConnectorConfig {
                                 "set {field} before previewing; it is required for an extraction"
                             ));
                         }
-                        Some(pointer) => validate_pointer(pointer, field)?,
+                        Some(pointer) => match numeric {
+                            Some(true) => validate_numeric(pointer, field)?,
+                            _ => validate_path(pointer, field)?,
+                        },
                         None => {}
                     }
                 }
@@ -543,7 +618,7 @@ impl ConnectorConfig {
                     .and_then(|health| health.ok_pointer.as_deref())
                     && !pointer.trim().is_empty()
                 {
-                    validate_pointer(pointer, "health.ok_pointer")?;
+                    validate_path(pointer, "health.ok_pointer")?;
                 }
             }
         }
@@ -588,22 +663,15 @@ fn validate_refresh_seconds(seconds: u64, field: &str) -> Result<(), ConnectorEr
     }
 }
 
-/// Rejects a pointer that cannot be an RFC 6901 pointer.
-fn validate_pointer(pointer: &str, field: &str) -> Result<(), ConnectorError> {
-    if !pointer.starts_with('/') {
-        return Err(ConnectorError::Invalid(format!(
-            "{field} must be a JSON Pointer starting with / (got {pointer:?})"
-        )));
-    }
-    let bytes = pointer.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte == b'~' && !matches!(bytes.get(index + 1), Some(b'0' | b'1')) {
-            return Err(ConnectorError::Invalid(format!(
-                "{field} has an invalid ~ escape (use ~0 for ~ and ~1 for /)"
-            )));
-        }
-    }
-    Ok(())
+/// Rejects a field that must be a lone path (`$.id`, `$.data[0].input`).
+fn validate_path(pointer: &str, field: &str) -> Result<(), ConnectorError> {
+    FieldExpr::path(pointer, field).map(|_| ())
+}
+
+/// Rejects a field that must be a numeric expression; paths inside it are
+/// checked when the document is evaluated.
+fn validate_numeric(pointer: &str, field: &str) -> Result<(), ConnectorError> {
+    FieldExpr::numeric(pointer, field).map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -654,11 +722,11 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         headers: bearer_headers(),
         allow_private: false,
         catalog: Some(CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/pricing_usd_per_million_tokens/balanced/input".to_string()),
-            output: Some("/pricing_usd_per_million_tokens/balanced/output".to_string()),
-            cache_read: Some("/pricing_usd_per_million_tokens/balanced/cached_input".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.pricing_usd_per_million_tokens.balanced.input".to_string()),
+            output: Some("$.pricing_usd_per_million_tokens.balanced.output".to_string()),
+            cache_read: Some("$.pricing_usd_per_million_tokens.balanced.cached_input".to_string()),
             cache_write: None,
             reasoning: None,
             unit: PriceUnit {
@@ -672,10 +740,10 @@ pub fn templates() -> Vec<ConnectorTemplate> {
                 },
                 note: Some("quoted in cents — verify against an invoice".to_string()),
             },
-            modalities_input: Some("/input_modalities".to_string()),
-            modalities_output: Some("/output_modalities".to_string()),
-            context_length: Some("/context_length".to_string()),
-            max_output: Some("/max_output_tokens".to_string()),
+            modalities_input: Some("$.input_modalities".to_string()),
+            modalities_output: Some("$.output_modalities".to_string()),
+            context_length: Some("$.context_length".to_string()),
+            max_output: Some("$.max_output_tokens".to_string()),
             apply_on_discovery: true,
             refresh_seconds: None,
         }),
@@ -688,13 +756,12 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         allow_private: false,
         catalog: None,
         balance: Some(BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
-            available: Some("/available".to_string()),
-            currency: Some("/currency".to_string()),
-            period_spend: Some("/period_spend".to_string()),
-            burn_rate: Some("/burn_rate".to_string()),
-            days_remaining: Some("/days_remaining".to_string()),
+            balance: "$.balance".to_string(),
+            available: Some("$.available".to_string()),
+            currency: Some("$.currency".to_string()),
+            period_spend: Some("$.period_spend".to_string()),
+            burn_rate: Some("$.burn_rate".to_string()),
+            days_remaining: Some("$.days_remaining".to_string()),
             unit: BalanceUnit {
                 // Same treatment as the prices: the usage payload is quoted in
                 // cents, so one multiplier turns every money field into USD.
@@ -724,13 +791,13 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         headers: BTreeMap::new(),
         allow_private: false,
         catalog: Some(CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/pricing/prompt".to_string()),
-            output: Some("/pricing/completion".to_string()),
-            cache_read: Some("/pricing/input_cache_read".to_string()),
-            cache_write: Some("/pricing/input_cache_write".to_string()),
-            reasoning: Some("/pricing/internal_reasoning".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.pricing.prompt".to_string()),
+            output: Some("$.pricing.completion".to_string()),
+            cache_read: Some("$.pricing.input_cache_read".to_string()),
+            cache_write: Some("$.pricing.input_cache_write".to_string()),
+            reasoning: Some("$.pricing.internal_reasoning".to_string()),
             unit: PriceUnit {
                 source: UnitSource::PerToken,
                 multiplier: 1.0,
@@ -742,10 +809,10 @@ pub fn templates() -> Vec<ConnectorTemplate> {
                 },
                 note: None,
             },
-            modalities_input: Some("/architecture/input_modalities".to_string()),
-            modalities_output: Some("/architecture/output_modalities".to_string()),
-            context_length: Some("/context_length".to_string()),
-            max_output: Some("/top_provider/max_completion_tokens".to_string()),
+            modalities_input: Some("$.architecture.input_modalities".to_string()),
+            modalities_output: Some("$.architecture.output_modalities".to_string()),
+            context_length: Some("$.context_length".to_string()),
+            max_output: Some("$.top_provider.max_completion_tokens".to_string()),
             apply_on_discovery: false,
             refresh_seconds: None,
         }),
@@ -760,11 +827,10 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         allow_private: false,
         catalog: None,
         balance: Some(BalanceConfig {
-            balance: "/data/total_credits".to_string(),
-            subtract: Some("/data/total_usage".to_string()),
+            balance: "$.data.total_credits - $.data.total_usage".to_string(),
             available: None,
             currency: Some("USD".to_string()),
-            period_spend: Some("/data/total_usage".to_string()),
+            period_spend: Some("$.data.total_usage".to_string()),
             burn_rate: None,
             days_remaining: None,
             unit: BalanceUnit::default(),
@@ -777,10 +843,10 @@ pub fn templates() -> Vec<ConnectorTemplate> {
         headers: BTreeMap::new(),
         allow_private: false,
         catalog: Some(CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/pricing/input".to_string()),
-            output: Some("/pricing/output".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.pricing.input".to_string()),
+            output: Some("$.pricing.output".to_string()),
             cache_read: None,
             cache_write: None,
             reasoning: None,
@@ -1019,7 +1085,8 @@ pub struct BalanceRefreshView {
     pub available: bool,
     pub balance_usd: Option<f64>,
     pub currency: String,
-    /// Raw value after `subtract`, before the unit multiplier (D52).
+    /// The number the balance expression produced, before the unit
+    /// multiplier (D52).
     pub raw: Option<f64>,
     /// `raw × unit.multiplier`, in the source currency.
     pub converted: Option<f64>,
@@ -1043,56 +1110,71 @@ pub struct ProviderBalancesView {
 }
 
 // ---------------------------------------------------------------------------
-// JSON Pointer and value resolution
+// Field expressions (D61)
 // ---------------------------------------------------------------------------
 
-/// Resolves an RFC 6901 pointer against `document`; `None` when a step is
-/// missing or an array index is malformed (never a panic).
-pub fn resolve_pointer<'a>(document: &'a Value, pointer: &str) -> Option<&'a Value> {
-    if pointer.is_empty() {
-        return Some(document);
-    }
-    if !pointer.starts_with('/') {
-        return None;
-    }
-    let mut current = document;
-    for token in pointer.split('/').skip(1) {
-        let token = token.replace("~1", "/").replace("~0", "~");
-        current = match current {
-            Value::Object(map) => map.get(&token)?,
-            Value::Array(items) => items.get(array_index(&token)?)?,
-            _ => return None,
-        };
-    }
-    Some(current)
+/// One configured field, parsed once per document and evaluated per entry.
+///
+/// The operator writes either a lone path (`$.id`, `$.pricing.prompt`) or a
+/// numeric expression around one or more paths. Compiling at validation time
+/// means a malformed field is refused by `PUT`, never discovered mid-refresh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldExpr {
+    source: String,
+    parsed: Expression,
 }
 
-/// RFC 6901 array index: decimal, no leading zeros, no `-`.
-fn array_index(token: &str) -> Option<usize> {
-    if token.is_empty() || (token.len() > 1 && token.starts_with('0')) {
-        return None;
+impl FieldExpr {
+    /// Compiles `source` as a lone path. Failure mode:
+    /// [`ConnectorError::Invalid`] naming `field` and the offending column.
+    fn path(source: &str, field: &str) -> Result<Self, ConnectorError> {
+        let parsed =
+            expression::parse(source).map_err(|error| invalid_field(field, source, &error))?;
+        if !expression::is_single_path(&parsed) {
+            return Err(ConnectorError::Invalid(format!(
+                "{field} must be a single path such as $.id, not a calculation (got {source:?})"
+            )));
+        }
+        Ok(Self {
+            source: source.to_string(),
+            parsed,
+        })
     }
-    if !token.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
+
+    /// Compiles `source` as a numeric expression. Failure mode:
+    /// [`ConnectorError::Invalid`] naming `field` and the offending column.
+    fn numeric(source: &str, field: &str) -> Result<Self, ConnectorError> {
+        let parsed =
+            expression::parse(source).map_err(|error| invalid_field(field, source, &error))?;
+        Ok(Self {
+            source: source.to_string(),
+            parsed,
+        })
     }
-    token.parse().ok()
+
+    /// The configured text, for error messages and the preview table.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Evaluates the field against `document` as a finite number.
+    fn evaluate(&self, document: &Value) -> Result<f64, ExpressionError> {
+        expression::evaluate(&self.parsed, document)
+    }
+
+    /// Resolves a lone path to the raw JSON value.
+    fn value<'a>(&self, document: &'a Value) -> Option<&'a Value> {
+        expression::resolve_value(&self.parsed, document).ok()
+    }
 }
 
-/// A JSON number or numeric string. Booleans are not numbers.
-fn number(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
-        Value::String(text) => text
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite()),
-        _ => None,
-    }
+fn invalid_field(field: &str, source: &str, error: &ExpressionError) -> ConnectorError {
+    ConnectorError::Invalid(format!("{field} {source:?}: {error}"))
 }
 
+/// A number or integer read from an already resolved JSON value.
 fn integer(value: &Value) -> Option<i64> {
-    let number = number(value)?;
+    let number = expression::number_from_value(value).ok()?;
     if number.fract() != 0.0 || !(i64::MIN as f64..=i64::MAX as f64).contains(&number) {
         return None;
     }
@@ -1112,8 +1194,7 @@ fn boolean(value: &Value) -> Option<bool> {
     }
 }
 
-fn string_at(document: &Value, pointer: &str) -> Option<String> {
-    let value = resolve_pointer(document, pointer)?;
+fn string_of(value: &Value) -> Option<String> {
     value
         .as_str()
         .map(str::trim)
@@ -1121,8 +1202,7 @@ fn string_at(document: &Value, pointer: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn modalities_at(document: &Value, pointer: &str) -> Option<Vec<String>> {
-    let value = resolve_pointer(document, pointer)?;
+fn modalities_of(value: &Value) -> Option<Vec<String>> {
     match value {
         Value::Array(items) => {
             let list: Vec<String> = items
@@ -1139,7 +1219,9 @@ fn modalities_at(document: &Value, pointer: &str) -> Option<Vec<String>> {
     }
 }
 
-/// One resolved price component, before unit conversion.
+/// One resolved price component, before unit conversion. Copy so a single
+/// resolution can feed both the error list and the sample row; the message is
+/// built from the field's own [`FieldExpr::source`] at the use site.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PriceField {
     NotConfigured,
@@ -1149,17 +1231,36 @@ enum PriceField {
     Variable,
 }
 
-fn price_field(entry: &Value, pointer: Option<&str>) -> PriceField {
-    let Some(pointer) = pointer else {
+fn price_field(entry: &Value, expression: Option<&FieldExpr>) -> PriceField {
+    let Some(expression) = expression else {
         return PriceField::NotConfigured;
     };
-    let Some(value) = resolve_pointer(entry, pointer) else {
-        return PriceField::Missing;
-    };
-    match number(value) {
-        None => PriceField::NonNumeric,
-        Some(value) if value < 0.0 => PriceField::Variable,
-        Some(value) => PriceField::Number(value),
+    match expression.evaluate(entry) {
+        Ok(value) if value < 0.0 => PriceField::Variable,
+        Ok(value) => PriceField::Number(value),
+        Err(ExpressionError::MissingPath { .. }) => PriceField::Missing,
+        Err(_) => PriceField::NonNumeric,
+    }
+}
+
+/// The reason a price field failed, for the preview. `None` when the field
+/// produced a number (or was not configured).
+fn price_field_error(
+    entry: &Value,
+    expression: Option<&FieldExpr>,
+    field: &str,
+    model_id: &str,
+) -> Option<String> {
+    let expression = expression?;
+    match expression.evaluate(entry) {
+        Ok(_) => None,
+        Err(ExpressionError::MissingPath { path }) => Some(format!(
+            "{model_id}: {field} {path} is missing from the response"
+        )),
+        Err(error) => Some(format!(
+            "{model_id}: {field} {:?}: {error}",
+            expression.source()
+        )),
     }
 }
 
@@ -1291,9 +1392,59 @@ pub struct CatalogExtraction {
     pub warnings: Vec<String>,
 }
 
+/// The catalog mapping compiled once per document. `entries` is root-relative;
+/// every other field is relative to one entry.
+struct CatalogExprs {
+    entries: FieldExpr,
+    model_id: FieldExpr,
+    input: Option<FieldExpr>,
+    output: Option<FieldExpr>,
+    cache_read: Option<FieldExpr>,
+    cache_write: Option<FieldExpr>,
+    reasoning: Option<FieldExpr>,
+    modalities_input: Option<FieldExpr>,
+    modalities_output: Option<FieldExpr>,
+    context_length: Option<FieldExpr>,
+    max_output: Option<FieldExpr>,
+}
+
+impl CatalogExprs {
+    /// Failure mode: [`ConnectorError::Invalid`] naming the field and column.
+    fn compile(config: &CatalogConfig) -> Result<Self, ConnectorError> {
+        let optional_path = |value: &Option<String>, field: &str| -> Result<_, ConnectorError> {
+            value
+                .as_deref()
+                .map(|source| FieldExpr::path(source, field))
+                .transpose()
+        };
+        let optional_numeric = |value: &Option<String>, field: &str| -> Result<_, ConnectorError> {
+            value
+                .as_deref()
+                .map(|source| FieldExpr::numeric(source, field))
+                .transpose()
+        };
+        Ok(Self {
+            entries: FieldExpr::path(&config.entries, "catalog.entries")?,
+            model_id: FieldExpr::path(&config.model_id, "catalog.model_id")?,
+            input: optional_numeric(&config.input, "catalog.input")?,
+            output: optional_numeric(&config.output, "catalog.output")?,
+            cache_read: optional_numeric(&config.cache_read, "catalog.cache_read")?,
+            cache_write: optional_numeric(&config.cache_write, "catalog.cache_write")?,
+            reasoning: optional_numeric(&config.reasoning, "catalog.reasoning")?,
+            modalities_input: optional_path(&config.modalities_input, "catalog.modalities_input")?,
+            modalities_output: optional_path(
+                &config.modalities_output,
+                "catalog.modalities_output",
+            )?,
+            context_length: optional_path(&config.context_length, "catalog.context_length")?,
+            max_output: optional_path(&config.max_output, "catalog.max_output")?,
+        })
+    }
+}
+
 /// Applies a catalog mapping to a parsed document.
 ///
-/// A missing or non-numeric required price pointer skips **that entry only**
+/// A missing or non-numeric required price expression skips **that entry only**
 /// and is counted; a negative component becomes `variable` (D37) with a NULL
 /// value. A missing optional component is just absent. Unit conversion follows
 /// D44: `per_token` × 1e6, `per_million` × 1, `custom` × multiplier, then
@@ -1302,13 +1453,15 @@ pub fn extract_catalog(
     document: &Value,
     config: &CatalogConfig,
 ) -> Result<CatalogExtraction, ConnectorError> {
-    config_pointer_guard(&config.entries, "catalog.entries", document)?;
-    let entries = resolve_pointer(document, &config.entries)
+    let exprs = CatalogExprs::compile(config)?;
+    let entries = exprs
+        .entries
+        .value(document)
         .and_then(Value::as_array)
         .ok_or_else(|| {
             ConnectorError::Invalid(format!(
-                "catalog.entries pointer {} did not resolve to an array",
-                config.entries
+                "catalog.entries {} did not resolve to an array",
+                exprs.entries.source()
             ))
         })?;
 
@@ -1319,14 +1472,13 @@ pub fn extract_catalog(
 
     for (index, entry) in entries.iter().enumerate() {
         out.entries_seen += 1;
-        let model_id = resolve_pointer(entry, &config.model_id)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string);
+        let model_id = exprs.model_id.value(entry).and_then(string_of);
         let Some(model_id) = model_id else {
             out.skipped += 1;
-            let error = format!("entry {index}: model_id pointer did not resolve");
+            let error = format!(
+                "entry {index}: model_id {} did not resolve to a non-empty string",
+                exprs.model_id.source()
+            );
             out.errors.push(error.clone());
             out.samples.push(CatalogSample {
                 model_id: None,
@@ -1346,27 +1498,17 @@ pub fn extract_catalog(
             continue;
         };
 
-        let raw_input = price_field(entry, config.input.as_deref());
-        let raw_output = price_field(entry, config.output.as_deref());
+        let raw_input = price_field(entry, exprs.input.as_ref());
+        let raw_output = price_field(entry, exprs.output.as_ref());
         let mut required_error: Option<String> = None;
-        for (field, value, pointer) in [
-            ("input", raw_input, config.input.as_deref()),
-            ("output", raw_output, config.output.as_deref()),
+        for (field, value, expression) in [
+            ("input", raw_input, exprs.input.as_ref()),
+            ("output", raw_output, exprs.output.as_ref()),
         ] {
-            match value {
-                PriceField::Missing => {
-                    required_error = Some(format!(
-                        "{model_id}: {field} pointer {} is missing",
-                        pointer.unwrap_or("")
-                    ));
-                }
-                PriceField::NonNumeric => {
-                    required_error = Some(format!(
-                        "{model_id}: {field} pointer {} is not numeric",
-                        pointer.unwrap_or("")
-                    ));
-                }
-                _ => {}
+            if matches!(value, PriceField::Missing | PriceField::NonNumeric)
+                && let Some(expression) = expression
+            {
+                required_error = price_field_error(entry, Some(expression), field, &model_id);
             }
             if required_error.is_some() {
                 break;
@@ -1398,9 +1540,9 @@ pub fn extract_catalog(
             continue;
         }
 
-        let raw_cache_read = price_field(entry, config.cache_read.as_deref());
-        let raw_cache_write = price_field(entry, config.cache_write.as_deref());
-        let raw_reasoning = price_field(entry, config.reasoning.as_deref());
+        let raw_cache_read = price_field(entry, exprs.cache_read.as_ref());
+        let raw_cache_write = price_field(entry, exprs.cache_write.as_ref());
+        let raw_reasoning = price_field(entry, exprs.reasoning.as_ref());
         let input = conversion.convert(raw_input);
         let output = conversion.convert(raw_output);
         let cache_read = conversion.convert(raw_cache_read);
@@ -1408,20 +1550,15 @@ pub fn extract_catalog(
         let reasoning = conversion.convert(raw_reasoning);
 
         let mut entry_warnings = unit_warnings.clone();
-        for (field, value, pointer) in [
-            ("cache_read", raw_cache_read, config.cache_read.as_deref()),
-            (
-                "cache_write",
-                raw_cache_write,
-                config.cache_write.as_deref(),
-            ),
-            ("reasoning", raw_reasoning, config.reasoning.as_deref()),
+        for (field, value, expression) in [
+            ("cache_read", raw_cache_read, exprs.cache_read.as_ref()),
+            ("cache_write", raw_cache_write, exprs.cache_write.as_ref()),
+            ("reasoning", raw_reasoning, exprs.reasoning.as_ref()),
         ] {
-            if matches!(value, PriceField::Missing | PriceField::NonNumeric) && pointer.is_some() {
-                entry_warnings.push(format!(
-                    "{model_id}: optional {field} pointer {} did not resolve to a number",
-                    pointer.unwrap_or("")
-                ));
+            if matches!(value, PriceField::Missing | PriceField::NonNumeric)
+                && let Some(error) = price_field_error(entry, expression, field, &model_id)
+            {
+                entry_warnings.push(format!("optional {error}"));
             }
         }
 
@@ -1512,29 +1649,9 @@ pub fn extract_catalog(
     Ok(out)
 }
 
-/// A `document`-only pointer guard: missing top-level structure is a mapping
-/// error naming the pointer instead of a panic.
-fn config_pointer_guard(
-    pointer: &str,
-    field: &str,
-    document: &Value,
-) -> Result<(), ConnectorError> {
-    if pointer.is_empty() {
-        return Err(ConnectorError::Invalid(format!(
-            "{field} must not be empty"
-        )));
-    }
-    if resolve_pointer(document, pointer).is_none() {
-        return Err(ConnectorError::Invalid(format!(
-            "{field} pointer {pointer} is missing from the response"
-        )));
-    }
-    Ok(())
-}
-
 /// A catalog entry as discovery needs it: the upstream id plus optional
 /// metadata. Prices are resolved separately by [`extract_catalog`], so a
-/// mapping whose price pointer is missing still discovers the model.
+/// mapping whose price expression is missing still discovers the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveryEntry {
     pub model_id: String,
@@ -1549,47 +1666,39 @@ pub fn extract_discovery_entries(
     document: &Value,
     config: &CatalogConfig,
 ) -> Result<Vec<DiscoveryEntry>, ConnectorError> {
-    let entries = resolve_pointer(document, &config.entries)
+    let exprs = CatalogExprs::compile(config)?;
+    let entries = exprs
+        .entries
+        .value(document)
         .and_then(Value::as_array)
         .ok_or_else(|| {
             ConnectorError::Invalid(format!(
-                "catalog.entries pointer {} did not resolve to an array",
-                config.entries
+                "catalog.entries {} did not resolve to an array",
+                exprs.entries.source()
             ))
         })?;
     let mut out = Vec::new();
     for entry in entries {
-        let Some(model_id) = resolve_pointer(entry, &config.model_id)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-        else {
+        let Some(model_id) = exprs.model_id.value(entry).and_then(string_of) else {
             continue;
         };
         if !catalog::is_discoverable_model_id(&model_id) {
             continue;
         }
+        let value_of = |expression: &Option<FieldExpr>| -> Option<Value> {
+            expression
+                .as_ref()
+                .and_then(|expression| expression.value(entry))
+                .cloned()
+        };
         out.push(DiscoveryEntry {
             model_id,
-            modalities_input: config
-                .modalities_input
-                .as_deref()
-                .and_then(|pointer| modalities_at(entry, pointer)),
-            modalities_output: config
-                .modalities_output
-                .as_deref()
-                .and_then(|pointer| modalities_at(entry, pointer)),
-            context_length: config
-                .context_length
-                .as_deref()
-                .and_then(|pointer| resolve_pointer(entry, pointer))
-                .and_then(integer),
-            max_output_tokens: config
-                .max_output
-                .as_deref()
-                .and_then(|pointer| resolve_pointer(entry, pointer))
-                .and_then(integer),
+            modalities_input: value_of(&exprs.modalities_input)
+                .and_then(|value| modalities_of(&value)),
+            modalities_output: value_of(&exprs.modalities_output)
+                .and_then(|value| modalities_of(&value)),
+            context_length: value_of(&exprs.context_length).and_then(|value| integer(&value)),
+            max_output_tokens: value_of(&exprs.max_output).and_then(|value| integer(&value)),
         });
     }
     Ok(out)
@@ -1610,8 +1719,8 @@ pub struct ExtractedBalance {
     pub balance_usd: Option<f64>,
     /// The stored currency: `USD` when routable, otherwise the source code.
     pub currency: String,
-    /// The number the pointers resolved to, after `subtract` and before the
-    /// unit multiplier.
+    /// The number the balance expression produced, before the unit
+    /// multiplier.
     pub raw: Option<f64>,
     /// `raw × unit.multiplier`, in the source currency.
     pub converted: Option<f64>,
@@ -1627,60 +1736,56 @@ pub struct ExtractedBalance {
     pub warnings: Vec<String>,
 }
 
-/// Reads the balance pointers from a document.
+/// Reads the balance expressions from a document.
 ///
-/// `balance = balance_pointer − subtract_pointer` (when `subtract` is set),
-/// then `× unit.multiplier`, then `× fx_to_usd` for a non-USD currency. The
-/// multiplier and FX apply to `period_spend` and `burn_rate` too;
-/// `days_remaining` is never scaled.
+/// `balance` is a numeric expression (`$.balance`, or
+/// `$.total_credits - $.total_usage` for a payload that publishes a total and
+/// a usage separately); its result is scaled by `× unit.multiplier`, then
+/// `× fx_to_usd` for a non-USD currency. The multiplier and FX apply to
+/// `period_spend` and `burn_rate` too; `days_remaining` is never scaled.
 ///
-/// Failure modes: [`ConnectorError::Invalid`] when a required pointer is
+/// Failure modes: [`ConnectorError::Invalid`] when the balance expression is
 /// missing or not numeric, or when `available` is present but not a boolean.
-/// A negative balance is unrepresentable and treated the same as a missing
-/// number; a negative *converted* balance (possible only through `subtract`)
-/// is stored with a warning. A non-positive `unit.multiplier` makes the value
-/// unavailable with a warning instead of failing the whole refresh.
+/// A negative balance is refused: it cannot be a remaining amount. A
+/// non-positive `unit.multiplier` makes the value unavailable with a warning
+/// instead of failing the whole refresh.
 pub fn extract_balance(
     document: &Value,
     config: &BalanceConfig,
 ) -> Result<ExtractedBalance, ConnectorError> {
-    config_pointer_guard(&config.balance, "balance.balance", document)?;
-    let balance = resolve_pointer(document, &config.balance).and_then(number);
-    let Some(balance) = balance.filter(|value| *value >= 0.0) else {
+    let balance_expr = FieldExpr::numeric(&config.balance, "balance.balance")?;
+    let balance = balance_expr
+        .evaluate(document)
+        .map_err(|error| invalid_field("balance.balance", balance_expr.source(), &error))?;
+    if balance < 0.0 {
         return Err(ConnectorError::Invalid(format!(
-            "balance.balance pointer {} did not resolve to a non-negative number",
-            config.balance
+            "balance.balance {:?} produced a negative number ({balance}); a remaining balance cannot be negative",
+            balance_expr.source()
         )));
-    };
-    let subtract = match config.subtract.as_deref() {
-        None => 0.0,
-        Some(pointer) => resolve_pointer(document, pointer)
-            .and_then(number)
-            .ok_or_else(|| {
-                ConnectorError::Invalid(format!(
-                    "balance.subtract pointer {pointer} did not resolve to a number"
-                ))
-            })?,
-    };
+    }
     let available = match config.available.as_deref() {
         None => true,
-        Some(pointer) => {
-            let value = resolve_pointer(document, pointer).ok_or_else(|| {
+        Some(source) => {
+            let expression = FieldExpr::path(source, "balance.available")?;
+            let value = expression.value(document).ok_or_else(|| {
                 ConnectorError::Invalid(format!(
-                    "balance.available pointer {pointer} is missing from the response"
+                    "balance.available {source:?} is missing from the response"
                 ))
             })?;
             boolean(value).ok_or_else(|| {
-                ConnectorError::Invalid(format!(
-                    "balance.available pointer {pointer} is not a boolean"
-                ))
+                ConnectorError::Invalid(format!("balance.available {source:?} is not a boolean"))
             })?
         }
     };
+    // D61: a literal currency code stays literal; a value starting with `$`
+    // is a path into the same response.
     let reported_currency = match config.currency.as_deref() {
         None | Some("") => config.unit.currency.clone(),
-        Some(pointer) if pointer.starts_with('/') => {
-            string_at(document, pointer).unwrap_or_else(|| config.unit.currency.clone())
+        Some(source) if source.trim_start().starts_with('$') => {
+            FieldExpr::path(source, "balance.currency")?
+                .value(document)
+                .and_then(string_of)
+                .unwrap_or_else(|| config.unit.currency.clone())
         }
         Some(literal) => literal.to_string(),
     };
@@ -1712,7 +1817,7 @@ pub fn extract_balance(
             }
         }
     };
-    let raw = balance - subtract;
+    let raw = balance;
     let converted = multiplier_ok.then_some(raw * multiplier);
     let usd = converted.map(|value| value * fx);
     if routable
@@ -1722,7 +1827,7 @@ pub fn extract_balance(
     {
         let display = &config.unit.display;
         warnings.push(format!(
-            "converted balance is {}{value:.decimals$} (raw {raw}); check the unit multiplier and subtract pointer",
+            "converted balance is {}{value:.decimals$} (raw {raw}); check the unit multiplier and the balance expression",
             display.symbol,
             decimals = usize::from(display.decimals.min(8)),
         ));
@@ -1733,13 +1838,19 @@ pub fn extract_balance(
         }
         Some(value * multiplier * fx)
     };
-    let optional = |pointer: Option<&str>| {
-        pointer
-            .and_then(|pointer| resolve_pointer(document, pointer))
-            .and_then(number)
-            .filter(|value| *value >= 0.0)
+    let optional = |source: Option<&str>, field: &str| -> Result<Option<f64>, ConnectorError> {
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let expression = FieldExpr::numeric(source, field)?;
+        match expression.evaluate(document) {
+            Ok(value) if value >= 0.0 => Ok(Some(value)),
+            Ok(_) => Ok(None),
+            Err(ExpressionError::MissingPath { .. }) => Ok(None),
+            Err(error) => Err(invalid_field(field, expression.source(), &error)),
+        }
     };
-    let days_remaining = optional(config.days_remaining.as_deref());
+    let days_remaining = optional(config.days_remaining.as_deref(), "balance.days_remaining")?;
     let stored_currency = if routable {
         "USD".to_string()
     } else {
@@ -1755,8 +1866,9 @@ pub fn extract_balance(
         raw: Some(raw),
         converted,
         routable,
-        period_spend: optional(config.period_spend.as_deref()).and_then(scale),
-        burn_rate: optional(config.burn_rate.as_deref()).and_then(scale),
+        period_spend: optional(config.period_spend.as_deref(), "balance.period_spend")?
+            .and_then(scale),
+        burn_rate: optional(config.burn_rate.as_deref(), "balance.burn_rate")?.and_then(scale),
         days_remaining,
         warnings,
     })
@@ -1772,31 +1884,40 @@ pub struct ExtractedHealth {
 /// Reads the health answer: a 2xx response is healthy unless `ok_pointer`
 /// names a boolean/truthy field that says otherwise.
 pub fn extract_health(document: Option<&Value>, config: &HealthConfig) -> ExtractedHealth {
-    let Some(pointer) = config.ok_pointer.as_deref() else {
+    let Some(source) = config.ok_pointer.as_deref() else {
         return ExtractedHealth {
             ok: true,
             detail: None,
         };
     };
+    let expression = match FieldExpr::path(source, "health.ok_pointer") {
+        Ok(expression) => expression,
+        Err(error) => {
+            return ExtractedHealth {
+                ok: false,
+                detail: Some(error.to_string()),
+            };
+        }
+    };
     let Some(document) = document else {
         return ExtractedHealth {
             ok: false,
-            detail: Some(format!("health.ok_pointer {pointer} needs a JSON body")),
+            detail: Some(format!("health.ok_pointer {source:?} needs a JSON body")),
         };
     };
-    match resolve_pointer(document, pointer).and_then(boolean) {
+    match expression.value(document).and_then(boolean) {
         Some(true) => ExtractedHealth {
             ok: true,
             detail: None,
         },
         Some(false) => ExtractedHealth {
             ok: false,
-            detail: Some(format!("health.ok_pointer {pointer} is false")),
+            detail: Some(format!("health.ok_pointer {source:?} is false")),
         },
         None => ExtractedHealth {
             ok: false,
             detail: Some(format!(
-                "health.ok_pointer {pointer} is missing or not a boolean"
+                "health.ok_pointer {source:?} is missing or not a boolean"
             )),
         },
     }
@@ -2095,6 +2216,170 @@ pub fn truncate_sample(body: &str) -> (String, bool) {
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
+
+/// `db_meta` key recording that stored connector documents were rewritten from
+/// JSON Pointers to expressions (D61).
+const EXPRESSION_REPAIR_META_KEY: &str = "connector_expression_fields_v1";
+
+/// Rewrites every stored connector document from the retired `/a/b` pointer
+/// form to `$.a.b`, once.
+///
+/// Data repair that pure SQL cannot express, so it runs at the migration
+/// boundary next to `catalog::repair_duplicate_models`. A document is rewritten
+/// only when every path it carries converts; one unreadable document is left
+/// byte-for-byte alone (it will fail validation with a clear message, and the
+/// operator re-picks the fields) so a single bad row cannot abort startup.
+///
+/// Returns the number of documents rewritten. Failure mode: [`sqlx::Error`]
+/// from the read or the single transaction that stores the result and the
+/// `db_meta` marker.
+pub async fn migrate_pointer_fields(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
+    let done: Option<String> = sqlx::query_scalar("SELECT value FROM db_meta WHERE key = ?")
+        .bind(EXPRESSION_REPAIR_META_KEY)
+        .fetch_optional(pool)
+        .await?;
+    if done.is_some() {
+        return Ok(0);
+    }
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT provider_id, kind, config_json FROM provider_connectors ORDER BY provider_id, kind",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    let mut rewritten = 0usize;
+    for (provider_id, kind, config_json) in rows {
+        let Ok(mut document) = serde_json::from_str::<Value>(&config_json) else {
+            continue;
+        };
+        if !rewrite_document_paths(&mut document) {
+            continue;
+        }
+        let updated = serde_json::to_string(&document).unwrap_or(config_json);
+        sqlx::query(
+            "UPDATE provider_connectors SET config_json = ? WHERE provider_id = ? AND kind = ?",
+        )
+        .bind(updated)
+        .bind(&provider_id)
+        .bind(&kind)
+        .execute(&mut *tx)
+        .await?;
+        rewritten += 1;
+    }
+    sqlx::query("INSERT INTO db_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING")
+        .bind(EXPRESSION_REPAIR_META_KEY)
+        .bind(crate::catalog::now_ts())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if rewritten > 0 {
+        tracing::info!(rewritten, "rewrote connector fields to expression syntax");
+    }
+    Ok(rewritten)
+}
+
+/// Fields that hold one path, given as `(section, member)`.
+const PATH_FIELDS: [(&str, &str); 16] = [
+    ("catalog", "entries"),
+    ("catalog", "model_id"),
+    ("catalog", "input"),
+    ("catalog", "output"),
+    ("catalog", "cache_read"),
+    ("catalog", "cache_write"),
+    ("catalog", "reasoning"),
+    ("catalog", "modalities_input"),
+    ("catalog", "modalities_output"),
+    ("catalog", "context_length"),
+    ("catalog", "max_output"),
+    ("balance", "balance"),
+    ("balance", "available"),
+    ("balance", "period_spend"),
+    ("balance", "burn_rate"),
+    ("balance", "days_remaining"),
+];
+
+/// Rewrites one stored document in place. Returns false when nothing changed.
+///
+/// `balance.subtract` is folded into `balance` first (`total - usage`), because
+/// the field no longer exists. `balance.currency` is converted only when it is
+/// a path; a literal code stays literal. `health.ok_pointer` is a path too.
+fn rewrite_document_paths(document: &mut Value) -> bool {
+    let mut changed = false;
+    if let Some(balance) = document.get_mut("balance").and_then(Value::as_object_mut) {
+        if let Some(subtract) = balance.remove("subtract") {
+            let subtract = subtract.as_str().map(rewrite_pointer);
+            if let (Some(balance_expression), Some(subtract)) =
+                (balance.get("balance").and_then(Value::as_str), subtract)
+            {
+                let combined = format!("{} - {}", rewrite_pointer(balance_expression), subtract);
+                balance.insert("balance".to_string(), Value::String(combined));
+                changed = true;
+            }
+        }
+        if let Some(currency) = balance.get("currency").and_then(Value::as_str)
+            && currency.trim_start().starts_with('/')
+        {
+            let rewritten = rewrite_pointer(currency);
+            balance.insert("currency".to_string(), Value::String(rewritten));
+            changed = true;
+        }
+    }
+    for (section, member) in PATH_FIELDS {
+        let Some(object) = document.get_mut(section).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(current) = object.get(member).and_then(Value::as_str) else {
+            continue;
+        };
+        let rewritten = rewrite_pointer(current);
+        if rewritten != current {
+            object.insert(member.to_string(), Value::String(rewritten));
+            changed = true;
+        }
+    }
+    if let Some(health) = document.get_mut("health").and_then(Value::as_object_mut)
+        && let Some(current) = health.get("ok_pointer").and_then(Value::as_str)
+    {
+        let rewritten = rewrite_pointer(current);
+        if rewritten != current {
+            health.insert("ok_pointer".to_string(), Value::String(rewritten));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `"/pricing/prompt"` → `"$.pricing.prompt"`, `"/data/0/id"` →
+/// `"$.data[0].id"`. Anything that does not start with `/` is returned as
+/// written. A `~0`/`~1` escape has no dot path, so the segment is left as-is
+/// and the document fails validation with a clear message rather than silently
+/// changing meaning.
+fn rewrite_pointer(source: &str) -> String {
+    if !source.starts_with('/') {
+        return source.to_string();
+    }
+    let segments: Vec<&str> = source
+        .split('/')
+        .skip(1)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return "$".to_string();
+    }
+    let mut out = String::from("$");
+    for segment in segments {
+        if !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit()) {
+            out.push('[');
+            out.push_str(segment);
+            out.push(']');
+        } else {
+            out.push('.');
+            out.push_str(segment);
+        }
+    }
+    out
+}
 
 /// Fetches one stored connector, when configured.
 pub async fn get_connector(
@@ -3229,43 +3514,55 @@ mod tests {
     }
 
     #[test]
-    fn pointers_resolve_objects_arrays_and_escapes() {
+    fn a_lone_path_resolves_objects_and_array_indexes() {
         let document = serde_json::json!({
             "data": [
                 {"id": "a", "price": {"in": 1.5, "out": "2.5"}},
                 {"id": "b", "price": {"in": -1, "out": 4}}
-            ],
-            "a/b": {"~key~": "escaped"}
+            ]
         });
+        let read = |source: &str| {
+            FieldExpr::path(source, "test")
+                .expect("valid path")
+                .value(&document)
+        };
+        assert_eq!(read("$.data[1].id").and_then(Value::as_str), Some("b"));
         assert_eq!(
-            resolve_pointer(&document, "/data/1/id").and_then(Value::as_str),
-            Some("b")
+            read("$.data[0].price.out").and_then(Value::as_str),
+            Some("2.5")
         );
-        assert_eq!(
-            resolve_pointer(&document, "/data/0/price/out").and_then(number),
-            Some(2.5),
-            "numeric strings are accepted"
-        );
-        assert_eq!(
-            resolve_pointer(&document, "/a~1b/~0key~0").and_then(Value::as_str),
-            Some("escaped"),
-            "RFC 6901 escapes"
-        );
-        assert!(resolve_pointer(&document, "/data/2").is_none());
+        assert!(read("$.data[2]").is_none(), "index past the end");
+        assert!(read("$.missing").is_none());
         assert!(
-            resolve_pointer(&document, "/data/01").is_none(),
-            "leading zero"
-        );
-        assert!(resolve_pointer(&document, "/data/-").is_none());
-        assert!(resolve_pointer(&document, "/missing").is_none());
-        assert!(
-            resolve_pointer(&document, "data").is_none(),
-            "must start with /"
+            FieldExpr::path("/data/1/id", "test").is_err(),
+            "a path must start with $"
         );
         assert!(
-            resolve_pointer(&document, "").is_some(),
-            "the empty pointer is the document"
+            FieldExpr::path("$.data[1", "test").is_err(),
+            "an unclosed array index is a syntax error"
         );
+        assert!(
+            FieldExpr::path("data", "test").is_err(),
+            "a path must start with $"
+        );
+        assert!(
+            FieldExpr::path("$.id + 1", "test").is_err(),
+            "a lone-path field rejects arithmetic"
+        );
+    }
+
+    #[test]
+    fn numeric_strings_are_accepted_and_text_is_not() {
+        let document = serde_json::json!({ "price": "2$", "text": "call us", "nothing": null });
+        assert_eq!(run_expression("$.price", &document), Ok(2.0));
+        assert!(run_expression("$.text", &document).is_err());
+        assert!(run_expression("$.nothing", &document).is_err());
+    }
+
+    fn run_expression(source: &str, document: &Value) -> Result<f64, ExpressionError> {
+        FieldExpr::numeric(source, "test")
+            .expect("valid expression")
+            .evaluate(document)
     }
 
     #[test]
@@ -3342,10 +3639,10 @@ mod tests {
             ]
         });
         let config = CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/price/input".to_string()),
-            output: Some("/price/output".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.price.input".to_string()),
+            output: Some("$.price.output".to_string()),
             cache_read: None,
             cache_write: None,
             reasoning: None,
@@ -3373,7 +3670,9 @@ mod tests {
             extraction
                 .errors
                 .iter()
-                .any(|error| error.contains("not numeric"))
+                .any(|error| error.contains("is not a number")),
+            "{:?}",
+            extraction.errors
         );
     }
 
@@ -3383,10 +3682,10 @@ mod tests {
             "data": [{"id": "auto", "price": {"input": -1, "output": "-1"}}]
         });
         let config = CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/price/input".to_string()),
-            output: Some("/price/output".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.price.input".to_string()),
+            output: Some("$.price.output".to_string()),
             cache_read: None,
             cache_write: None,
             reasoning: None,
@@ -3437,11 +3736,11 @@ mod tests {
 
     fn price_config(unit: PriceUnit) -> CatalogConfig {
         CatalogConfig {
-            entries: "/data".to_string(),
-            model_id: "/id".to_string(),
-            input: Some("/price/input".to_string()),
-            output: Some("/price/output".to_string()),
-            cache_read: Some("/price/cache".to_string()),
+            entries: "$.data".to_string(),
+            model_id: "$.id".to_string(),
+            input: Some("$.price.input".to_string()),
+            output: Some("$.price.output".to_string()),
+            cache_read: Some("$.price.cache".to_string()),
             cache_write: None,
             reasoning: None,
             unit,
@@ -3691,11 +3990,10 @@ mod tests {
             "data": { "total_credits": 100.0, "total_usage": 42.5 }
         });
         let config = BalanceConfig {
-            balance: "/data/total_credits".to_string(),
-            subtract: Some("/data/total_usage".to_string()),
+            balance: "$.data.total_credits - $.data.total_usage".to_string(),
             available: None,
             currency: Some("USD".to_string()),
-            period_spend: Some("/data/total_usage".to_string()),
+            period_spend: Some("$.data.total_usage".to_string()),
             burn_rate: None,
             days_remaining: None,
             unit: BalanceUnit::default(),
@@ -3717,10 +4015,9 @@ mod tests {
         assert_eq!(balance.raw, Some(57.5));
         assert!((balance.converted.expect("converted") - 0.575).abs() < 1e-12);
 
-        // A configured subtract pointer that does not resolve is an error, not
-        // a silent zero.
+        // An operand that does not resolve is an error, not a silent zero.
         let broken = BalanceConfig {
-            subtract: Some("/data/missing".to_string()),
+            balance: "$.data.total_credits - $.data.missing".to_string(),
             ..config
         };
         assert!(extract_balance(&document, &broken).is_err());
@@ -3731,8 +4028,7 @@ mod tests {
         let document = serde_json::json!({ "balance": 136275, "currency": "USD" });
         for multiplier in [0.0, -1.0] {
             let config = BalanceConfig {
-                balance: "/balance".to_string(),
-                subtract: None,
+                balance: "$.balance".to_string(),
                 available: None,
                 currency: None,
                 period_spend: None,
@@ -3760,8 +4056,7 @@ mod tests {
 
         // 136275 cents is the intended SailResearch-shaped example.
         let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
+            balance: "$.balance".to_string(),
             available: None,
             currency: None,
             period_spend: None,
@@ -3780,8 +4075,7 @@ mod tests {
     #[test]
     fn balance_outside_the_plausible_band_warns_but_is_stored() {
         let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
+            balance: "$.balance".to_string(),
             available: None,
             currency: None,
             period_spend: None,
@@ -3803,40 +4097,33 @@ mod tests {
             huge.warnings
         );
 
-        let negative = extract_balance(
+        // A missing operand is an error, never a silent zero.
+        let broken = extract_balance(
             &serde_json::json!({ "balance": 10.0 }),
             &BalanceConfig {
-                subtract: Some("/unused".to_string()),
+                balance: "$.balance - $.unused".to_string(),
                 ..config.clone()
             },
         );
-        // A missing subtract pointer is an error; use a real difference next.
-        assert!(negative.is_err());
-        let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: Some("/spent".to_string()),
-            ..config
-        };
+        assert!(broken.is_err());
+
+        // Spending more than the balance is refused: a remaining balance
+        // cannot be negative, so it is never stored as one.
         let over = extract_balance(
             &serde_json::json!({ "balance": 10.0, "spent": 42.0 }),
-            &config,
-        )
-        .expect("extract");
-        assert!(over.balance_usd.is_some_and(|value| value < 0.0));
-        assert!(
-            over.warnings
-                .iter()
-                .any(|warning| warning.contains("converted balance is")),
-            "{:?}",
-            over.warnings
+            &BalanceConfig {
+                balance: "$.balance - $.spent".to_string(),
+                ..config
+            },
         );
+        let error = over.expect_err("a negative remaining balance is refused");
+        assert!(error.to_string().contains("cannot be negative"), "{error}");
     }
 
     #[test]
     fn non_usd_balance_without_fx_is_stored_but_not_routable() {
         let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
+            balance: "$.balance".to_string(),
             available: None,
             currency: None,
             period_spend: None,
@@ -3886,10 +4173,9 @@ mod tests {
             "currency": "USD"
         });
         let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
-            available: Some("/available".to_string()),
-            currency: Some("/currency".to_string()),
+            balance: "$.balance".to_string(),
+            available: Some("$.available".to_string()),
+            currency: Some("$.currency".to_string()),
             period_spend: None,
             burn_rate: None,
             days_remaining: None,
@@ -3904,8 +4190,7 @@ mod tests {
     #[test]
     fn balance_requires_a_non_negative_number() {
         let config = BalanceConfig {
-            balance: "/balance".to_string(),
-            subtract: None,
+            balance: "$.balance".to_string(),
             available: None,
             currency: None,
             period_spend: None,
@@ -3929,7 +4214,7 @@ mod tests {
     #[test]
     fn health_pointer_decides_the_answer() {
         let config = HealthConfig {
-            ok_pointer: Some("/status/ok".to_string()),
+            ok_pointer: Some("$.status.ok".to_string()),
         };
         assert!(extract_health(Some(&serde_json::json!({"status": {"ok": true}})), &config).ok);
         assert!(!extract_health(Some(&serde_json::json!({"status": {"ok": false}})), &config).ok);
@@ -4100,12 +4385,159 @@ mod tests {
     }
 
     #[test]
+    fn pointer_fields_rewrite_to_the_expression_syntax() {
+        assert_eq!(rewrite_pointer("/pricing/prompt"), "$.pricing.prompt");
+        assert_eq!(rewrite_pointer("/data"), "$.data");
+        assert_eq!(rewrite_pointer("/data/0/id"), "$.data[0].id");
+        assert_eq!(rewrite_pointer("/a/b/2/c"), "$.a.b[2].c");
+        assert_eq!(rewrite_pointer("/"), "$");
+        assert_eq!(
+            rewrite_pointer("$.already.an.expression"),
+            "$.already.an.expression",
+            "a document written with the new syntax is left alone"
+        );
+    }
+
+    #[test]
+    fn a_stored_document_has_its_paths_and_subtract_migrated() {
+        let mut document = serde_json::json!({
+            "url": "/models",
+            "catalog": {
+                "entries": "/data",
+                "model_id": "/id",
+                "input": "/pricing_usd_per_million_tokens/balanced/input",
+                "output": "/pricing_usd_per_million_tokens/balanced/output",
+                "cache_read": null,
+                "context_length": "/context_length"
+            },
+            "balance": {
+                "balance": "/data/total_credits",
+                "subtract": "/data/total_usage",
+                "currency": "/currency"
+            }
+        });
+        assert!(rewrite_document_paths(&mut document));
+        assert_eq!(document["catalog"]["entries"], "$.data");
+        assert_eq!(document["catalog"]["model_id"], "$.id");
+        assert_eq!(
+            document["catalog"]["input"],
+            "$.pricing_usd_per_million_tokens.balanced.input"
+        );
+        assert_eq!(document["catalog"]["context_length"], "$.context_length");
+        assert_eq!(document["catalog"]["cache_read"], Value::Null);
+        assert_eq!(
+            document["balance"]["balance"], "$.data.total_credits - $.data.total_usage",
+            "subtract folded into the balance expression"
+        );
+        assert_eq!(document["balance"]["subtract"], Value::Null);
+        assert_eq!(document["balance"]["currency"], "$.currency");
+        assert_eq!(
+            document["url"], "/models",
+            "the fetch URL is not a field expression"
+        );
+        // A literal currency code never becomes a path.
+        let mut literal = serde_json::json!({ "balance": { "currency": "USD" } });
+        assert!(!rewrite_document_paths(&mut literal));
+        assert_eq!(literal["balance"]["currency"], "USD");
+    }
+
+    #[test]
     fn connector_config_round_trips_through_storage_shape() {
         let config = sail_template();
         let raw = serde_json::to_string(&config).expect("serialize");
         let parsed: ConnectorConfig = serde_json::from_str(&raw).expect("parse");
         assert_eq!(parsed, config);
-        assert!(raw.contains("pricing_usd_per_million_tokens/balanced/input"));
+        assert!(raw.contains("$.pricing_usd_per_million_tokens.balanced.input"));
+    }
+
+    #[tokio::test]
+    async fn the_one_time_repair_rewrites_stored_documents_once() {
+        use crate::test_support::TestApp;
+
+        let app = TestApp::new().await;
+        let pool = &app.state.pool;
+        insert_provider(pool, "legacy", "https://api.example.com/v1").await;
+        let legacy = serde_json::json!({
+            "url": "/models",
+            "allow_private": false,
+            "catalog": {
+                "entries": "/data",
+                "model_id": "/id",
+                "input": "/pricing/prompt",
+                "context_length": "/context_length"
+            },
+            "balance": {
+                "balance": "/data/total_credits",
+                "subtract": "/data/total_usage"
+            }
+        });
+        sqlx::query(
+            "INSERT INTO provider_connectors (provider_id, kind, config_json, enabled) \
+             VALUES (?, 'catalog', ?, 1)",
+        )
+        .bind("legacy")
+        .bind(legacy.to_string())
+        .execute(pool)
+        .await
+        .expect("legacy connector");
+        // A document that is not JSON must not abort the repair.
+        sqlx::query(
+            "INSERT INTO provider_connectors (provider_id, kind, config_json, enabled) \
+             VALUES (?, 'balance', ?, 1)",
+        )
+        .bind("legacy")
+        .bind("{not json")
+        .execute(pool)
+        .await
+        .expect("broken connector");
+
+        // The repair already ran when the test app opened the database; clear
+        // its marker to model an upgrade that still holds legacy documents.
+        sqlx::query("DELETE FROM db_meta WHERE key = ?")
+            .bind(EXPRESSION_REPAIR_META_KEY)
+            .execute(pool)
+            .await
+            .expect("clear marker");
+
+        let rewritten = migrate_pointer_fields(pool).await.expect("repair");
+        assert_eq!(rewritten, 1, "one readable document is rewritten");
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'catalog'",
+        )
+        .bind("legacy")
+        .fetch_one(pool)
+        .await
+        .expect("stored catalogue");
+        let document: Value = serde_json::from_str(&stored).expect("json");
+        assert_eq!(document["catalog"]["entries"], "$.data");
+        assert_eq!(document["catalog"]["input"], "$.pricing.prompt");
+        assert_eq!(document["catalog"]["context_length"], "$.context_length");
+        assert_eq!(
+            document["balance"]["balance"],
+            "$.data.total_credits - $.data.total_usage"
+        );
+        assert_eq!(document["balance"]["subtract"], Value::Null);
+
+        // A rewritten document now validates as the new syntax.
+        let config: ConnectorConfig = serde_json::from_value(serde_json::json!({
+            "url": "/models",
+            "allow_private": false,
+            "catalog": document["catalog"].clone()
+        }))
+        .expect("parse");
+        config.validate(ConnectorKind::Catalog).expect("valid");
+
+        // The broken row is untouched, and a second run is a no-op.
+        let broken: String = sqlx::query_scalar(
+            "SELECT config_json FROM provider_connectors WHERE provider_id = ? AND kind = 'balance'",
+        )
+        .bind("legacy")
+        .fetch_one(pool)
+        .await
+        .expect("stored balance");
+        assert_eq!(broken, "{not json");
+        assert_eq!(migrate_pointer_fields(pool).await.expect("second run"), 0);
     }
 
     /// Inserts a provider directly: the sweep and run-pruning tests do not need
@@ -4129,10 +4561,10 @@ mod tests {
             "url": "/models",
             "allow_private": true,
             "catalog": {
-                "entries": "/data",
-                "model_id": "/id",
-                "input": "/pricing/input",
-                "output": "/pricing/output",
+                "entries": "$.data",
+                "model_id": "$.id",
+                "input": "$.pricing.input",
+                "output": "$.pricing.output",
                 "refresh_seconds": refresh_seconds,
             }
         });

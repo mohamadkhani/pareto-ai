@@ -1275,6 +1275,83 @@ redistributing derived data. An operator who deliberately creates two rows
 under one canonical id gets no automatic merge, and a later discovery for that
 id is ambiguous rather than a guess.
 
+### D61. Connector fields are numeric expressions, not JSON Pointers
+
+**Decision (user, 2026-11-28):** every connector field that used to hold a JSON
+Pointer now holds a **numeric expression**. A lone path is the common case; the
+language also allows arithmetic, so one field can be scaled, offset by a
+constant, or read from two paths at once:
+
+```
+$.pricing.prompt                        a path
+$.pricing.prompt * 1000000              per-token -> per-million
+$.data.total_credits - $.data.total_usage
+max($.balance, 0)
+```
+
+- **Grammar.** `$` is the document root (one catalog entry, or the whole balance
+  response). A path is `$.key`, `$.key.key2`, `$.data[0].id`; keys use letters,
+  digits, `_`, and `-`, and an array index uses `[n]`. Operators are `+ - * /`,
+  unary minus, and parentheses; functions are `min`, `max`, `abs`, `round`,
+  `floor`, `ceil`. There is **no** comparison, logic, or assignment: the
+  language answers "what number is here", nothing more.
+- **Lone-path fields.** `entries`, `model_id`, `modalities_input`,
+  `modalities_output`, `context_length`, `max_output`, `available`, and
+  `ok_pointer` accept a single path only; arithmetic in one of them is refused
+  with the field name and column. They are read for their raw JSON value
+  (string, array, boolean), never as a number.
+- **Numbers from text.** A JSON number is a number. A string is a number after
+  `trim`, a dropped leading or trailing currency symbol (`$`, `EUR`-style glyphs
+  such as the euro or pound sign), dropped `,`/`_`/`'` grouping, and `(5)` read
+  as `-5`. `null`, a boolean, an array, an object, and text like `"call us"` are
+  **errors**, never zero (D10/D37).
+- **No `default`.** A field either produces a number or fails; a free model's
+  price comes from the provider's own `0`, or from a literal `0` in the
+  expression. There is no second way to spell a constant.
+- **`unit` is unchanged.** The expression only says which number to read;
+  `unit.source`, `unit.multiplier`, and `fx_to_usd` apply afterwards (D44), so
+  the OpenRouter template reads `$.pricing.prompt` and the engine multiplies by
+  `1e6`.
+- **Negative results follow D37.** A negative component is `NULL` with
+  `variable_price = 1`, the UI shows `variable`, and routing imputes the neutral
+  0.5 price score. A negative *balance* is refused outright: a remaining amount
+  cannot be negative.
+- **Failures are per field.** A division by zero, a missing path, or a
+  non-numeric value fails that field: a required price or the balance skips that
+  entry and is counted; an optional price or spend field is `NULL` with a
+  warning. The rest of the document still applies.
+- **`balance.subtract` is removed.** `$.total_credits - $.total_usage` says the
+  same thing without a second field that could silently disagree with the first.
+- **Retired syntax.** The `/path` JSON-Pointer form is refused with a message
+  naming the field and column. `connectors::migrate_pointer_fields` rewrites
+  every stored document mechanically at the migration boundary (`/a/b` ->
+  `$.a.b`, `/a/0/b` -> `$.a[0].b`, folding a stored `subtract` into `balance`),
+  guarded by `db_meta.connector_expression_fields_v1`; a document that does not
+  parse is left untouched rather than aborting startup.
+- **Bounds.** An expression is at most 512 characters and nests at most 32
+  parentheses (unary minus counts), enforced by the parser.
+
+**Why:** providers that publish prices under a shape a mapping can reach still
+express them in ways a bare path cannot: dollars-per-token strings, a separate
+total and usage, an amount quoted with a currency suffix, or a field that is
+simply absent and must stay absent rather than become a fake zero. A bare path
+forced the engine to grow one special case per shape (`subtract`, `multiplier`,
+a non-numeric branch); an expression makes the shape the operator's explicit
+statement and keeps the engine uniform. Rejecting `default` and the `/path` form
+keeps one behaviour per input: absent is absent, unreadable is an error, and
+there is one syntax to read, test, and document.
+
+**Consequences, accepted deliberately:** the mapping is more powerful than a
+pointer, so the preview must show the raw value and the converted value for each
+sample (it already does) for the operator to confirm a `* 1000000`; the parser
+lives in `server/src/expression.rs`, and the dialog re-implements only a shallow
+check (illegal character, unbalanced parenthesis, malformed path, operator in a
+lone-path field) while the server stays authoritative on save and in preview;
+`context_length` stays a lone path, so a provider that publishes `"1M"` (a
+string) leaves that field empty rather than converting it; and every test
+fixture, template, and preset moved to `$.` in the same change, so the retired
+syntax has no remaining caller.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

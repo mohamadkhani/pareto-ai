@@ -79,10 +79,10 @@ const sailTemplate: ConnectorTemplate = {
       headers: { authorization: 'Bearer {{secret}}' },
       allow_private: false,
       catalog: {
-        entries: '/data',
-        model_id: '/id',
-        input: '/pricing/balanced/input',
-        output: '/pricing/balanced/output',
+        entries: '$.data',
+        model_id: '$.id',
+        input: '$.pricing.balanced.input',
+        output: '$.pricing.balanced.output',
         cache_read: null,
         cache_write: null,
         reasoning: null,
@@ -107,9 +107,8 @@ const sailTemplate: ConnectorTemplate = {
       headers: {},
       allow_private: false,
       balance: {
-        balance: '/balance',
-        subtract: null,
-        available: '/available',
+        balance: '$.balance',
+        available: '$.available',
         currency: 'USD',
         period_spend: null,
         burn_rate: null,
@@ -410,7 +409,7 @@ describe('Connectors', () => {
     pointerRow(root, 'Input price').querySelector('button')?.click();
     fixture.detectChanges();
     const pick = root.querySelector<HTMLButtonElement>(
-      '[aria-label="Pick /data/0/pricing/asap/input"]',
+      '[aria-label="Pick $.data[0].pricing.asap.input"]',
     );
     if (pick === null) {
       throw new Error('the sample leaf is not pickable');
@@ -419,7 +418,7 @@ describe('Connectors', () => {
     fixture.detectChanges();
 
     const input = root.querySelector<HTMLInputElement>('#connector-catalog-input');
-    expect(input?.value).toBe('/pricing/asap/input');
+    expect(input?.value).toBe('$.pricing.asap.input');
   });
 
   it('rewrites the shared tier segment from the sample', async () => {
@@ -431,11 +430,11 @@ describe('Connectors', () => {
     await settle(fixture);
 
     // Working pointers that share the balanced tier.
-    typeInto(root, '#connector-catalog-input', '/data/0/pricing/balanced/input');
-    typeInto(root, '#connector-catalog-output', '/data/0/pricing/balanced/output');
+    typeInto(root, '#connector-catalog-input', '$.pricing.balanced.input');
+    typeInto(root, '#connector-catalog-output', '$.pricing.balanced.output');
     fixture.detectChanges();
 
-    expect(root.textContent).toContain('/data/0/pricing');
+    expect(root.textContent).toContain('$.pricing');
     const flex = Array.from(root.querySelectorAll<HTMLButtonElement>('.tier-options button')).find(
       (candidate) => candidate.textContent?.trim() === 'flex',
     );
@@ -446,10 +445,10 @@ describe('Connectors', () => {
     fixture.detectChanges();
 
     expect(root.querySelector<HTMLInputElement>('#connector-catalog-input')?.value).toBe(
-      '/data/0/pricing/flex/input',
+      '$.pricing.flex.input',
     );
     expect(root.querySelector<HTMLInputElement>('#connector-catalog-output')?.value).toBe(
-      '/data/0/pricing/flex/output',
+      '$.pricing.flex.output',
     );
   });
 
@@ -510,7 +509,7 @@ describe('Connectors', () => {
     };
     expect(body.enabled).toBe(true);
     expect(body.config.url).toBe('/v1/models');
-    expect(body.config.catalog.input).toBe('/pricing/balanced/input');
+    expect(body.config.catalog.input).toBe('$.pricing.balanced.input');
     expect(root.textContent).toContain('Prices connector saved.');
   });
 

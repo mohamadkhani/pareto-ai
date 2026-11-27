@@ -66,10 +66,11 @@
           *ngTemplateOutlet="connection; context: { $implicit: 'catalog', form: form }"
         ></ng-container>
 
-        <h3 class="section-title">Price pointers</h3>
+        <h3 class="section-title">Price fields</h3>
         <p class="note">
-          Pick a field, then click a number or string in the sample below. Pointers are relative to
-          one model entry.
+          Pick a field, then click a number or string in the sample below. A path starts with
+          <code>$</code> and is relative to one model entry; the five price fields also accept
+          arithmetic, e.g. <code>$.pricing.prompt * 1000000</code>.
         </p>
 
         <div class="pointer-grid">
@@ -87,11 +88,13 @@
               <ui-input
                 [id]="'connector-catalog-' + field.key"
                 [value]="catalog[field.key]"
-                placeholder="/path/to/value"
-                [ariaLabel]="field.label + ' pointer'"
+                placeholder="$.path.to.value"
+                [ariaLabel]="field.label + ' path or expression'"
                 (valueChange)="setCatalog(field.key, $event)"
               />
-              @if (sampleValue(catalog[field.key]); as value) {
+              @if (fieldIssues()[field.key]; as issue) {
+                <span class="field-error">{{ issue }}</span>
+              } @else if (sampleValue(catalog[field.key]); as value) {
                 <span class="sample-value">sample: {{ value }}</span>
               }
             </div>
@@ -103,8 +106,8 @@
             <div>
               <span class="pointer-label">Tier</span>
               <p class="note">
-                The picked pointers share <code>{{ tierInfo.parentPointer }}</code>. Switching
-                rewrites that segment; the chosen tier becomes this provider's billed price.
+                The picked paths share <code>{{ tierInfo.parentPointer }}</code>. Switching rewrites
+                that segment; the chosen tier becomes this provider's billed price.
               </p>
             </div>
             <div class="tier-options">
@@ -236,7 +239,7 @@
         @if (resultOf('catalog'); as result) {
           @if (result.samples.length === 0) {
             <ui-banner tone="warning">
-              No entries resolved. Check the entries and model id pointers, then preview again.
+              No entries resolved. Check the entries and model id paths, then preview again.
             </ui-banner>
           } @else {
             <ui-table>
@@ -304,7 +307,7 @@
 
       <div class="form-stack">
         <div class="template-row">
-          <ui-field label="Template" hint="A template prefills the URL and pointers.">
+          <ui-field label="Template" hint="A template prefills the URL and fields.">
             <ui-select
               [id]="'connector-balance-template'"
               [value]="form.templateId"
@@ -328,7 +331,7 @@
           *ngTemplateOutlet="connection; context: { $implicit: 'balance', form: form }"
         ></ng-container>
 
-        <h3 class="section-title">Balance pointers</h3>
+        <h3 class="section-title">Balance fields</h3>
         <div class="pointer-grid">
           @for (field of balanceFields; track field.key) {
             <div class="pointer-row" [class.is-active]="balance.active === field.key">
@@ -344,11 +347,13 @@
               <ui-input
                 [id]="'connector-balance-' + field.key"
                 [value]="balance[field.key]"
-                placeholder="/path/to/value"
-                [ariaLabel]="field.label + ' pointer'"
+                placeholder="$.path.to.value"
+                [ariaLabel]="field.label + ' path or expression'"
                 (valueChange)="setBalance(field.key, $event)"
               />
-              @if (sampleValue(balance[field.key]); as value) {
+              @if (fieldIssues()[field.key]; as issue) {
+                <span class="field-error">{{ issue }}</span>
+              } @else if (sampleValue(balance[field.key]); as value) {
                 <span class="sample-value">sample: {{ value }}</span>
               }
             </div>
@@ -360,11 +365,11 @@
             <ui-input
               [id]="'connector-balance-currency'"
               [value]="balance.currency"
-              placeholder="USD or /currency"
-              [ariaLabel]="'Balance currency or pointer'"
+              placeholder="USD or $.currency"
+              [ariaLabel]="'Balance currency code or path'"
               (valueChange)="setBalance('currency', $event)"
             />
-            <span class="sample-value">A literal code or a pointer to one.</span>
+            <span class="sample-value">A literal code (USD) or a $.path to one.</span>
           </div>
           <div class="pointer-row">
             <div class="pointer-head">
@@ -582,11 +587,11 @@
         <h3 class="section-title">Health check</h3>
         <p class="note">
           The credential Test action calls this endpoint. A 2xx response is healthy unless the
-          optional pointer says otherwise.
+          optional path says otherwise.
         </p>
         <div class="pointer-row" [class.is-active]="health.active === 'ok_pointer'">
           <div class="pointer-head">
-            <span class="pointer-label">OK pointer (optional)</span>
+            <span class="pointer-label">OK path (optional)</span>
             @if (health.active === 'ok_pointer') {
               <span class="picking">pick from sample</span>
             }
@@ -595,11 +600,13 @@
           <ui-input
             [id]="'connector-health-ok'"
             [value]="health.ok_pointer"
-            placeholder="/status/ok"
-            [ariaLabel]="'Health OK pointer'"
+            placeholder="$.status.ok"
+            [ariaLabel]="'Health OK path'"
             (valueChange)="setHealth('ok_pointer', $event)"
           />
-          @if (sampleValue(health.ok_pointer); as value) {
+          @if (fieldIssues()['ok_pointer']; as issue) {
+            <span class="field-error">{{ issue }}</span>
+          } @else if (sampleValue(health.ok_pointer); as value) {
             <span class="sample-value">sample: {{ value }}</span>
           }
         </div>
