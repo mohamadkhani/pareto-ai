@@ -1495,6 +1495,15 @@ a model's providers: a combo that ranks models by quality still wants the
 cheapest (or fastest) provider of the chosen model, which a single weight
 vector cannot express.
 
+**Migration numbers.** The work ships as `0022_offering_routes.sql` (the
+offerings rebuild) and `0023_combo_pool_ordering.sql` (the combo columns,
+provider selection, and stickiness tolerance). `main` already owns 21 for the
+request-log columns (D64). A database migrated by a build from this branch
+before it merged `main` recorded the same two files as 21 and 22, so
+`db::open` renumbers those two bookkeeping rows — with the checksums of the
+files that carry the SQL today — before the migrator runs. The SQL bodies are
+identical; only the number in the header comment differs.
+
 
 ## Open questions
 
