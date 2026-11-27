@@ -772,8 +772,8 @@ where
         match parsed {
             // A successfully parsed lookup is the complete provider set, even
             // when it is empty: recording the empty entry lets `apply_success`
-            // disable every previously known route. Only an error leaves the
-            // model absent, so a transient failure never prunes.
+            // mark every previously known route removed. Only an error leaves
+            // the model absent, so a transient failure never prunes.
             Ok(endpoints) => {
                 routes.insert(id, endpoints);
             }
@@ -1633,7 +1633,7 @@ mod tests {
 
     /// A later lookup that lists no providers for `openai/gpt-4o` (the model
     /// is still in the catalog) and keeps the fixture answer otherwise. Used
-    /// to prove a dropped route is disabled, not deleted (D64).
+    /// to prove a dropped route is marked removed, not deleted (D64).
     fn no_gpt4o_endpoints(model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
         if model_id == "openai/gpt-4o" {
             Box::pin(std::future::ready(Ok(
@@ -3022,7 +3022,7 @@ mod tests {
         // Now seed the routes and fail again: an error leaves the model
         // *absent* from the lookup result, so the known routes are untouched.
         // That is what separates an error from a successful empty lookup,
-        // which is the complete provider set and disables every route (see
+        // which is the complete provider set and marks every route removed (see
         // `an_empty_endpoint_lookup_marks_all_routes_removed`).
         run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
             .await

@@ -784,11 +784,17 @@ pub struct PoolItem {
     pub quality: routing::QualityScore,
     pub mix_price: Option<crate::mix::MixPrice>,
     pub signal: routing::CandidateSignal,
+    /// The sync marked this route removed (`route_removed_at`, D64). Reported
+    /// with its own reason so it is not mistaken for an operator disable.
+    pub route_removed: bool,
 }
 
 /// Why a catalog pool excluded an offering (D35's one-line vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolReason {
+    /// The sync marked the route removed: OpenRouter no longer lists the
+    /// provider (D64).
+    Removed,
     Disabled,
     NoAccess,
     Cooldown,
@@ -806,6 +812,7 @@ impl PoolReason {
     /// The stable string the preview and `decision_json` report.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Removed => "removed",
             Self::Disabled => "disabled",
             Self::NoAccess => "no_access",
             Self::Cooldown => "cooldown",
@@ -1016,6 +1023,13 @@ fn rewrite_explanation_rank(explanation: &str, position: usize) -> String {
 /// The first constraint/filter failure of a pool item, in pipeline order.
 fn pool_exclusion(item: &PoolItem, constraints: &PoolConstraints) -> Option<(PoolReason, String)> {
     let signal = &item.signal;
+    if item.route_removed {
+        return Some((
+            PoolReason::Removed,
+            "the sync marked this route removed: OpenRouter no longer lists the provider"
+                .to_string(),
+        ));
+    }
     if !signal.enabled {
         return Some((
             PoolReason::Disabled,
@@ -2150,6 +2164,7 @@ mod tests {
             },
             mix_price: per_m.map(mix_at),
             signal,
+            route_removed: false,
         }
     }
 
@@ -2717,5 +2732,28 @@ mod tests {
             .await
             .expect_err("bad tolerance");
         assert!(err.to_string().contains("price_tolerance_pct"), "{err}");
+    }
+
+    #[test]
+    fn a_removed_route_is_reported_with_its_own_reason() {
+        let mut item = pool_item("gone", 0.9, Some(1.0));
+        item.route_removed = true;
+        let outcome = resolve_pool(
+            vec![item],
+            &PoolConstraints::default(),
+            &Weights::default(),
+            None,
+        );
+        assert!(outcome.ordered.is_empty());
+        assert_eq!(outcome.excluded.len(), 1);
+        assert_eq!(outcome.excluded[0].reason, PoolReason::Removed);
+        assert_eq!(outcome.excluded[0].reason.as_str(), "removed");
+        assert!(
+            outcome.excluded[0]
+                .detail
+                .contains("no longer lists the provider"),
+            "{}",
+            outcome.excluded[0].detail
+        );
     }
 }

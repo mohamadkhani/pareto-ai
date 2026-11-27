@@ -199,6 +199,7 @@ export interface ComboPreview {
 
 /** Human labels for the server's stable exclusion reasons. */
 export const POOL_REASON_LABELS: Record<string, string> = {
+  removed: 'Removed by sync (provider gone)',
   disabled: 'Offering disabled',
   no_access: 'No access (grants)',
   cooldown: 'Credential cooling down',

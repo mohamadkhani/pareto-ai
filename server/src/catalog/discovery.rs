@@ -22,7 +22,8 @@
 //!   stay `NULL` unless a catalog connector supplied them, because the OpenAI
 //!   list payload carries no such fields;
 //! * the provider gets one `offerings` row per id (uniqued by
-//!   `(provider_id, upstream_model_id)`). New offerings are enabled, carry no
+//!   `(provider_id, upstream_model_id, route)`; discovery only ever owns the
+//!   route-less row, `route = ''`). New offerings are enabled, carry no
 //!   overrides, no headers, and no price: unpriced is fine because routing
 //!   already imputes missing prices.
 //!

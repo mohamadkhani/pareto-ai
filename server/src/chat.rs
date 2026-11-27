@@ -313,6 +313,10 @@ struct Candidate {
     /// OpenRouter upstream provider slug (`''` when the offering is unrouted,
     /// D64). Set together with `routing_json`.
     route: String,
+    /// The sync marked this route removed (`route_removed_at`): OpenRouter no
+    /// longer lists the provider (D64). It is excluded from routing but kept
+    /// so its telemetry, usage, and admin settings survive.
+    route_removed: bool,
     /// Body fragment merged into the upstream request to pin the provider, e.g.
     /// `{"provider":{"order":["azure"],"allow_fallbacks":false}}` (D64).
     routing_json: Option<String>,
@@ -416,6 +420,7 @@ fn build_candidate(
         provider_name: row.provider_name,
         base_url: row.base_url,
         route: row.offering_route,
+        route_removed: row.offering_route_removed_at.is_some(),
         routing_json: row.offering_routing_json,
         enabled: row.offering_enabled == 1
             && row.provider_enabled == 1
@@ -1689,6 +1694,7 @@ pub async fn execute(
                                     .and_then(Option::as_ref)
                                     .cloned(),
                                 signal,
+                                route_removed: candidate.route_removed,
                             }
                         })
                         .collect();
@@ -4051,6 +4057,7 @@ pub(crate) async fn preview_combo(
             quality: quality_score,
             mix_price,
             signal,
+            route_removed: candidate.route_removed,
         });
     }
 
@@ -9525,6 +9532,7 @@ mod tests {
             provider_name: "p".to_string(),
             base_url: "https://example.test".to_string(),
             route: String::new(),
+            route_removed: false,
             routing_json: None,
             enabled: true,
             context_length: None,
