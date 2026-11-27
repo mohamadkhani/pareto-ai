@@ -86,10 +86,14 @@ function comboFixture(overrides: Partial<Combo> = {}): Combo {
     pool: 'members',
     min_quality: null,
     max_mix_price_per_m: null,
+    sort: 'price',
+    sort_2: 'quality',
+    sort_3: 'reliability',
+    provider_selection: 'mix_price',
     members: [{ offering_id: 'off1', weight: 1 }],
     enabled: true,
     rr_cursor: 0,
-    stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
+    stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto', price_tolerance_pct: 5 },
     ...overrides,
   };
 }
@@ -344,7 +348,7 @@ describe('Combos', () => {
       min_quality: null,
       max_mix_price_per_m: null,
       mix_profile: null,
-      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
+      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto', price_tolerance_pct: 5 },
     });
     expect(root.textContent).toContain('Combo saved.');
     expect(root.textContent).toContain('combo:shared-fast');
@@ -383,7 +387,7 @@ describe('Combos', () => {
       min_quality: null,
       max_mix_price_per_m: null,
       mix_profile: null,
-      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
+      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto', price_tolerance_pct: 5 },
     });
   });
 
@@ -463,7 +467,7 @@ describe('Combos', () => {
       min_quality: null,
       max_mix_price_per_m: null,
       mix_profile: null,
-      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto' },
+      stickiness: { enabled: false, ttl_seconds: 1800, key_source: 'auto', price_tolerance_pct: 5 },
     });
   });
 
@@ -554,7 +558,7 @@ describe('Combos', () => {
     expect(root.querySelector('dialog form')).not.toBeNull();
   });
 
-  it('creates an all-models combo with constraints, a mix profile, and stickiness', async () => {
+  it('creates an all-models combo with constraints, ordering knobs, mix profile, and stickiness', async () => {
     queueLoad(fetchMock);
     fetchMock.respond(jsonResponse(201, comboFixture({ pool: 'all', min_quality: 1400 })));
     queueLoad(fetchMock, [comboFixture({ pool: 'all', min_quality: 1400 })]);
@@ -582,6 +586,10 @@ describe('Combos', () => {
     typeInto(root, '#combo-min-quality', '1400');
     typeInto(root, '#combo-max-mix-price', '2.5');
     selectInto(root, '#combo-mix-profile', 'mix-chat');
+    selectInto(root, '#combo-pool-sort', 'quality');
+    selectInto(root, '#combo-pool-sort-2', 'price');
+    selectInto(root, '#combo-pool-sort-3', 'speed');
+    selectInto(root, '#combo-provider-selection', 'reliability');
 
     const pinSwitch = Array.from(
       root.querySelectorAll<HTMLButtonElement>('button[role="switch"]'),
@@ -593,6 +601,7 @@ describe('Combos', () => {
     fixture.detectChanges();
     selectInto(root, '#combo-stickiness-ttl', '3600');
     selectInto(root, '#combo-stickiness-key', 'header');
+    typeInto(root, '#combo-stickiness-tolerance', '12');
     fixture.detectChanges();
     expect(root.textContent).toContain('X-Session-Id');
     // Header mode has no derived-key fallback: no header means no pin.
@@ -615,8 +624,39 @@ describe('Combos', () => {
       min_quality: 1400,
       max_mix_price_per_m: 2.5,
       mix_profile: 'mix-chat',
-      stickiness: { enabled: true, ttl_seconds: 3600, key_source: 'header' },
+      stickiness: {
+        enabled: true,
+        ttl_seconds: 3600,
+        key_source: 'header',
+        price_tolerance_pct: 12,
+      },
+      sort: 'quality',
+      sort_2: 'price',
+      sort_3: 'speed',
+      provider_selection: 'reliability',
     });
+  });
+
+  it('keeps the sort chain distinct when the operator changes an axis', async () => {
+    queueLoad(fetchMock);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'New combo').click();
+    fixture.detectChanges();
+    buttonByText(root, 'All models with constraints').click();
+    fixture.detectChanges();
+
+    // Choosing "reliability" as the primary axis evicts it from the two
+    // tie-break slots, so no duplicate axis can be submitted.
+    selectInto(root, '#combo-pool-sort', 'reliability');
+    fixture.detectChanges();
+    const select = (id: string): string =>
+      (root.querySelector(id) as HTMLSelectElement | null)?.value ?? '';
+    expect(select('#combo-pool-sort')).toBe('reliability');
+    expect(select('#combo-pool-sort-2')).not.toBe('reliability');
+    expect(select('#combo-pool-sort-3')).not.toBe('reliability');
+    expect(select('#combo-pool-sort-2')).not.toBe(select('#combo-pool-sort-3'));
   });
 
   it('refuses an all-models combo with no constraint and mirrors the server message', async () => {

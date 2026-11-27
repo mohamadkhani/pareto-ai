@@ -29,6 +29,8 @@ import type {
   ComboStrategy,
   ComboWeights,
   ComboWeightsInput,
+  PoolSort,
+  ProviderSelection,
   StickinessKeySource,
   WeightComponent,
   WeightPreset,
@@ -59,9 +61,17 @@ interface ComboDraft {
   maxMixPrice: string;
   /** A mix profile id, or '' for the global default. */
   mixProfile: string;
+  /** The `pool = all` ordering axis and its tie-breaks (D65). */
+  poolSort: PoolSort;
+  poolSort2: PoolSort;
+  poolSort3: PoolSort;
+  /** How the pool picks among the providers of one model (D65). */
+  providerSelection: ProviderSelection;
   stickinessEnabled: boolean;
   stickinessTtl: number;
   stickinessKeySource: StickinessKeySource;
+  /** Sticky price tolerance percent, kept as typed until save (D65). */
+  stickinessTolerance: string;
 }
 
 /** The four custom weight inputs, in form order. */
@@ -244,6 +254,21 @@ export class Combos {
 
   protected readonly catalogPool = computed(() => this.draft().pool === 'all');
 
+  /** The sticky price tolerance must be a number in 0–100 (D65). */
+  protected readonly stickinessToleranceError = computed(() => {
+    if (!this.draft().stickinessEnabled) {
+      return '';
+    }
+    const value = this.draft().stickinessTolerance.trim();
+    if (value === '') {
+      return '';
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100
+      ? ''
+      : 'Price tolerance must be a number between 0 and 100.';
+  });
+
   /** The advertised TTLs, plus a stored custom value when one is in use. */
   protected readonly stickinessOptions = computed(() => {
     const ttl = this.draft().stickinessTtl;
@@ -419,9 +444,14 @@ export class Combos {
       minQuality: combo.min_quality === null ? '' : String(combo.min_quality),
       maxMixPrice: combo.max_mix_price_per_m === null ? '' : String(combo.max_mix_price_per_m),
       mixProfile: combo.mix_profile ?? '',
+      poolSort: combo.sort,
+      poolSort2: combo.sort_2,
+      poolSort3: combo.sort_3,
+      providerSelection: combo.provider_selection,
       stickinessEnabled: combo.stickiness.enabled,
       stickinessTtl: combo.stickiness.ttl_seconds,
       stickinessKeySource: combo.stickiness.key_source,
+      stickinessTolerance: String(combo.stickiness.price_tolerance_pct),
     });
     this.members.set(combo.members.map((member) => ({ ...member })));
     this.memberPicker.set('');
@@ -485,6 +515,38 @@ export class Combos {
     this.draft.update((draft) => ({ ...draft, maxMixPrice: value }));
   }
 
+  protected setPoolSort(value: string): void {
+    const sort = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      const chain = rebalanceAxes(sort, draft.poolSort2, draft.poolSort3);
+      return { ...draft, poolSort: sort, poolSort2: chain[0], poolSort3: chain[1] };
+    });
+  }
+
+  protected setPoolSort2(value: string): void {
+    const sort2 = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      // Keep the primary axis fixed and re-pick only the lower tie-breaks.
+      const chain = rebalanceAxes(draft.poolSort, sort2, draft.poolSort3);
+      return { ...draft, poolSort2: chain[0], poolSort3: chain[1] };
+    });
+  }
+
+  protected setPoolSort3(value: string): void {
+    const sort3 = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      const chain = rebalanceAxes(draft.poolSort, draft.poolSort2, sort3);
+      return { ...draft, poolSort2: chain[0], poolSort3: chain[1] };
+    });
+  }
+
+  protected setProviderSelection(value: string): void {
+    this.draft.update((draft) => ({
+      ...draft,
+      providerSelection: providerSelectionFromValue(value),
+    }));
+  }
+
   protected setMixProfile(value: string): void {
     this.draft.update((draft) => ({ ...draft, mixProfile: value }));
   }
@@ -504,6 +566,10 @@ export class Combos {
   protected setStickinessKeySource(value: string): void {
     const source: StickinessKeySource = value === 'header' ? 'header' : 'auto';
     this.draft.update((draft) => ({ ...draft, stickinessKeySource: source }));
+  }
+
+  protected setStickinessTolerance(value: string): void {
+    this.draft.update((draft) => ({ ...draft, stickinessTolerance: value }));
   }
 
   /** `header` reads X-Session-Id; `auto` hashes identity + first message. */
@@ -722,6 +788,7 @@ export class Combos {
       this.nameError() !== '' ||
       this.membersError() !== '' ||
       this.constraintError() !== '' ||
+      this.stickinessToleranceError() !== '' ||
       (membersPool && this.memberWeightsInvalid()) ||
       (this.draft().weightsMode === 'custom' && this.customWeightsInvalid())
     );
@@ -751,7 +818,14 @@ export class Combos {
         enabled: this.draft().stickinessEnabled,
         ttl_seconds: this.draft().stickinessTtl,
         key_source: this.draft().stickinessKeySource,
+        price_tolerance_pct: stickyToleranceFromInput(this.draft().stickinessTolerance),
       },
+      // The ordering knobs only describe a catalog pool (D65); a member pool
+      // leaves them off so the server keeps its defaults.
+      sort: pool === 'all' ? this.draft().poolSort : undefined,
+      sort_2: pool === 'all' ? this.draft().poolSort2 : undefined,
+      sort_3: pool === 'all' ? this.draft().poolSort3 : undefined,
+      provider_selection: pool === 'all' ? this.draft().providerSelection : undefined,
     };
   }
 
@@ -783,9 +857,14 @@ function emptyDraft(): ComboDraft {
     minQuality: '',
     maxMixPrice: '',
     mixProfile: '',
+    poolSort: 'price',
+    poolSort2: 'quality',
+    poolSort3: 'reliability',
+    providerSelection: 'mix_price',
     stickinessEnabled: false,
     stickinessTtl: 1800,
     stickinessKeySource: 'auto',
+    stickinessTolerance: '5',
   };
 }
 
@@ -804,6 +883,60 @@ function strategyFromValue(value: string): ComboStrategy {
     default:
       return 'weighted';
   }
+}
+
+/**
+ * Repairs the lower tie-breaks so the three axes stay distinct: the server
+ * rejects a chain that repeats an axis, so the form never sends one. `wanted2`
+ * is kept when possible; otherwise the first unused axis is chosen in the
+ * documented order (quality, reliability, speed, price).
+ */
+function rebalanceAxes(
+  primary: PoolSort,
+  wanted2: PoolSort,
+  wanted3: PoolSort,
+): [PoolSort, PoolSort] {
+  const all: readonly PoolSort[] = ['quality', 'reliability', 'speed', 'price'];
+  const second =
+    wanted2 !== primary ? wanted2 : (all.find((axis) => axis !== primary) ?? 'quality');
+  const third =
+    wanted3 !== primary && wanted3 !== second
+      ? wanted3
+      : (all.find((axis) => axis !== primary && axis !== second) ?? 'reliability');
+  return [second, third];
+}
+
+function poolSortFromValue(value: string): PoolSort {
+  switch (value) {
+    case 'quality':
+    case 'speed':
+    case 'reliability':
+    case 'price':
+      return value;
+    default:
+      return 'price';
+  }
+}
+
+function providerSelectionFromValue(value: string): ProviderSelection {
+  switch (value) {
+    case 'speed':
+    case 'reliability':
+    case 'mix_price':
+      return value;
+    default:
+      return 'mix_price';
+  }
+}
+
+/** The typed tolerance, clamped to 0–100; blank falls back to the 5% default. */
+function stickyToleranceFromInput(value: string): number {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return 5;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 5;
 }
 
 function weightsModeFromValue(value: string): WeightsMode {
@@ -835,5 +968,9 @@ function comboInputOf(combo: Combo, enabled: boolean): ComboInput {
     max_mix_price_per_m: combo.max_mix_price_per_m,
     mix_profile: combo.mix_profile,
     stickiness: { ...combo.stickiness },
+    sort: combo.sort,
+    sort_2: combo.sort_2,
+    sort_3: combo.sort_3,
+    provider_selection: combo.provider_selection,
   };
 }

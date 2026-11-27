@@ -511,16 +511,27 @@ pub fn clamp_max_tokens(requested: Option<i64>, limit: Option<i64>) -> Option<i6
 /// `model` rewritten to the upstream id, `stream` set explicitly, `max_tokens`
 /// clamped to the offering limit, and — when streaming —
 /// `stream_options.include_usage` forced on so the final chunk carries `usage`.
+///
+/// `routing` is an offering's routing fragment (D65), merged in *after* the
+/// caller's fields so the gateway's provider pin wins over any client-supplied
+/// `provider` object; `model`/`messages`/`stream`/`max_tokens` are written last
+/// and are never overridden by it.
 pub fn build_body(
     extra: &serde_json::Map<String, serde_json::Value>,
     messages: &[serde_json::Value],
     model: &str,
     stream: bool,
     max_tokens: Option<i64>,
+    routing: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     for (key, value) in extra {
         body.insert(key.clone(), value.clone());
+    }
+    if let Some(serde_json::Value::Object(fragment)) = routing {
+        for (key, value) in fragment {
+            body.insert(key.clone(), value.clone());
+        }
     }
     body.insert("model".to_string(), model.into());
     body.insert("messages".to_string(), messages.to_vec().into());

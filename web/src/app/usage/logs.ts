@@ -133,6 +133,7 @@ export class Logs {
   protected readonly statusFilter = signal<string>('');
   protected readonly classFilter = signal<string>('');
   protected readonly providerFilter = signal<string>('');
+  protected readonly routeFilter = signal<string>('');
   protected readonly loading = signal(false);
   protected readonly loadingMore = signal(false);
   protected readonly loadError = signal<string | null>(null);
@@ -155,6 +156,28 @@ export class Logs {
     { value: '', label: 'All providers' },
     ...this.providers().map((provider) => ({ value: provider.id, label: provider.name })),
   ]);
+
+  /**
+   * Upstream-provider filter options (D65): the routes seen in the loaded page.
+   * The selected route is always kept so filtering by one does not hide its own
+   * option, and the empty value is "All upstream providers".
+   */
+  protected readonly routeOptions = computed<ComboboxOption[]>(() => {
+    const seen = new Set<string>();
+    for (const entry of this.entries()) {
+      if (entry.route !== null && entry.route !== '') {
+        seen.add(entry.route);
+      }
+    }
+    const selected = this.routeFilter();
+    if (selected !== '' && !seen.has(selected)) {
+      seen.add(selected);
+    }
+    return [
+      { value: '', label: 'All upstream providers' },
+      ...[...seen].sort().map((route) => ({ value: route, label: route })),
+    ];
+  });
 
   /** The entry whose details are open. */
   protected readonly expandedId = signal<string | null>(null);
@@ -256,6 +279,11 @@ export class Logs {
     void this.reload();
   }
 
+  protected onRouteFilterChange(value: string): void {
+    this.routeFilter.set(value);
+    void this.reload();
+  }
+
   /**
    * Narrows the log to the provider that served one row (the Provider cell).
    * Reuses the existing filter so the operator stays in context; the control
@@ -266,6 +294,18 @@ export class Logs {
       return;
     }
     this.providerFilter.set(providerId);
+    void this.reload();
+  }
+
+  /**
+   * Narrows the log to the upstream provider (route) that served one row (D65).
+   * The provider cell shows both the provider row and the pinned route slug.
+   */
+  protected filterByRoute(route: string | null): void {
+    if (route === null || route === '' || route === this.routeFilter()) {
+      return;
+    }
+    this.routeFilter.set(route);
     void this.reload();
   }
 
@@ -280,6 +320,7 @@ export class Logs {
     status?: number;
     errorClass?: string;
     provider?: string;
+    route?: string;
   } {
     return {
       limit: PAGE_SIZE,
@@ -287,6 +328,7 @@ export class Logs {
       ...(this.statusFilter() === '' ? {} : { status: Number(this.statusFilter()) }),
       ...(this.classFilter() === '' ? {} : { errorClass: this.classFilter() }),
       ...(this.providerFilter() === '' ? {} : { provider: this.providerFilter() }),
+      ...(this.routeFilter() === '' ? {} : { route: this.routeFilter() }),
     };
   }
 

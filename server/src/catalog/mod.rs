@@ -1208,7 +1208,9 @@ pub async fn delete_model(
 // Offerings
 // ---------------------------------------------------------------------------
 
-/// Lists offerings, optionally filtered by provider and/or model.
+/// Lists offerings, optionally filtered by provider and/or model. Routes the
+/// sync marked removed (`route_removed_at`) are excluded, since the router
+/// would silently skip them.
 pub async fn list_offerings(
     pool: &sqlx::SqlitePool,
     provider_id: Option<&str>,
@@ -1217,6 +1219,7 @@ pub async fn list_offerings(
     let rows = sqlx::query_as::<_, OfferingRow>(&format!(
         "SELECT {SELECT_OFFERING_COLUMNS} FROM offerings \
          WHERE (? IS NULL OR provider_id = ?) AND (? IS NULL OR model_id = ?) \
+           AND route_removed_at IS NULL \
          ORDER BY created_at, id"
     ))
     .bind(provider_id)
@@ -1737,7 +1740,8 @@ pub struct V1ModelEntry {
 }
 
 /// The enabled offerings as advertised by `GET /v1/models`: one entry per
-/// enabled offering of an enabled provider and an enabled model, with
+/// enabled offering of an enabled provider and an enabled model that the sync
+/// has not marked removed (`route_removed_at IS NULL`), with
 /// effective (override-aware) limits and the offering's price row. Unknown
 /// prices stay null.
 pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1ModelEntry>, CatalogError> {
@@ -1752,6 +1756,7 @@ pub async fn list_v1_models(pool: &sqlx::SqlitePool) -> Result<Vec<V1ModelEntry>
          JOIN providers pr ON pr.id = o.provider_id \
          LEFT JOIN prices p ON p.offering_id = o.id \
          WHERE o.enabled = 1 AND pr.enabled = 1 AND m.enabled = 1 \
+           AND o.route_removed_at IS NULL \
          ORDER BY m.canonical_name, o.upstream_model_id",
     )
     .fetch_all(pool)

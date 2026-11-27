@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Connection, SqlitePool};
 
 /// Opens (or creates) the database, applies migrations, and returns a pool.
 pub async fn open(path: &Path) -> Result<SqlitePool> {
@@ -48,16 +48,25 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
         options = options.log_statements(log::LevelFilter::Trace);
     }
 
+    // Migrations run on a dedicated connection with foreign keys OFF. SQLite
+    // cannot drop a table-level constraint, so a rebuild (e.g. 0022 widening
+    // the `UNIQUE` on `offerings`) must create a new table, copy, drop the old
+    // one, and rename. `DROP TABLE` runs an implicit DELETE, so with foreign
+    // keys ON the child rows of `offerings` (`prices`, `usage_events`,
+    // `telemetry_attempts`, combo members, ...) cascade away. `PRAGMA
+    // foreign_keys` cannot be toggled inside the transaction `Migrator::apply`
+    // always opens, so the connection itself must start with it off; the
+    // pool's own connections keep it ON (see the `foreign_keys(true)` above).
+    let migration_options = options.clone().foreign_keys(false);
+    run_migrations(&migration_options)
+        .await
+        .with_context(|| format!("opening database {}", path.display()))?;
+
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(options)
         .await
         .with_context(|| format!("opening database {}", path.display()))?;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("running migrations")?;
 
     // One-time data repair that pure SQL cannot express: the strict catalog
     // identity is computed in Rust. It is guarded by a `db_meta` key and is a
@@ -67,6 +76,172 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
         .context("repairing duplicate catalog models")?;
 
     Ok(pool)
+}
+
+/// Applies every pending migration on one fresh connection.
+///
+/// The connection is built from `options`, so the caller decides the foreign
+/// keys state: [`open_inner`] passes them off (a rebuild drops a referenced
+/// table; see the comment there). Failure mode: any connection or migration
+/// error, wrapped by the caller.
+async fn run_migrations(options: &SqliteConnectOptions) -> Result<()> {
+    let mut connection = sqlx::SqliteConnection::connect_with(options)
+        .await
+        .context("opening the migration connection")?;
+    let migrator = sqlx::migrate!("./migrations");
+    let result = async {
+        adopt_renumbered_migrations(&mut connection, &migrator).await?;
+        repair_known_checksums(&mut connection, &migrator).await?;
+        migrator
+            .run(&mut connection)
+            .await
+            .context("running migrations")
+    }
+    .await;
+    drop(connection);
+    result
+}
+
+/// Moves a database onto current migration numbers when a build from before
+/// this branch merged `main` recorded them differently.
+///
+/// The combo work first numbered its migrations 21 (`offering routes`) and 22
+/// (`combo pool ordering`). `main` later took 21 for the request-log columns
+/// (D64), so the same files are 22 and 23 now (D65); their SQL bodies are
+/// unchanged and only the number in the header comment moved. sqlx refuses to
+/// start when a recorded migration is absent from the resolved set, so the two
+/// bookkeeping rows are renumbered, with the checksum of the file that carries
+/// that SQL today. This is a no-op for a fresh database, for one already on the
+/// current numbers, and for any other database.
+async fn adopt_renumbered_migrations(
+    connection: &mut sqlx::SqliteConnection,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    /// `(recorded version, recorded description, current version)`, newest
+    /// first so a move never lands on a number that has not been vacated yet.
+    const RENUMBERED: [(i64, &str, i64); 2] =
+        [(22, "combo pool ordering", 23), (21, "offering routes", 22)];
+
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("looking for the migrations table")?;
+    if has_table == 0 {
+        return Ok(());
+    }
+
+    let applied: std::collections::HashMap<i64, String> =
+        sqlx::query_as("SELECT version, description FROM _sqlx_migrations WHERE version >= 21")
+            .fetch_all(&mut *connection)
+            .await
+            .context("reading applied migrations")?
+            .into_iter()
+            .collect();
+
+    let mut occupied: std::collections::HashSet<i64> = applied.keys().copied().collect();
+    let mut moves = Vec::new();
+    for (recorded, description, current) in RENUMBERED {
+        if applied.get(&recorded).map(String::as_str) != Some(description) {
+            continue;
+        }
+        if occupied.contains(&current) {
+            continue;
+        }
+        let Some(target) = migrator.iter().find(|m| m.version == current) else {
+            continue;
+        };
+        occupied.remove(&recorded);
+        occupied.insert(current);
+        moves.push((recorded, description, target));
+    }
+    if moves.is_empty() {
+        return Ok(());
+    }
+
+    let mut transaction = connection
+        .begin()
+        .await
+        .context("opening the renumbering transaction")?;
+    for (recorded, description, target) in moves {
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET version = ?, description = ?, checksum = ? \
+             WHERE version = ? AND description = ?",
+        )
+        .bind(target.version)
+        .bind(target.description.as_ref())
+        .bind(target.checksum.to_vec())
+        .bind(recorded)
+        .bind(description)
+        .execute(&mut *transaction)
+        .await
+        .context("renumbering an applied migration")?;
+        log::warn!(
+            "renumbered applied migration {recorded} to {} ({})",
+            target.version,
+            target.description
+        );
+    }
+    transaction
+        .commit()
+        .await
+        .context("committing the renumbering")
+}
+
+/// The pre-review checksum of `0021_request_log_target.sql`, whose only
+/// difference from the current file is comment text. A build from the review
+/// round before that wording landed recorded this value when it applied the
+/// migration, so startup recognises it and refreshes the row.
+const PRE_REVIEW_0021: &[u8] = &[
+    0x25, 0x6d, 0xb0, 0xf7, 0x38, 0x15, 0xf8, 0x80, 0x7f, 0xbf, 0x5a, 0xf7, 0x7a, 0x24, 0x84, 0xcd,
+    0x80, 0x83, 0xfd, 0x31, 0x29, 0xe4, 0x8b, 0x72, 0xcc, 0xbe, 0x86, 0x09, 0x1c, 0x9c, 0x93, 0x76,
+    0x89, 0x82, 0xe8, 0x21, 0x14, 0xd2, 0x8f, 0x71, 0x28, 0x9d, 0x02, 0xce, 0x8a, 0xd1, 0x98, 0x8c,
+];
+
+/// Repairs the checksum of a migration whose SQL text changed only in comments
+/// after it was applied.
+///
+/// The request-log migration (21) was applied by a build from the review round
+/// before its final wording landed; only comments changed, so the columns are
+/// already in place. sqlx refuses to start when a recorded checksum differs from
+/// the resolved file, so the row is refreshed to the current checksum. The
+/// update only matches the exact historical checksum, so an unrelated edit to
+/// the same file still fails loudly.
+async fn repair_known_checksums(
+    connection: &mut sqlx::SqliteConnection,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("looking for the migrations table")?;
+    if has_table == 0 {
+        return Ok(());
+    }
+
+    let Some(current) = migrator.iter().find(|m| m.version == 21) else {
+        return Ok(());
+    };
+    let changed = sqlx::query(
+        "UPDATE _sqlx_migrations SET checksum = ? \
+         WHERE version = 21 AND description = 'request log target' AND checksum = ?",
+    )
+    .bind(current.checksum.to_vec())
+    .bind(PRE_REVIEW_0021)
+    .execute(&mut *connection)
+    .await
+    .context("repairing the request-log migration checksum")?
+    .rows_affected();
+    if changed > 0 {
+        log::warn!(
+            "refreshed the checksum of migration 21 ({}); its SQL changed only in comments",
+            current.description
+        );
+    }
+    Ok(())
 }
 
 /// Cheap liveness probe used by the health endpoint.
@@ -136,6 +311,349 @@ mod tests {
                 "missing index {index}: {indexes:?}"
             );
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression for the 0022 rebuild (D65): dropping the referenced
+    /// `offerings` table with foreign keys ON cascades the child rows away.
+    /// The upgrade path must run migrations with foreign keys off, so a
+    /// non-empty database keeps its `prices` and `usage_events` rows and the
+    /// rebuilt `offerings` gains the new `route`/`routing_json` columns.
+    #[tokio::test]
+    async fn upgrading_past_0022_keeps_child_rows() {
+        let dir = std::env::temp_dir().join(format!("gateway-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        let path = dir.join("gateway.db");
+
+        // Build the database a pre-D65 install has: migrations 0001..0020
+        // applied, then the provider/model/offering/price/usage rows the 0022
+        // rebuild must preserve. Running the embedded migrations filtered to
+        // `<= 20` records the same checksums the real runner then expects.
+        let mut pre_upgrade = sqlx::migrate!("./migrations");
+        let subset: Vec<_> = pre_upgrade
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 20)
+            .cloned()
+            .collect();
+        pre_upgrade.migrations = std::borrow::Cow::Owned(subset);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("open raw connection");
+        pre_upgrade
+            .run(&mut connection)
+            .await
+            .expect("apply migrations 0001..0020");
+
+        let now = "2026-01-01T00:00:00.000Z";
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url, enabled, created_at, updated_at) \
+             VALUES ('p', 'openrouter', 'https://openrouter.ai/api/v1', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("provider");
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('m', 'openai/gpt-4o', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("model");
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, enabled, created_at, updated_at) \
+             VALUES ('o', 'p', 'm', 'openai/gpt-4o', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("offering");
+        sqlx::query(
+            "INSERT INTO prices (id, offering_id, input_per_m, source, created_at, updated_at) \
+             VALUES ('pr', 'o', 2.5, 'openrouter', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("price");
+        sqlx::query(
+            "INSERT INTO usage_events (request_id, offering_id, occurred_at) \
+             VALUES ('req-1', 'o', ?)",
+        )
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("usage event");
+        drop(connection);
+
+        // Exercise the real production entry point: `open` runs the remaining
+        // migrations with foreign keys off (the 0022 rebuild drops the
+        // referenced `offerings` table; with foreign keys on the child rows
+        // cascade away) and returns a pool whose own connections keep foreign
+        // keys on. Reverting `open_inner`'s call site would break this test.
+        let pool = open(&path)
+            .await
+            .expect("upgrade through the production entry point");
+
+        let prices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prices WHERE offering_id = 'o'")
+            .fetch_one(&pool)
+            .await
+            .expect("price count");
+        assert_eq!(prices, 1, "the price row survives the offerings rebuild");
+        let linked: Option<String> =
+            sqlx::query_scalar("SELECT offering_id FROM usage_events WHERE request_id = 'req-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("usage event");
+        assert_eq!(
+            linked.as_deref(),
+            Some("o"),
+            "usage_events.offering_id is not nulled by the rebuild"
+        );
+        let route: Option<String> =
+            sqlx::query_scalar("SELECT route FROM offerings WHERE id = 'o'")
+                .fetch_one(&pool)
+                .await
+                .expect("rebuilt offering");
+        assert_eq!(
+            route.as_deref(),
+            Some(""),
+            "the copied row keeps an empty route"
+        );
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('offerings')")
+                .fetch_all(&pool)
+                .await
+                .expect("offering columns");
+        assert!(
+            columns.contains(&"route".to_string()),
+            "columns: {columns:?}"
+        );
+        assert!(
+            columns.contains(&"routing_json".to_string()),
+            "columns: {columns:?}"
+        );
+
+        // The pool's own connections enforce foreign keys even though the
+        // migration connection did not.
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("foreign_keys pragma");
+        assert_eq!(foreign_keys, 1, "the pool enforces foreign keys");
+
+        drop(pool);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A database migrated by a build from before this branch merged `main`
+    /// records the offerings rebuild as migration 21 and the combo knobs as 22.
+    /// `main` owns 21 for the request-log columns (D64), so those two files are
+    /// 22 and 23 (D65) and startup must adopt the recorded numbers instead of
+    /// failing with `MigrateError::VersionMissing(21)`.
+    #[tokio::test]
+    async fn adopts_the_pre_merge_migration_numbers() {
+        use std::borrow::Cow;
+
+        use sqlx::migrate::Migration;
+
+        let dir = std::env::temp_dir().join(format!("gateway-legacy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        let path = dir.join("gateway.db");
+
+        let embedded = sqlx::migrate!("./migrations");
+        let file = |version: i64| {
+            embedded
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("embedded migration")
+                .clone()
+        };
+
+        // The pre-merge numbering: the same SQL files, recorded as 21 and 22.
+        let mut legacy = sqlx::migrate!("./migrations");
+        let mut migrations: Vec<_> = legacy
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 20)
+            .cloned()
+            .collect();
+        migrations.push(Migration {
+            version: 21,
+            description: Cow::Borrowed("offering routes"),
+            ..file(22)
+        });
+        migrations.push(Migration {
+            version: 22,
+            description: Cow::Borrowed("combo pool ordering"),
+            ..file(23)
+        });
+        legacy.migrations = Cow::Owned(migrations);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("open raw connection");
+        legacy
+            .run(&mut connection)
+            .await
+            .expect("migrate with the pre-merge numbering");
+
+        // A routed offering written after the rebuild: adopting the number must
+        // not run the rebuild again, because that would reset `route` to ''.
+        let now = "2026-01-01T00:00:00.000Z";
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url, enabled, created_at, updated_at) \
+             VALUES ('p', 'openrouter', 'https://openrouter.ai/api/v1', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("provider");
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('m', 'openai/gpt-4o', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("model");
+        sqlx::query(
+            "INSERT INTO offerings (id, provider_id, model_id, upstream_model_id, route) \
+             VALUES ('o', 'p', 'm', 'openai/gpt-4o', 'azure')",
+        )
+        .execute(&mut connection)
+        .await
+        .expect("routed offering");
+        drop(connection);
+
+        let pool = open(&path)
+            .await
+            .expect("start on a database with the pre-merge numbering");
+
+        let applied: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, description FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("applied migrations");
+        let description = |version: i64| {
+            applied
+                .iter()
+                .find(|(applied_version, _)| *applied_version == version)
+                .map(|(_, description)| description.as_str())
+        };
+        assert_eq!(applied.last().map(|(version, _)| *version), Some(24));
+        assert_eq!(description(21), Some("request log target"));
+        assert_eq!(description(22), Some("offering routes"));
+        assert_eq!(description(23), Some("combo pool ordering"));
+        assert_eq!(description(24), Some("combo sort chain"));
+        assert_eq!(
+            applied.len(),
+            24,
+            "every migration is recorded once: {applied:?}"
+        );
+
+        let route: String = sqlx::query_scalar("SELECT route FROM offerings WHERE id = 'o'")
+            .fetch_one(&pool)
+            .await
+            .expect("offering");
+        assert_eq!(route, "azure", "the adopted rebuild did not run again");
+        let request_log_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('request_logs')")
+                .fetch_all(&pool)
+                .await
+                .expect("request_logs columns");
+        assert!(
+            request_log_columns.contains(&"credential_id".to_string()),
+            "migration 21 still applied: {request_log_columns:?}"
+        );
+
+        drop(pool);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A database migrated by the review-round build of the request-log work
+    /// recorded migration 21 with the pre-review checksum; only its comments
+    /// changed afterwards. Startup must refresh that checksum instead of failing
+    /// with `MigrateError::VersionMismatch(21)`.
+    #[tokio::test]
+    async fn refreshes_the_pre_review_request_log_checksum() {
+        use std::borrow::Cow;
+
+        use sqlx::migrate::Migration;
+
+        let dir = std::env::temp_dir().join(format!("gateway-checksum-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        let path = dir.join("gateway.db");
+
+        let embedded = sqlx::migrate!("./migrations");
+        let file = |version: i64| {
+            embedded
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("embedded migration")
+                .clone()
+        };
+
+        let mut legacy = sqlx::migrate!("./migrations");
+        let mut migrations: Vec<_> = legacy
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 20)
+            .cloned()
+            .collect();
+        migrations.push(Migration {
+            checksum: Cow::Borrowed(PRE_REVIEW_0021),
+            ..file(21)
+        });
+        legacy.migrations = Cow::Owned(migrations);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("open raw connection");
+        legacy
+            .run(&mut connection)
+            .await
+            .expect("migrate with the pre-review checksum");
+        drop(connection);
+
+        let pool = open(&path)
+            .await
+            .expect("start on a database with the pre-review checksum");
+
+        let recorded: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 21")
+                .fetch_one(&pool)
+                .await
+                .expect("recorded checksum");
+        assert_eq!(
+            recorded,
+            file(21).checksum.to_vec(),
+            "the checksum is refreshed to the current file"
+        );
+
+        drop(pool);
 
         std::fs::remove_dir_all(&dir).ok();
     }

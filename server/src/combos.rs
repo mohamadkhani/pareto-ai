@@ -37,6 +37,9 @@ pub const MAX_STICKY_TTL_SECONDS: i64 = 86_400;
 /// Upper bound on sticky pins kept per combo (D35): bounds memory even when a
 /// caller sends an endless stream of session ids.
 pub const MAX_STICKY_PER_COMBO: i64 = 10_000;
+/// Default stickiness price tolerance (D65): a pin is kept while it is at most
+/// this much pricier than the current best candidate.
+pub const DEFAULT_STICKY_TOLERANCE_PCT: f64 = 5.0;
 
 /// Where a combo's candidates come from (D35).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +97,95 @@ impl KeySource {
         match self {
             Self::Auto => "auto",
             Self::Header => "header",
+        }
+    }
+}
+
+/// The `pool = all` ordering axis (D65): how the models of a catalog pool are
+/// ordered. The primary `sort` plus the tie-break `sort_2`/`sort_3` form a
+/// priority chain; lower is better on every axis, so "quality" and "speed"
+/// sort best-first and "price" sorts cheapest-first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolSort {
+    /// Ascending blended mix price; the cheapest model first.
+    Price,
+    /// Descending resolved quality; the best model first.
+    Quality,
+    /// Descending measured speed component.
+    Speed,
+    /// Descending measured reliability component.
+    Reliability,
+}
+
+impl PoolSort {
+    /// Parses the stored sort name. Failure mode: [`ComboError::Invalid`].
+    pub fn parse(value: &str) -> Result<Self, ComboError> {
+        match value {
+            "price" => Ok(Self::Price),
+            "quality" => Ok(Self::Quality),
+            "speed" => Ok(Self::Speed),
+            "reliability" => Ok(Self::Reliability),
+            other => Err(ComboError::Invalid(format!(
+                "unknown sort {other:?}; expected price, quality, speed, or reliability"
+            ))),
+        }
+    }
+
+    /// The stored name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Price => "price",
+            Self::Quality => "quality",
+            Self::Speed => "speed",
+            Self::Reliability => "reliability",
+        }
+    }
+
+    /// The per-offering key for this axis, on which lower sorts first.
+    /// Quality, speed, and reliability are negated because their scores are
+    /// higher-is-better while the chain orders ascending.
+    fn key(self, item: &PoolItem, score: &routing::Score) -> f64 {
+        match self {
+            Self::Price => ordering_price(item),
+            Self::Quality => -item.quality.score,
+            Self::Speed => -score.speed,
+            Self::Reliability => -score.reliability,
+        }
+    }
+}
+
+/// How a catalog pool picks among the providers (offerings) of one model, once
+/// the model order is fixed (D65).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSelection {
+    /// Cheapest blended mix price at the combo's own profile (the default).
+    MixPrice,
+    /// Highest measured throughput (`speed` component).
+    Speed,
+    /// Highest measured reliability (`reliability` component).
+    Reliability,
+}
+
+impl ProviderSelection {
+    /// Parses the stored provider-selection name. Failure mode:
+    /// [`ComboError::Invalid`].
+    pub fn parse(value: &str) -> Result<Self, ComboError> {
+        match value {
+            "mix_price" => Ok(Self::MixPrice),
+            "speed" => Ok(Self::Speed),
+            "reliability" => Ok(Self::Reliability),
+            other => Err(ComboError::Invalid(format!(
+                "unknown provider_selection {other:?}; expected mix_price, speed, or reliability"
+            ))),
+        }
+    }
+
+    /// The stored name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MixPrice => "mix_price",
+            Self::Speed => "speed",
+            Self::Reliability => "reliability",
         }
     }
 }
@@ -165,6 +257,17 @@ pub struct Combo {
     pub stickiness_enabled: bool,
     pub stickiness_ttl_seconds: i64,
     pub stickiness_key_source: KeySource,
+    /// How much pricier a pinned offering may be before the pin is dropped
+    /// (D35/D65); 0.0 keeps the pin only when it is not more expensive.
+    pub sticky_price_tolerance_pct: f64,
+    /// The `pool = all` ordering axis (D65).
+    pub pool_sort: PoolSort,
+    /// The second tie-break of the `pool = all` ordering (D65).
+    pub sort_2: PoolSort,
+    /// The third tie-break of the `pool = all` ordering (D65).
+    pub sort_3: PoolSort,
+    /// How the pool picks among the providers of one model (D65).
+    pub provider_selection: ProviderSelection,
 }
 
 /// One member as created.
@@ -183,6 +286,9 @@ pub struct StickinessInput {
     pub ttl_seconds: Option<i64>,
     /// `auto` (default) or `header`.
     pub key_source: Option<String>,
+    /// How much pricier the pin may be than the current best before it is
+    /// dropped (percent, 0–100; default 5). See D65.
+    pub price_tolerance_pct: Option<f64>,
 }
 
 /// A combo as created (or replaced, on update).
@@ -210,6 +316,16 @@ pub struct ComboInput {
     pub mix_profile: Option<String>,
     /// Session stickiness (D35).
     pub stickiness: Option<StickinessInput>,
+    /// The `pool = all` ordering axis: `price`, `quality`, `speed`, or
+    /// `reliability` (D65).
+    pub sort: Option<String>,
+    /// Second tie-break of the `pool = all` ordering (D65).
+    pub sort_2: Option<String>,
+    /// Third tie-break of the `pool = all` ordering (D65).
+    pub sort_3: Option<String>,
+    /// How the pool picks among the providers of one model: `mix_price`
+    /// (default), `speed`, or `reliability` (D65).
+    pub provider_selection: Option<String>,
 }
 
 /// One combo member as returned by the admin API.
@@ -225,6 +341,9 @@ pub struct StickinessView {
     pub enabled: bool,
     pub ttl_seconds: i64,
     pub key_source: String,
+    /// How much pricier the pin may be than the current best before it is
+    /// dropped (percent).
+    pub price_tolerance_pct: f64,
 }
 
 /// A combo as returned by the admin API.
@@ -247,6 +366,14 @@ pub struct ComboView {
     pub min_quality: Option<f64>,
     /// The inclusive maximum mix price for a catalog pool.
     pub max_mix_price_per_m: Option<f64>,
+    /// The `pool = all` ordering axis: `price` or `quality` (D65).
+    pub sort: String,
+    /// Second tie-break of the `pool = all` ordering (D65).
+    pub sort_2: String,
+    /// Third tie-break of the `pool = all` ordering (D65).
+    pub sort_3: String,
+    /// How the pool picks among the providers of one model (D65).
+    pub provider_selection: String,
     pub members: Vec<MemberView>,
     pub enabled: bool,
     /// The persisted round-robin rotation counter.
@@ -266,6 +393,10 @@ impl From<&Combo> for ComboView {
             pool: combo.pool.as_str().to_string(),
             min_quality: combo.min_quality,
             max_mix_price_per_m: combo.max_mix_price_per_m,
+            sort: combo.pool_sort.as_str().to_string(),
+            sort_2: combo.sort_2.as_str().to_string(),
+            sort_3: combo.sort_3.as_str().to_string(),
+            provider_selection: combo.provider_selection.as_str().to_string(),
             members: combo
                 .members
                 .iter()
@@ -280,6 +411,7 @@ impl From<&Combo> for ComboView {
                 enabled: combo.stickiness_enabled,
                 ttl_seconds: combo.stickiness_ttl_seconds,
                 key_source: combo.stickiness_key_source.as_str().to_string(),
+                price_tolerance_pct: combo.sticky_price_tolerance_pct,
             },
         }
     }
@@ -387,6 +519,11 @@ struct Validated {
     stickiness_enabled: bool,
     stickiness_ttl_seconds: i64,
     stickiness_key_source: KeySource,
+    sticky_price_tolerance_pct: f64,
+    pool_sort: PoolSort,
+    sort_2: PoolSort,
+    sort_3: PoolSort,
+    provider_selection: ProviderSelection,
 }
 
 /// Reads the top-level `mix_profile`, falling back to
@@ -433,6 +570,17 @@ fn combo_mix_error(error: crate::mix::MixError) -> ComboError {
     }
 }
 
+/// Validates that the three `pool = all` ordering axes are distinct, so a
+/// tie-break can always decide. Failure mode: [`ComboError::Invalid`].
+fn validate_sort_chain(a: PoolSort, b: PoolSort, c: PoolSort) -> Result<(), ComboError> {
+    if a == b || a == c || b == c {
+        return Err(ComboError::Invalid(
+            "sort, sort_2, and sort_3 must name three distinct axes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validates a combo input (name, strategy, weights, members, and that every
 /// member offering exists). Failure mode: [`ComboError::Invalid`] naming the
 /// offending field.
@@ -459,6 +607,32 @@ async fn validate(pool: &SqlitePool, input: &ComboInput) -> Result<Validated, Co
     )?;
     let (stickiness_enabled, stickiness_ttl_seconds, stickiness_key_source) =
         validate_stickiness(input.stickiness.as_ref())?;
+    let sticky_price_tolerance_pct = validate_sticky_tolerance(
+        input
+            .stickiness
+            .as_ref()
+            .and_then(|sticky| sticky.price_tolerance_pct),
+    )?;
+    let pool_sort = match input.sort.as_deref().map(str::trim) {
+        None | Some("") => PoolSort::Price,
+        Some(value) => PoolSort::parse(value)?,
+    };
+    let sort_2 = match input.sort_2.as_deref().map(str::trim) {
+        None | Some("") => PoolSort::Quality,
+        Some(value) => PoolSort::parse(value)?,
+    };
+    let sort_3 = match input.sort_3.as_deref().map(str::trim) {
+        None | Some("") => PoolSort::Reliability,
+        Some(value) => PoolSort::parse(value)?,
+    };
+    // The three axes of the `pool = all` priority chain must be distinct, or a
+    // "tie-break" could never decide anything. `sort_2` may equal `sort`
+    // (e.g. price then quality), so only reject a *duplicate within the chain*.
+    validate_sort_chain(pool_sort, sort_2, sort_3)?;
+    let provider_selection = match input.provider_selection.as_deref().map(str::trim) {
+        None | Some("") => ProviderSelection::MixPrice,
+        Some(value) => ProviderSelection::parse(value)?,
+    };
     let mix_profile =
         validate_mix_profile(pool, input.mix_profile.as_deref(), input.weights.as_ref()).await?;
     // Canonicalise the stored selector to the profile id so a profile rename
@@ -512,6 +686,11 @@ async fn validate(pool: &SqlitePool, input: &ComboInput) -> Result<Validated, Co
         stickiness_enabled,
         stickiness_ttl_seconds,
         stickiness_key_source,
+        sticky_price_tolerance_pct,
+        pool_sort,
+        sort_2,
+        sort_3,
+        provider_selection,
     })
 }
 
@@ -578,6 +757,18 @@ fn validate_stickiness(
     Ok((enabled, ttl, key_source))
 }
 
+/// Validates the stickiness price tolerance (D65): a percentage in 0–100.
+/// `None` means the default 5%. Failure mode: [`ComboError::Invalid`].
+fn validate_sticky_tolerance(input: Option<f64>) -> Result<f64, ComboError> {
+    let value = input.unwrap_or(DEFAULT_STICKY_TOLERANCE_PCT);
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(ComboError::Invalid(
+            "stickiness.price_tolerance_pct must be a number between 0 and 100".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
 /// Validates a draft combo without writing it, for the preview endpoints.
 /// Returns a transient [`Combo`] whose `id` is `preview`. Failure mode:
 /// [`ComboError::Invalid`] for bad input, [`ComboError::Db`] on storage
@@ -600,6 +791,11 @@ pub async fn validate_config(pool: &SqlitePool, input: &ComboInput) -> Result<Co
         stickiness_enabled: validated.stickiness_enabled,
         stickiness_ttl_seconds: validated.stickiness_ttl_seconds,
         stickiness_key_source: validated.stickiness_key_source,
+        sticky_price_tolerance_pct: validated.sticky_price_tolerance_pct,
+        pool_sort: validated.pool_sort,
+        sort_2: validated.sort_2,
+        sort_3: validated.sort_3,
+        provider_selection: validated.provider_selection,
     })
 }
 
@@ -625,6 +821,28 @@ impl PoolConstraints {
     }
 }
 
+/// How a catalog pool is ordered (D65): the model axis chain, then the provider
+/// axis within one model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolOrdering {
+    pub sort: PoolSort,
+    pub sort_2: PoolSort,
+    pub sort_3: PoolSort,
+    pub provider_selection: ProviderSelection,
+}
+
+impl PoolOrdering {
+    /// The ordering of a stored combo.
+    pub fn of(combo: &Combo) -> Self {
+        Self {
+            sort: combo.pool_sort,
+            sort_2: combo.sort_2,
+            sort_3: combo.sort_3,
+            provider_selection: combo.provider_selection,
+        }
+    }
+}
+
 /// One offering ready for pool resolution: the routing signal plus the
 /// resolved quality and mix price the constraints are checked against.
 #[derive(Debug, Clone)]
@@ -636,11 +854,17 @@ pub struct PoolItem {
     pub quality: routing::QualityScore,
     pub mix_price: Option<crate::mix::MixPrice>,
     pub signal: routing::CandidateSignal,
+    /// The sync marked this route removed (`route_removed_at`, D65). Reported
+    /// with its own reason so it is not mistaken for an operator disable.
+    pub route_removed: bool,
 }
 
 /// Why a catalog pool excluded an offering (D35's one-line vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolReason {
+    /// The sync marked the route removed: OpenRouter no longer lists the
+    /// provider (D65).
+    Removed,
     Disabled,
     NoAccess,
     Cooldown,
@@ -658,6 +882,7 @@ impl PoolReason {
     /// The stable string the preview and `decision_json` report.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Removed => "removed",
             Self::Disabled => "disabled",
             Self::NoAccess => "no_access",
             Self::Cooldown => "cooldown",
@@ -716,12 +941,15 @@ pub struct PoolOutcome {
 /// The shared resolution engine behind the runtime `weighted` path and the
 /// preview endpoints (D35): applies access/enabled/cooldown/breaker filters,
 /// then the inclusive quality and mix-price constraints, then
-/// [`routing::weighted_order`] with the combo's weights. Deterministic — the
-/// same items, constraints, and weights always produce the same order.
+/// [`routing::weighted_order`] with the combo's weights, and finally the D65
+/// pool ordering (model axis, then provider axis within one model).
+/// Deterministic — the same items, constraints, weights, and ordering always
+/// produce the same order.
 pub fn resolve_pool(
     items: Vec<PoolItem>,
     constraints: &PoolConstraints,
     weights: &Weights,
+    ordering: Option<PoolOrdering>,
 ) -> PoolOutcome {
     let mut kept: Vec<PoolItem> = Vec::with_capacity(items.len());
     let mut excluded: Vec<PoolExclusion> = Vec::new();
@@ -767,12 +995,127 @@ pub fn resolve_pool(
             });
         }
     }
+    let ordered = match ordering {
+        Some(ordering) => apply_pool_ordering(ordered, &ordering),
+        None => ordered,
+    };
     PoolOutcome { ordered, excluded }
+}
+
+/// The price key the pool orders by: the combo's blended mix price when it has
+/// one, else the raw price, else `+inf` (unknown sorts last).
+fn ordering_price(item: &PoolItem) -> f64 {
+    item.mix_price
+        .as_ref()
+        .map(|mix| mix.per_m)
+        .or(item.signal.price_per_m_usd)
+        .filter(|value| value.is_finite())
+        .unwrap_or(f64::INFINITY)
+}
+
+/// Re-orders a weighted pool by the D65 axes: models first (by the `sort`
+/// priority chain `sort` → `sort_2` → `sort_3`), then the providers of one
+/// model (by `provider_selection`). Stable: a full tie keeps the weighted
+/// order, so the result is deterministic. Every axis sorts ascending on a
+/// [`PoolSort::key`] (quality/speed/reliability are negated because their
+/// scores are higher-is-better; price is the blended mix price; `+inf` sorts
+/// last).
+fn apply_pool_ordering(mut ordered: Vec<PoolScored>, ordering: &PoolOrdering) -> Vec<PoolScored> {
+    let chain = [ordering.sort, ordering.sort_2, ordering.sort_3];
+    let keys = |entry: &PoolScored| -> [f64; 3] {
+        [chain[0], chain[1], chain[2]].map(|axis| axis.key(&entry.item, &entry.score))
+    };
+    // Each model's group key is its best offering on every axis (the minimum
+    // per axis). Every offering of one model shares it, so a model's offerings
+    // stay adjacent and order among themselves by the provider axis.
+    let mut group: HashMap<String, [f64; 3]> = HashMap::new();
+    for entry in &ordered {
+        let entry_keys = keys(entry);
+        group
+            .entry(entry.item.model.clone())
+            .and_modify(|current| {
+                for (k, value) in entry_keys.iter().copied().enumerate() {
+                    if value < current[k] {
+                        current[k] = value;
+                    }
+                }
+            })
+            .or_insert(entry_keys);
+    }
+    // The within-model key, from the provider axis.
+    let within = |entry: &PoolScored| match ordering.provider_selection {
+        ProviderSelection::MixPrice => ordering_price(&entry.item),
+        ProviderSelection::Speed => -entry.score.speed,
+        ProviderSelection::Reliability => -entry.score.reliability,
+    };
+    ordered.sort_by(|a, b| {
+        let ga = group
+            .get(&a.item.model)
+            .copied()
+            .unwrap_or([f64::INFINITY; 3]);
+        let gb = group
+            .get(&b.item.model)
+            .copied()
+            .unwrap_or([f64::INFINITY; 3]);
+        ga[0]
+            .total_cmp(&gb[0])
+            .then_with(|| ga[1].total_cmp(&gb[1]))
+            .then_with(|| ga[2].total_cmp(&gb[2]))
+            .then_with(|| {
+                within(a)
+                    .partial_cmp(&within(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    // The weighted order that built each explanation ran before this D65
+    // re-ordering, so its embedded `#<rank> of <count>` would otherwise
+    // disagree with the shown position. Rewrite it to the new position.
+    for (index, entry) in ordered.iter_mut().enumerate() {
+        entry.explanation = rewrite_explanation_rank(&entry.explanation, index + 1);
+    }
+    ordered
+}
+
+/// Rewrites the first `#<rank> of <count>` token in a pool explanation to
+/// `position`, keeping the original `count`. The explanation is built by
+/// [`routing::weighted_order`] before the D65 re-ordering, so the embedded
+/// rank can name a different position than the one shown. A string without
+/// that token is returned unchanged.
+fn rewrite_explanation_rank(explanation: &str, position: usize) -> String {
+    let Some(hash) = explanation.find('#') else {
+        return explanation.to_string();
+    };
+    let Some((rank, rest)) = explanation[hash + 1..].split_once(" of ") else {
+        return explanation.to_string();
+    };
+    if rank.is_empty() || !rank.bytes().all(|byte| byte.is_ascii_digit()) {
+        return explanation.to_string();
+    }
+    let count_len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if count_len == 0 {
+        return explanation.to_string();
+    }
+    let count = &rest[..count_len];
+    format!(
+        "{}#{position} of {count}{}",
+        &explanation[..hash],
+        &rest[count_len..]
+    )
 }
 
 /// The first constraint/filter failure of a pool item, in pipeline order.
 fn pool_exclusion(item: &PoolItem, constraints: &PoolConstraints) -> Option<(PoolReason, String)> {
     let signal = &item.signal;
+    if item.route_removed {
+        return Some((
+            PoolReason::Removed,
+            "the sync marked this route removed: OpenRouter no longer lists the provider"
+                .to_string(),
+        ));
+    }
     if !signal.enabled {
         return Some((
             PoolReason::Disabled,
@@ -1143,8 +1486,9 @@ pub async fn create(
            (id, name, strategy, weights_json, members_json, enabled, rr_cursor, \
             pool, min_quality, max_mix_price_per_m, mix_profile, \
             stickiness_enabled, stickiness_ttl_seconds, stickiness_key_source, \
+            sticky_price_tolerance_pct, pool_sort, sort_2, sort_3, provider_selection, \
             created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&validated.name)
@@ -1159,6 +1503,11 @@ pub async fn create(
     .bind(i64::from(validated.stickiness_enabled))
     .bind(validated.stickiness_ttl_seconds)
     .bind(validated.stickiness_key_source.as_str())
+    .bind(validated.sticky_price_tolerance_pct)
+    .bind(validated.pool_sort.as_str())
+    .bind(validated.sort_2.as_str())
+    .bind(validated.sort_3.as_str())
+    .bind(validated.provider_selection.as_str())
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
@@ -1194,33 +1543,45 @@ pub async fn create(
         stickiness_enabled: validated.stickiness_enabled,
         stickiness_ttl_seconds: validated.stickiness_ttl_seconds,
         stickiness_key_source: validated.stickiness_key_source,
+        sticky_price_tolerance_pct: validated.sticky_price_tolerance_pct,
+        pool_sort: validated.pool_sort,
+        sort_2: validated.sort_2,
+        sort_3: validated.sort_3,
+        provider_selection: validated.provider_selection,
     })
 }
 
-type ComboRow = (
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    i64,
-    i64,
-    String,
-    Option<f64>,
-    Option<f64>,
-    Option<String>,
-    i64,
-    i64,
-    String,
-);
+#[derive(Debug, sqlx::FromRow)]
+struct ComboRow {
+    id: String,
+    name: String,
+    strategy: String,
+    weights_json: Option<String>,
+    members_json: String,
+    enabled: i64,
+    rr_cursor: i64,
+    pool: String,
+    min_quality: Option<f64>,
+    max_mix_price_per_m: Option<f64>,
+    mix_profile: Option<String>,
+    stickiness_enabled: i64,
+    stickiness_ttl_seconds: i64,
+    stickiness_key_source: String,
+    sticky_price_tolerance_pct: f64,
+    pool_sort: String,
+    sort_2: String,
+    sort_3: String,
+    provider_selection: String,
+}
 
 const SELECT_COMBO_COLUMNS: &str = "id, name, strategy, weights_json, members_json, enabled, \
      rr_cursor, pool, min_quality, max_mix_price_per_m, mix_profile, stickiness_enabled, \
-     stickiness_ttl_seconds, stickiness_key_source";
+     stickiness_ttl_seconds, stickiness_key_source, sticky_price_tolerance_pct, pool_sort, \
+     sort_2, sort_3, provider_selection";
 
 /// Parses one combo row (storage shape → [`Combo`]).
 fn parse_row(row: ComboRow) -> Result<Combo, ComboError> {
-    let (
+    let ComboRow {
         id,
         name,
         strategy,
@@ -1235,7 +1596,12 @@ fn parse_row(row: ComboRow) -> Result<Combo, ComboError> {
         stickiness_enabled,
         stickiness_ttl_seconds,
         stickiness_key_source,
-    ) = row;
+        sticky_price_tolerance_pct,
+        pool_sort,
+        sort_2,
+        sort_3,
+        provider_selection,
+    } = row;
     let strategy = Strategy::parse(&strategy)?;
     let pool = Pool::parse(&pool)?;
     let (weights, preset) = Weights::from_json(weights_json.as_deref())?;
@@ -1256,6 +1622,11 @@ fn parse_row(row: ComboRow) -> Result<Combo, ComboError> {
         stickiness_enabled: stickiness_enabled == 1,
         stickiness_ttl_seconds,
         stickiness_key_source: KeySource::parse(&stickiness_key_source)?,
+        sticky_price_tolerance_pct,
+        pool_sort: PoolSort::parse(&pool_sort)?,
+        sort_2: PoolSort::parse(&sort_2)?,
+        sort_3: PoolSort::parse(&sort_3)?,
+        provider_selection: ProviderSelection::parse(&provider_selection)?,
     })
 }
 
@@ -1304,6 +1675,8 @@ pub async fn update(
         "UPDATE combo_models SET strategy = ?, weights_json = ?, members_json = ?, \
          enabled = ?, pool = ?, min_quality = ?, max_mix_price_per_m = ?, mix_profile = ?, \
          stickiness_enabled = ?, stickiness_ttl_seconds = ?, stickiness_key_source = ?, \
+         sticky_price_tolerance_pct = ?, pool_sort = ?, sort_2 = ?, sort_3 = ?, \
+         provider_selection = ?, \
          updated_at = ? WHERE id = ?",
     )
     .bind(validated.strategy.as_str())
@@ -1317,6 +1690,11 @@ pub async fn update(
     .bind(i64::from(validated.stickiness_enabled))
     .bind(validated.stickiness_ttl_seconds)
     .bind(validated.stickiness_key_source.as_str())
+    .bind(validated.sticky_price_tolerance_pct)
+    .bind(validated.pool_sort.as_str())
+    .bind(validated.sort_2.as_str())
+    .bind(validated.sort_3.as_str())
+    .bind(validated.provider_selection.as_str())
     .bind(catalog::now_ts())
     .bind(id)
     .execute(&mut *tx)
@@ -1352,6 +1730,11 @@ pub async fn update(
         stickiness_enabled: validated.stickiness_enabled,
         stickiness_ttl_seconds: validated.stickiness_ttl_seconds,
         stickiness_key_source: validated.stickiness_key_source,
+        sticky_price_tolerance_pct: validated.sticky_price_tolerance_pct,
+        pool_sort: validated.pool_sort,
+        sort_2: validated.sort_2,
+        sort_3: validated.sort_3,
+        provider_selection: validated.provider_selection,
     }))
 }
 
@@ -1611,6 +1994,10 @@ mod tests {
             max_mix_price_per_m: None,
             mix_profile: None,
             stickiness: None,
+            sort: None,
+            sort_2: None,
+            sort_3: None,
+            provider_selection: None,
         }
     }
 
@@ -1880,6 +2267,7 @@ mod tests {
             },
             mix_price: per_m.map(mix_at),
             signal,
+            route_removed: false,
         }
     }
 
@@ -1904,6 +2292,7 @@ mod tests {
                 max_mix_price_per_m: Some(1.0),
             },
             &Weights::default(),
+            None,
         );
         assert_eq!(pool_ids(&outcome), ["at"], ">= quality and <= price");
         assert_eq!(outcome.excluded.len(), 1);
@@ -1922,6 +2311,7 @@ mod tests {
                 max_mix_price_per_m: Some(2.0),
             },
             &Weights::default(),
+            None,
         );
         assert_eq!(pool_ids(&capped), ["priced"]);
         assert_eq!(capped.excluded[0].reason, PoolReason::Unpriced);
@@ -1936,6 +2326,7 @@ mod tests {
                 max_mix_price_per_m: None,
             },
             &Weights::default(),
+            None,
         );
         assert_eq!(uncapped.ordered.len(), 2, "no cap, unpriced is allowed");
     }
@@ -1956,6 +2347,7 @@ mod tests {
                 max_mix_price_per_m: None,
             },
             &Weights::default(),
+            None,
         );
         assert_eq!(pool_ids(&outcome), ["default"]);
         assert_eq!(outcome.ordered[0].score.quality, 0.5);
@@ -1974,11 +2366,11 @@ mod tests {
         let (_, best) = Weights::preset("best").expect("preset");
         let constraints = PoolConstraints::default();
         assert_eq!(
-            pool_ids(&resolve_pool(items(), &constraints, &cheapest)),
+            pool_ids(&resolve_pool(items(), &constraints, &cheapest, None)),
             ["cheap", "great"]
         );
         assert_eq!(
-            pool_ids(&resolve_pool(items(), &constraints, &best)),
+            pool_ids(&resolve_pool(items(), &constraints, &best, None)),
             ["great", "cheap"]
         );
     }
@@ -2000,8 +2392,8 @@ mod tests {
             }
             items
         };
-        let first = resolve_pool(build(false), &constraints, &Weights::default());
-        let second = resolve_pool(build(true), &constraints, &Weights::default());
+        let first = resolve_pool(build(false), &constraints, &Weights::default(), None);
+        let second = resolve_pool(build(true), &constraints, &Weights::default(), None);
         assert_eq!(pool_ids(&first), pool_ids(&second));
     }
 
@@ -2019,6 +2411,7 @@ mod tests {
             vec![disabled, denied, cooled, breaker],
             &PoolConstraints::default(),
             &Weights::default(),
+            None,
         );
         let reasons: Vec<&str> = outcome
             .excluded
@@ -2063,6 +2456,7 @@ mod tests {
             enabled: Some(true),
             ttl_seconds: Some(30),
             key_source: None,
+            price_tolerance_pct: None,
         });
         let err = create(pool, &actor, &bad_ttl).await.expect_err("bad ttl");
         assert!(err.to_string().contains("ttl_seconds"), "{err}");
@@ -2081,6 +2475,7 @@ mod tests {
             enabled: Some(true),
             ttl_seconds: Some(600),
             key_source: Some("header".to_string()),
+            price_tolerance_pct: None,
         });
         let created = create(pool, &actor, &good).await.expect("valid pool");
         assert_eq!(created.pool, Pool::All);
@@ -2213,5 +2608,341 @@ mod tests {
                 .await
                 .expect("count");
         assert_eq!(count, MAX_STICKY_PER_COMBO);
+    }
+
+    // -----------------------------------------------------------------------
+    // D65: pool sort axis and provider selection
+    // -----------------------------------------------------------------------
+
+    fn routed_item(model: &str, id: &str, per_m: f64, tps: f64) -> PoolItem {
+        let mut item = pool_item(id, 0.5, Some(per_m));
+        item.model = model.to_string();
+        item.provider = format!("p-{id}");
+        item.signal.tokens_per_sec = Some(tps);
+        item
+    }
+
+    /// The default chain used by most tests: price, then quality, then
+    /// reliability (the same shape a combo without explicit axes gets).
+    fn ordering(sort: PoolSort, provider_selection: ProviderSelection) -> Option<PoolOrdering> {
+        Some(PoolOrdering {
+            sort,
+            sort_2: PoolSort::Quality,
+            sort_3: PoolSort::Reliability,
+            provider_selection,
+        })
+    }
+
+    #[test]
+    fn the_pool_sort_axis_orders_models_by_price_or_quality() {
+        let items = || {
+            vec![
+                pool_item("cheap-low-quality", 0.2, Some(1.0)),
+                pool_item("pricey-high-quality", 0.9, Some(4.0)),
+            ]
+        };
+        let constraints = PoolConstraints::default();
+        let by_price = resolve_pool(
+            items(),
+            &constraints,
+            &Weights::default(),
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(
+            pool_ids(&by_price),
+            ["cheap-low-quality", "pricey-high-quality"]
+        );
+        let by_quality = resolve_pool(
+            items(),
+            &constraints,
+            &Weights::default(),
+            ordering(PoolSort::Quality, ProviderSelection::MixPrice),
+        );
+        assert_eq!(
+            pool_ids(&by_quality),
+            ["pricey-high-quality", "cheap-low-quality"]
+        );
+    }
+
+    #[test]
+    fn a_tied_price_breaks_on_quality_then_reliability() {
+        // Three models at the same blended price: quality decides first, then
+        // reliability.
+        let items = || {
+            let mut low = pool_item("low-quality", 0.3, Some(2.0));
+            low.signal.failure_rate = Some(0.02);
+            let mut better = pool_item("better-quality", 0.8, Some(2.0));
+            better.signal.failure_rate = Some(0.40);
+            let mut equal_quality_steadier = pool_item("same-quality-steadier", 0.8, Some(2.0));
+            equal_quality_steadier.signal.failure_rate = Some(0.01);
+            vec![low, better, equal_quality_steadier]
+        };
+        let outcome = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &Weights::default(),
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(
+            pool_ids(&outcome),
+            ["same-quality-steadier", "better-quality", "low-quality"],
+            "price ties fall back to quality, then to reliability"
+        );
+    }
+
+    #[test]
+    fn the_sort_chain_is_configurable_in_order() {
+        let items = || {
+            let mut fast = pool_item("fast", 0.5, Some(3.0));
+            fast.signal.tokens_per_sec = Some(200.0);
+            let mut slow_steady = pool_item("slow-steady", 0.5, Some(3.0));
+            slow_steady.signal.tokens_per_sec = Some(10.0);
+            vec![fast, slow_steady]
+        };
+        // Price ties; the second axis decides, and the third only if needed.
+        let speed_second = Some(PoolOrdering {
+            sort: PoolSort::Price,
+            sort_2: PoolSort::Speed,
+            sort_3: PoolSort::Quality,
+            provider_selection: ProviderSelection::MixPrice,
+        });
+        let outcome = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &Weights::default(),
+            speed_second,
+        );
+        assert_eq!(pool_ids(&outcome), ["fast", "slow-steady"]);
+
+        let quality_second = Some(PoolOrdering {
+            sort: PoolSort::Price,
+            sort_2: PoolSort::Quality,
+            sort_3: PoolSort::Speed,
+            provider_selection: ProviderSelection::MixPrice,
+        });
+        let outcome = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &Weights::default(),
+            quality_second,
+        );
+        // Quality is equal, so the third axis (speed) breaks the tie.
+        assert_eq!(pool_ids(&outcome), ["fast", "slow-steady"]);
+    }
+
+    #[test]
+    fn reordering_rewrites_the_embedded_explanation_ranks() {
+        let items = || {
+            vec![
+                pool_item("cheap-low-quality", 0.2, Some(1.0)),
+                pool_item("pricey-high-quality", 0.9, Some(4.0)),
+            ]
+        };
+        // Quality-only weights rank the high-quality model first, so the
+        // cheap model's explanation embeds `#2 of 2`.
+        let quality_only = Weights {
+            price: 0.0,
+            speed: 0.0,
+            quality: 1.0,
+            reliability: 0.0,
+        };
+        let weighted = resolve_pool(items(), &PoolConstraints::default(), &quality_only, None);
+        assert_eq!(
+            pool_ids(&weighted),
+            ["pricey-high-quality", "cheap-low-quality"]
+        );
+        assert!(
+            weighted.ordered[1].explanation.contains("#2 of 2"),
+            "{}",
+            weighted.ordered[1].explanation
+        );
+
+        // The D65 price ordering puts the cheap model first; the embedded
+        // ranks must follow the shown positions.
+        let by_price = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &quality_only,
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(
+            pool_ids(&by_price),
+            ["cheap-low-quality", "pricey-high-quality"]
+        );
+        assert!(
+            by_price.ordered[0].explanation.contains("#1 of 2"),
+            "first row must read #1 of 2: {}",
+            by_price.ordered[0].explanation
+        );
+        assert!(
+            by_price.ordered[1].explanation.contains("#2 of 2"),
+            "second row must read #2 of 2: {}",
+            by_price.ordered[1].explanation
+        );
+    }
+
+    #[test]
+    fn rewriting_a_foreign_explanation_leaves_it_unchanged() {
+        assert_eq!(rewrite_explanation_rank("no rank here", 1), "no rank here");
+        assert_eq!(
+            rewrite_explanation_rank("#nope of 2: text", 1),
+            "#nope of 2: text"
+        );
+        assert_eq!(rewrite_explanation_rank("scored #2:", 1), "scored #2:");
+    }
+
+    #[test]
+    fn provider_selection_orders_the_providers_of_one_model() {
+        let items = || {
+            vec![
+                routed_item("m", "cheap-slow", 1.0, 10.0),
+                routed_item("m", "pricey-fast", 2.0, 100.0),
+            ]
+        };
+        let constraints = PoolConstraints::default();
+        let by_price = resolve_pool(
+            items(),
+            &constraints,
+            &Weights::default(),
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(pool_ids(&by_price), ["cheap-slow", "pricey-fast"]);
+
+        let by_speed = resolve_pool(
+            items(),
+            &constraints,
+            &Weights::default(),
+            ordering(PoolSort::Price, ProviderSelection::Speed),
+        );
+        assert_eq!(pool_ids(&by_speed), ["pricey-fast", "cheap-slow"]);
+    }
+
+    #[test]
+    fn a_missing_pool_ordering_keeps_the_weighted_order() {
+        let items = || {
+            vec![
+                routed_item("m", "cheap-slow", 1.0, 10.0),
+                routed_item("m", "pricey-fast", 2.0, 100.0),
+            ]
+        };
+        let speed_only = Weights {
+            price: 0.0,
+            speed: 1.0,
+            quality: 0.0,
+            reliability: 0.0,
+        };
+        let weighted = resolve_pool(items(), &PoolConstraints::default(), &speed_only, None);
+        assert_eq!(
+            pool_ids(&weighted),
+            ["pricey-fast", "cheap-slow"],
+            "no ordering: the weighted (speed) order stands"
+        );
+        // With an explicit ordering the cheapest provider wins instead.
+        let ordered = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &speed_only,
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(pool_ids(&ordered), ["cheap-slow", "pricey-fast"]);
+    }
+
+    #[tokio::test]
+    async fn the_ordering_knobs_round_trip_and_reject_unknown_values() {
+        let s = seeded().await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        let pool = &s.app.state.pool;
+        let mut draft = input("ordered-knobs", "weighted", &[] as &[&str]);
+        draft.pool = Some("all".to_string());
+        draft.max_mix_price_per_m = Some(2.5);
+        draft.sort = Some("quality".to_string());
+        draft.sort_2 = Some("price".to_string());
+        draft.sort_3 = Some("speed".to_string());
+        draft.provider_selection = Some("speed".to_string());
+        draft.stickiness = Some(StickinessInput {
+            enabled: Some(true),
+            ttl_seconds: None,
+            key_source: None,
+            price_tolerance_pct: Some(7.5),
+        });
+        let created = create(pool, &actor, &draft).await.expect("create");
+        assert_eq!(created.pool_sort, PoolSort::Quality);
+        assert_eq!(created.sort_2, PoolSort::Price);
+        assert_eq!(created.sort_3, PoolSort::Speed);
+        assert_eq!(created.provider_selection, ProviderSelection::Speed);
+        assert_eq!(created.sticky_price_tolerance_pct, 7.5);
+        let loaded = get(pool, &created.id)
+            .await
+            .expect("get")
+            .expect("stored row");
+        assert_eq!(loaded.pool_sort, PoolSort::Quality);
+        assert_eq!(loaded.sort_2, PoolSort::Price);
+        assert_eq!(loaded.sort_3, PoolSort::Speed);
+        assert_eq!(loaded.provider_selection, ProviderSelection::Speed);
+        assert_eq!(loaded.sticky_price_tolerance_pct, 7.5);
+
+        // A chain repeating an axis is rejected: it could never decide.
+        let mut dup_chain = input("dup-chain", "ordered", &s.offering_ids[..1]);
+        dup_chain.sort = Some("price".to_string());
+        dup_chain.sort_2 = Some("price".to_string());
+        dup_chain.sort_3 = Some("quality".to_string());
+        let err = create(pool, &actor, &dup_chain)
+            .await
+            .expect_err("duplicate chain");
+        assert!(err.to_string().contains("three distinct axes"), "{err}");
+
+        // Unknown values are rejected by name.
+        let mut bad_sort = input("bad-sort", "ordered", &s.offering_ids[..1]);
+        bad_sort.sort = Some("cheapest".to_string());
+        let err = create(pool, &actor, &bad_sort).await.expect_err("bad sort");
+        assert!(err.to_string().contains("unknown sort"), "{err}");
+
+        let mut bad_provider = input("bad-provider", "ordered", &s.offering_ids[..1]);
+        bad_provider.provider_selection = Some("nope".to_string());
+        let err = create(pool, &actor, &bad_provider)
+            .await
+            .expect_err("bad provider");
+        assert!(
+            err.to_string().contains("unknown provider_selection"),
+            "{err}"
+        );
+
+        let mut bad_tolerance = input("bad-tolerance", "ordered", &s.offering_ids[..1]);
+        bad_tolerance.stickiness = Some(StickinessInput {
+            enabled: Some(true),
+            ttl_seconds: None,
+            key_source: None,
+            price_tolerance_pct: Some(150.0),
+        });
+        let err = create(pool, &actor, &bad_tolerance)
+            .await
+            .expect_err("bad tolerance");
+        assert!(err.to_string().contains("price_tolerance_pct"), "{err}");
+    }
+
+    #[test]
+    fn a_removed_route_is_reported_with_its_own_reason() {
+        let mut item = pool_item("gone", 0.9, Some(1.0));
+        item.route_removed = true;
+        let outcome = resolve_pool(
+            vec![item],
+            &PoolConstraints::default(),
+            &Weights::default(),
+            None,
+        );
+        assert!(outcome.ordered.is_empty());
+        assert_eq!(outcome.excluded.len(), 1);
+        assert_eq!(outcome.excluded[0].reason, PoolReason::Removed);
+        assert_eq!(outcome.excluded[0].reason.as_str(), "removed");
+        assert!(
+            outcome.excluded[0]
+                .detail
+                .contains("no longer lists the provider"),
+            "{}",
+            outcome.excluded[0].detail
+        );
     }
 }

@@ -35,6 +35,18 @@
           (valueChange)="onProviderFilterChange($event)"
         />
       </ui-field>
+      <ui-field
+        label="Upstream provider"
+        [controlId]="'logs-route'"
+        hint="The company an intermediary provider bought the model from."
+      >
+        <ui-combobox
+          [value]="routeFilter()"
+          placeholder="All upstream providers"
+          [options]="routeOptions()"
+          (valueChange)="onRouteFilterChange($event)"
+        />
+      </ui-field>
       <ui-field label="Status" [controlId]="'logs-status'">
         <ui-select [value]="statusFilter()" (valueChange)="onStatusFilterChange($event)">
           <option value="">All statuses</option>
@@ -67,7 +79,7 @@
               <th scope="col">Time</th>
               <th scope="col">User</th>
               <th scope="col">Model</th>
-              <th scope="col">Provider / credential</th>
+              <th scope="col">Provider / upstream / credential</th>
               <th scope="col">Status</th>
               <th scope="col">Error</th>
               <th scope="col">Cost</th>
@@ -112,6 +124,14 @@
                       (clicked)="filterByProvider(entry.provider_id)"
                       >{{ entry.provider_name }}</ui-link-button
                     >
+                    @if (entry.route) {
+                      <ui-link-button
+                        class="route-link"
+                        [label]="'Filter logs by upstream provider ' + entry.route"
+                        (clicked)="filterByRoute(entry.route)"
+                        >· {{ entry.route }}</ui-link-button
+                      >
+                    }
                     @if (entry.credential_name) {
                       <span class="credential-name">{{ entry.credential_name }}</span>
                     }
@@ -239,7 +259,7 @@
                           <thead>
                             <tr>
                               <th scope="col">Time</th>
-                              <th scope="col">Provider</th>
+                              <th scope="col">Provider / upstream</th>
                               <th scope="col">Model</th>
                               <th scope="col">Credential</th>
                               <th scope="col">Outcome</th>
@@ -252,7 +272,16 @@
                             @for (attempt of expandedAttempts(); track attempt.id) {
                               <tr>
                                 <td class="col-time">{{ formatTime(attempt.occurred_at) }}</td>
-                                <td>{{ attempt.provider_name ?? '—' }}</td>
+                                <td>
+                                  @if (attempt.provider_name) {
+                                    {{ attempt.provider_name }}
+                                    @if (attempt.route) {
+                                      <span class="route-name">· {{ attempt.route }}</span>
+                                    }
+                                  } @else {
+                                    —
+                                  }
+                                </td>
                                 <td>
                                   @if (attempt.model_id) {
                                     <a
