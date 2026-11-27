@@ -91,6 +91,7 @@ async fn run_migrations(options: &SqliteConnectOptions) -> Result<()> {
     let migrator = sqlx::migrate!("./migrations");
     let result = async {
         adopt_renumbered_migrations(&mut connection, &migrator).await?;
+        repair_known_checksums(&mut connection, &migrator).await?;
         migrator
             .run(&mut connection)
             .await
@@ -186,6 +187,61 @@ async fn adopt_renumbered_migrations(
         .commit()
         .await
         .context("committing the renumbering")
+}
+
+/// The pre-review checksum of `0021_request_log_target.sql`, whose only
+/// difference from the current file is comment text. A build from the review
+/// round before that wording landed recorded this value when it applied the
+/// migration, so startup recognises it and refreshes the row.
+const PRE_REVIEW_0021: &[u8] = &[
+    0x25, 0x6d, 0xb0, 0xf7, 0x38, 0x15, 0xf8, 0x80, 0x7f, 0xbf, 0x5a, 0xf7, 0x7a, 0x24, 0x84, 0xcd,
+    0x80, 0x83, 0xfd, 0x31, 0x29, 0xe4, 0x8b, 0x72, 0xcc, 0xbe, 0x86, 0x09, 0x1c, 0x9c, 0x93, 0x76,
+    0x89, 0x82, 0xe8, 0x21, 0x14, 0xd2, 0x8f, 0x71, 0x28, 0x9d, 0x02, 0xce, 0x8a, 0xd1, 0x98, 0x8c,
+];
+
+/// Repairs the checksum of a migration whose SQL text changed only in comments
+/// after it was applied.
+///
+/// The request-log migration (21) was applied by a build from the review round
+/// before its final wording landed; only comments changed, so the columns are
+/// already in place. sqlx refuses to start when a recorded checksum differs from
+/// the resolved file, so the row is refreshed to the current checksum. The
+/// update only matches the exact historical checksum, so an unrelated edit to
+/// the same file still fails loudly.
+async fn repair_known_checksums(
+    connection: &mut sqlx::SqliteConnection,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("looking for the migrations table")?;
+    if has_table == 0 {
+        return Ok(());
+    }
+
+    let Some(current) = migrator.iter().find(|m| m.version == 21) else {
+        return Ok(());
+    };
+    let changed = sqlx::query(
+        "UPDATE _sqlx_migrations SET checksum = ? \
+         WHERE version = 21 AND description = 'request log target' AND checksum = ?",
+    )
+    .bind(current.checksum.to_vec())
+    .bind(PRE_REVIEW_0021)
+    .execute(&mut *connection)
+    .await
+    .context("repairing the request-log migration checksum")?
+    .rows_affected();
+    if changed > 0 {
+        log::warn!(
+            "refreshed the checksum of migration 21 ({}); its SQL changed only in comments",
+            current.description
+        );
+    }
+    Ok(())
 }
 
 /// Cheap liveness probe used by the health endpoint.
@@ -526,6 +582,74 @@ mod tests {
         assert!(
             request_log_columns.contains(&"credential_id".to_string()),
             "migration 21 still applied: {request_log_columns:?}"
+        );
+
+        drop(pool);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A database migrated by the review-round build of the request-log work
+    /// recorded migration 21 with the pre-review checksum; only its comments
+    /// changed afterwards. Startup must refresh that checksum instead of failing
+    /// with `MigrateError::VersionMismatch(21)`.
+    #[tokio::test]
+    async fn refreshes_the_pre_review_request_log_checksum() {
+        use std::borrow::Cow;
+
+        use sqlx::migrate::Migration;
+
+        let dir = std::env::temp_dir().join(format!("gateway-checksum-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        let path = dir.join("gateway.db");
+
+        let embedded = sqlx::migrate!("./migrations");
+        let file = |version: i64| {
+            embedded
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("embedded migration")
+                .clone()
+        };
+
+        let mut legacy = sqlx::migrate!("./migrations");
+        let mut migrations: Vec<_> = legacy
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 20)
+            .cloned()
+            .collect();
+        migrations.push(Migration {
+            checksum: Cow::Borrowed(PRE_REVIEW_0021),
+            ..file(21)
+        });
+        legacy.migrations = Cow::Owned(migrations);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("open raw connection");
+        legacy
+            .run(&mut connection)
+            .await
+            .expect("migrate with the pre-review checksum");
+        drop(connection);
+
+        let pool = open(&path)
+            .await
+            .expect("start on a database with the pre-review checksum");
+
+        let recorded: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 21")
+                .fetch_one(&pool)
+                .await
+                .expect("recorded checksum");
+        assert_eq!(
+            recorded,
+            file(21).checksum.to_vec(),
+            "the checksum is refreshed to the current file"
         );
 
         drop(pool);
