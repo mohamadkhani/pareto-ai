@@ -1386,16 +1386,25 @@ OpenRouter model as one aggregated offering:
    fails keeps serving.
 2. **Sync.** `run_sync` fetches the catalog, then every managed model's
    endpoints (bounded concurrency, per-model failures logged and tolerated)
-   *before* the transaction, and writes one priced offering per route. The
+   *before* the transaction, and writes one priced offering per route. A
+   successfully parsed lookup is the complete provider set: a route it no
+   longer lists is **disabled, never deleted** (`enabled = 0`,
+   `routing_json = NULL`) and recorded as `pruned_routes` in the run's
+   `detail_json`, so telemetry, usage attribution, breaker history, headers,
+   and overrides survive; a later sync that lists the route again re-enables
+   it and restores its routing fragment, while an operator's own disable is
+   preserved. A lookup that *errors* leaves the model's rows untouched, and a
+   successful lookup with an empty endpoint list disables every route. The
    routed models and any changed route prices are recorded in the run's
    `detail_json`.
 3. **Routing.** The request path merges `routing_json` into the upstream body
    (the fragment wins over a client-supplied `provider`; `model`, `messages`,
    `stream`, and `max_tokens` are written last and never overridden), so the
    provider whose price we ranked is the provider that runs. When a model has
-   routed offerings, its route-less aggregate is dropped from plain-model and
-   catalog-pool candidates (`drop_superseded_aggregates`); explicit combo
-   members are left alone because the operator named those rows.
+   a *routable* routed offering (offering, provider, and model all enabled),
+   its route-less aggregate is dropped from plain-model and catalog-pool
+   candidates (`drop_superseded_aggregates`); explicit combo members are left
+   alone because the operator named those rows.
 4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
    (`price` — cheapest model first — or `quality` — best model first) orders
    the models, and `provider_selection` (`mix_price` — cheapest at the combo's

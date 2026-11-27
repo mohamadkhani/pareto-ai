@@ -193,8 +193,7 @@ mod tests {
 
         let options = SqliteConnectOptions::new()
             .filename(&path)
-            .create_if_missing(true)
-            .foreign_keys(true);
+            .create_if_missing(true);
         let mut connection = sqlx::SqliteConnection::connect_with(&options)
             .await
             .expect("open raw connection");
@@ -251,22 +250,23 @@ mod tests {
         .expect("usage event");
         drop(connection);
 
-        // The real runner upgrades to the tip. It must run with foreign keys
-        // off; with them on, `DROP TABLE offerings` deletes the child rows.
-        let migration_options = options.clone().foreign_keys(false);
-        run_migrations(&migration_options).await.expect("upgrade");
-
-        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+        // Exercise the real production entry point: `open` runs the remaining
+        // migrations with foreign keys off (the 0021 rebuild drops the
+        // referenced `offerings` table; with foreign keys on the child rows
+        // cascade away) and returns a pool whose own connections keep foreign
+        // keys on. Reverting `open_inner`'s call site would break this test.
+        let pool = open(&path)
             .await
-            .expect("reopen after upgrade");
+            .expect("upgrade through the production entry point");
+
         let prices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prices WHERE offering_id = 'o'")
-            .fetch_one(&mut connection)
+            .fetch_one(&pool)
             .await
             .expect("price count");
         assert_eq!(prices, 1, "the price row survives the offerings rebuild");
         let linked: Option<String> =
             sqlx::query_scalar("SELECT offering_id FROM usage_events WHERE request_id = 'req-1'")
-                .fetch_one(&mut connection)
+                .fetch_one(&pool)
                 .await
                 .expect("usage event");
         assert_eq!(
@@ -276,7 +276,7 @@ mod tests {
         );
         let route: Option<String> =
             sqlx::query_scalar("SELECT route FROM offerings WHERE id = 'o'")
-                .fetch_one(&mut connection)
+                .fetch_one(&pool)
                 .await
                 .expect("rebuilt offering");
         assert_eq!(
@@ -286,7 +286,7 @@ mod tests {
         );
         let columns: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_table_info('offerings')")
-                .fetch_all(&mut connection)
+                .fetch_all(&pool)
                 .await
                 .expect("offering columns");
         assert!(
@@ -297,7 +297,16 @@ mod tests {
             columns.contains(&"routing_json".to_string()),
             "columns: {columns:?}"
         );
-        drop(connection);
+
+        // The pool's own connections enforce foreign keys even though the
+        // migration connection did not.
+        let foreign_keys: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .expect("foreign_keys pragma");
+        assert_eq!(foreign_keys, 1, "the pool enforces foreign keys");
+
+        drop(pool);
 
         std::fs::remove_dir_all(&dir).ok();
     }
