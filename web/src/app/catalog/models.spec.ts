@@ -677,6 +677,9 @@ describe('Models', () => {
 
     // The id is not in the catalog: the exact view is empty and no dialog opens.
     expect(root.textContent).toContain('No model matches this link');
+    // The remedy names the model filter it clears and never promises the full list.
+    expect(root.textContent).toContain('Clear the model filter to see this list.');
+    expect(root.textContent).not.toContain('see the full list');
     expect(detailDialog(root).querySelector('dialog')?.open).toBe(false);
 
     buttonByText(root, 'Clear model filter').click();

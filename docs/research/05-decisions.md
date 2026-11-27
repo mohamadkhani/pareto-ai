@@ -1412,7 +1412,11 @@ so the console never resolves catalog GUIDs itself:
   column among the loaded rows, and there is no text colouring.
 - Expanded details show **all** raw identifiers in a collapsed block, and an
   **Origin error** block (class, provider status, provider code, bounded redacted
-  provider message) when the request itself failed.
+  provider message) whenever the row carries a provider-side origin — the
+  provider's own HTTP status, its error code, or its bounded redacted message.
+  The block stays closed for the gateway's own pre-send refusals and rejections
+  (budget, token cap, access, invalid body, unknown model, context overflow, key
+  TPM), whose origin is the gateway, not a provider.
 
 **Why:** the request log is the operator's only window into a bad request, and a
 row that showed a 36-character offering GUID and two-decimal cost told them

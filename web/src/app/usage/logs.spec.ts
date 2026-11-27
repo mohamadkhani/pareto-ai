@@ -658,6 +658,65 @@ describe('Logs', () => {
     expect(root.querySelector('.origin-error')).toBeNull();
   });
 
+  it('omits the origin error block for a gateway model_not_found, which has no provider origin', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 404,
+            error_class: 'model_not_found',
+            error_detail: null,
+            upstream_status: null,
+            provider_error_code: null,
+            cost_usd: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The gateway rejected the request before sending: the gate must key off
+    // the provider-origin facts, not `error_class !== null`.
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('shows the origin error for an upstream timeout that records only the detail', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 504,
+            error_class: 'upstream_timeout',
+            error_detail: 'request timed out after 60s',
+            upstream_status: null,
+            provider_error_code: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // A transport failure has no provider status or code, only the transport
+    // text: the gate must not be status-only.
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('upstream_timeout');
+    expect(text).toContain('request timed out after 60s');
+  });
+
   it('shows the origin error for an upstream 429, which does have a provider origin', async () => {
     fetchMock.respond(
       jsonResponse(200, {

@@ -35,9 +35,6 @@ const ERROR_CLASSES = [
   'internal',
 ] as const;
 
-/** The gateway's own pre-send denials: nothing was sent, so no provider origin. */
-const GATEWAY_DENIALS = new Set(['budget_exceeded', 'token_cap_exceeded', 'access_denied']);
-
 /** Settled statuses worth filtering on, including the common failures. */
 const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as const;
 
@@ -241,11 +238,18 @@ export class Logs {
   }
 
   /**
-   * Whether the row has a provider-side origin error to show (D64). A pre-send
-   * denial has none; an upstream 429 does, even though its status is 429.
+   * Whether the row carries a provider-side origin (D64): the provider's own HTTP
+   * status, its error code, or its bounded redacted message. The gateway's own
+   * pre-send refusals and rejections set none of the three, so the block stays
+   * closed for them — and a provider failure whose class happens to share a name
+   * with a gateway one (both use `invalid_request`) still shows its origin.
    */
   protected hasOriginError(entry: RequestLogEntry): boolean {
-    return entry.error_class !== null && !GATEWAY_DENIALS.has(entry.error_class);
+    return (
+      entry.upstream_status !== null ||
+      entry.provider_error_code !== null ||
+      entry.error_detail !== null
+    );
   }
 
   /** Opens/closes the details of one entry and loads its attempts on demand. */
