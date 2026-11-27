@@ -436,11 +436,18 @@ impl Candidate {
 /// Drops the route-less aggregate offering of any model that also has a routed
 /// (per-provider) offering: when the per-provider prices are known, routing
 /// must pick a provider we can pin, not the aggregate that lets OpenRouter
-/// choose (D64). Member pools are left alone — the operator picked those rows.
+/// choose (D64). Only *routable* routed siblings count — an offering, provider,
+/// or model that is disabled cannot serve, so an all-disabled routed set must
+/// not starve the model's aggregate. Member pools are left alone — the operator
+/// picked those rows.
 fn drop_superseded_aggregates(rows: Vec<OfferingJoin>) -> Vec<OfferingJoin> {
     let mut routed: HashSet<(String, String)> = HashSet::new();
     for row in &rows {
-        if !row.offering_route.is_empty() {
+        if !row.offering_route.is_empty()
+            && row.offering_enabled == 1
+            && row.provider_enabled == 1
+            && row.model_enabled == 1
+        {
             routed.insert((row.provider_id.clone(), row.upstream_model_id.clone()));
         }
     }
@@ -4178,6 +4185,70 @@ mod tests {
     use crate::config::Config;
     use crate::test_support::{TestApp, api_request, body_text, login, send, send_streaming};
     use crate::upstream::stub::{Scenario, Stub};
+
+    /// A join row for `drop_superseded_aggregates` tests; the three enabled
+    /// flags are independent so a test can disable any one of them.
+    fn join_row(
+        provider_id: &str,
+        upstream: &str,
+        route: &str,
+        offering_enabled: i64,
+        provider_enabled: i64,
+        model_enabled: i64,
+    ) -> OfferingJoin {
+        OfferingJoin {
+            offering_id: format!("{provider_id}-{upstream}-{route}"),
+            model_id: "m".to_string(),
+            upstream_model_id: upstream.to_string(),
+            offering_route: route.to_string(),
+            offering_routing_json: None,
+            context_override: None,
+            max_output_override: None,
+            offering_headers_json: None,
+            canonical_name: upstream.to_string(),
+            context_length: None,
+            max_output_tokens: None,
+            modalities_input: None,
+            provider_id: provider_id.to_string(),
+            provider_name: provider_id.to_string(),
+            base_url: "https://example.test".to_string(),
+            offering_enabled,
+            provider_enabled,
+            model_enabled,
+        }
+    }
+
+    #[test]
+    fn a_disabled_routed_sibling_does_not_drop_the_aggregate() {
+        // A disabled route cannot serve, so it must not supersede the
+        // aggregate (D64): otherwise the model has no candidate at all.
+        let kept = drop_superseded_aggregates(vec![
+            join_row("p", "gpt-4o", "", 1, 1, 1),
+            join_row("p", "gpt-4o", "azure", 0, 1, 1),
+        ]);
+        assert_eq!(
+            kept.len(),
+            2,
+            "a disabled routed sibling keeps the aggregate"
+        );
+
+        // A disabled provider or model disqualifies the routed sibling too.
+        for (provider_enabled, model_enabled) in [(0, 1), (1, 0)] {
+            let kept = drop_superseded_aggregates(vec![
+                join_row("p", "gpt-4o", "", 1, 1, 1),
+                join_row("p", "gpt-4o", "azure", 1, provider_enabled, model_enabled),
+            ]);
+            assert_eq!(kept.len(), 2, "a non-routable sibling keeps the aggregate");
+        }
+
+        // An enabled routed sibling does supersede the aggregate.
+        let dropped = drop_superseded_aggregates(vec![
+            join_row("p", "gpt-4o", "", 1, 1, 1),
+            join_row("p", "gpt-4o", "azure", 1, 1, 1),
+        ]);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].offering_route, "azure");
+    }
 
     // -----------------------------------------------------------------------
     // Seeding and request helpers

@@ -1,5 +1,4 @@
--- no-transaction
--- 0020_offering_routes: per-provider (route) offerings for OpenRouter.
+-- 0021_offering_routes: per-provider (route) offerings for OpenRouter.
 --
 -- Decision D64. OpenRouter fronts many upstream providers (Azure, OpenAI,
 -- Together, ...) and publishes a *different price per provider* for the same
@@ -29,12 +28,11 @@
 -- old table is dropped first. The child tables that reference `offerings`
 -- (prices, usage_events, combo_sticky_choices, ...) keep their
 -- `REFERENCES offerings` clauses untouched, because the renamed table is the
--- new one (child clauses never mention its temporary name). `-- no-transaction`
--- is required: `PRAGMA foreign_keys=OFF` is a no-op inside a transaction, and
--- dropping a referenced table with it on would run an implicit DELETE and
--- fail once children exist.
-
-PRAGMA foreign_keys = OFF;
+-- new one (child clauses never mention its temporary name). `DROP TABLE`
+-- runs an implicit DELETE, so dropping a referenced table with foreign keys
+-- ON would cascade the child rows away. Migrations therefore run with foreign
+-- keys off (see `db::open`); `PRAGMA foreign_keys` cannot be toggled inside
+-- the transaction the migrator always opens, so the pragma is not set here.
 
 CREATE TABLE offerings_new (
     id                  TEXT PRIMARY KEY,
@@ -73,4 +71,3 @@ CREATE INDEX IF NOT EXISTS idx_offerings_model_id ON offerings (model_id);
 CREATE INDEX IF NOT EXISTS idx_offerings_provider_id ON offerings (provider_id);
 
 PRAGMA foreign_key_check;
-PRAGMA foreign_keys = ON;

@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Connection, SqlitePool};
 
 /// Opens (or creates) the database, applies migrations, and returns a pool.
 pub async fn open(path: &Path) -> Result<SqlitePool> {
@@ -48,16 +48,25 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
         options = options.log_statements(log::LevelFilter::Trace);
     }
 
+    // Migrations run on a dedicated connection with foreign keys OFF. SQLite
+    // cannot drop a table-level constraint, so a rebuild (e.g. 0021 widening
+    // the `UNIQUE` on `offerings`) must create a new table, copy, drop the old
+    // one, and rename. `DROP TABLE` runs an implicit DELETE, so with foreign
+    // keys ON the child rows of `offerings` (`prices`, `usage_events`,
+    // `telemetry_attempts`, combo members, ...) cascade away. `PRAGMA
+    // foreign_keys` cannot be toggled inside the transaction `Migrator::apply`
+    // always opens, so the connection itself must start with it off; the
+    // pool's own connections keep it ON (see the `foreign_keys(true)` above).
+    let migration_options = options.clone().foreign_keys(false);
+    run_migrations(&migration_options)
+        .await
+        .with_context(|| format!("opening database {}", path.display()))?;
+
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(options)
         .await
         .with_context(|| format!("opening database {}", path.display()))?;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("running migrations")?;
 
     // One-time data repair that pure SQL cannot express: the strict catalog
     // identity is computed in Rust. It is guarded by a `db_meta` key and is a
@@ -67,6 +76,24 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
         .context("repairing duplicate catalog models")?;
 
     Ok(pool)
+}
+
+/// Applies every pending migration on one fresh connection.
+///
+/// The connection is built from `options`, so the caller decides the foreign
+/// keys state: [`open_inner`] passes them off (a rebuild drops a referenced
+/// table; see the comment there). Failure mode: any connection or migration
+/// error, wrapped by the caller.
+async fn run_migrations(options: &SqliteConnectOptions) -> Result<()> {
+    let mut connection = sqlx::SqliteConnection::connect_with(options)
+        .await
+        .context("opening the migration connection")?;
+    let result = sqlx::migrate!("./migrations")
+        .run(&mut connection)
+        .await
+        .context("running migrations");
+    drop(connection);
+    result
 }
 
 /// Cheap liveness probe used by the health endpoint.
@@ -136,6 +163,141 @@ mod tests {
                 "missing index {index}: {indexes:?}"
             );
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression for the 0021 rebuild (D64): dropping the referenced
+    /// `offerings` table with foreign keys ON cascades the child rows away.
+    /// The upgrade path must run migrations with foreign keys off, so a
+    /// non-empty database keeps its `prices` and `usage_events` rows and the
+    /// rebuilt `offerings` gains the new `route`/`routing_json` columns.
+    #[tokio::test]
+    async fn upgrading_past_0021_keeps_child_rows() {
+        let dir = std::env::temp_dir().join(format!("gateway-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create data dir");
+        let path = dir.join("gateway.db");
+
+        // Build the database a pre-D64 install has: migrations 0001..0020
+        // applied, then the provider/model/offering/price/usage rows the 0021
+        // rebuild must preserve. Running the embedded migrations filtered to
+        // `<= 20` records the same checksums the real runner then expects.
+        let mut pre_upgrade = sqlx::migrate!("./migrations");
+        let subset: Vec<_> = pre_upgrade
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 20)
+            .cloned()
+            .collect();
+        pre_upgrade.migrations = std::borrow::Cow::Owned(subset);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("open raw connection");
+        pre_upgrade
+            .run(&mut connection)
+            .await
+            .expect("apply migrations 0001..0020");
+
+        let now = "2026-01-01T00:00:00.000Z";
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url, enabled, created_at, updated_at) \
+             VALUES ('p', 'openrouter', 'https://openrouter.ai/api/v1', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("provider");
+        sqlx::query(
+            "INSERT INTO models (id, canonical_name, created_at, updated_at) \
+             VALUES ('m', 'openai/gpt-4o', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("model");
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, enabled, created_at, updated_at) \
+             VALUES ('o', 'p', 'm', 'openai/gpt-4o', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("offering");
+        sqlx::query(
+            "INSERT INTO prices (id, offering_id, input_per_m, source, created_at, updated_at) \
+             VALUES ('pr', 'o', 2.5, 'openrouter', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("price");
+        sqlx::query(
+            "INSERT INTO usage_events (request_id, offering_id, occurred_at) \
+             VALUES ('req-1', 'o', ?)",
+        )
+        .bind(now)
+        .execute(&mut connection)
+        .await
+        .expect("usage event");
+        drop(connection);
+
+        // The real runner upgrades to the tip. It must run with foreign keys
+        // off; with them on, `DROP TABLE offerings` deletes the child rows.
+        let migration_options = options.clone().foreign_keys(false);
+        run_migrations(&migration_options).await.expect("upgrade");
+
+        let mut connection = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .expect("reopen after upgrade");
+        let prices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM prices WHERE offering_id = 'o'")
+            .fetch_one(&mut connection)
+            .await
+            .expect("price count");
+        assert_eq!(prices, 1, "the price row survives the offerings rebuild");
+        let linked: Option<String> =
+            sqlx::query_scalar("SELECT offering_id FROM usage_events WHERE request_id = 'req-1'")
+                .fetch_one(&mut connection)
+                .await
+                .expect("usage event");
+        assert_eq!(
+            linked.as_deref(),
+            Some("o"),
+            "usage_events.offering_id is not nulled by the rebuild"
+        );
+        let route: Option<String> =
+            sqlx::query_scalar("SELECT route FROM offerings WHERE id = 'o'")
+                .fetch_one(&mut connection)
+                .await
+                .expect("rebuilt offering");
+        assert_eq!(
+            route.as_deref(),
+            Some(""),
+            "the copied row keeps an empty route"
+        );
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('offerings')")
+                .fetch_all(&mut connection)
+                .await
+                .expect("offering columns");
+        assert!(
+            columns.contains(&"route".to_string()),
+            "columns: {columns:?}"
+        );
+        assert!(
+            columns.contains(&"routing_json".to_string()),
+            "columns: {columns:?}"
+        );
+        drop(connection);
 
         std::fs::remove_dir_all(&dir).ok();
     }

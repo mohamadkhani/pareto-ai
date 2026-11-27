@@ -1367,6 +1367,7 @@ enabled state and is not a hard gate; a caller that ignores it and sends a large
 prompt still succeeds while a large-context member is eligible. `pool = "all"`
 combos stay null because their candidate set is the whole catalog and a minimum
 there would advertise the smallest catalog model's window.
+
 ### D64. OpenRouter per-provider offerings, pinned provider, and combo ordering knobs
 
 **Decision (2026-11-27):** OpenRouter fronts many upstream providers and quotes
@@ -1402,17 +1403,6 @@ OpenRouter model as one aggregated offering:
    once it is chosen. Both default to the cheapest behaviour that matches the
    pre-D64 pool order. A member pool keeps its explicit strategy order.
 5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0-100, default
-   5) keeps a session on its pinned provider while it costs no more than that
-   much over the cheapest ready candidate; a bigger gap moves the session and
-   rewrites the pin (the decision records `replaced_why: "price_moved"`).
-
-4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
-   (`price` — cheapest model first — or `quality` — best model first) orders
-   the models, and `provider_selection` (`mix_price` — cheapest at the combo's
-   own blend — `speed`, or `reliability`) orders the providers of one model
-   once it is chosen. Both default to the cheapest behaviour that matches the
-   pre-D64 pool order. A member pool keeps its explicit strategy order.
-5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0–100, default
    5) keeps a session on its pinned provider while it costs no more than that
    much over the cheapest ready candidate; a bigger gap moves the session and
    rewrites the pin (the decision records `replaced_why: "price_moved"`).

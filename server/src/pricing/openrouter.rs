@@ -450,8 +450,8 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrEndpoint {
     /// OpenRouter provider slug (the endpoint's `tag`, e.g. `azure`); falls
-    /// back to the lower-cased `provider_name`. Empty entries are dropped, so
-    /// this is never empty.
+    /// back to the lower-cased `provider_name` only when that is a valid slug
+    /// shape. Endpoints with neither are dropped, so this is never empty.
     pub route: String,
     pub price: OrPrice,
     /// The raw endpoint `pricing` object, kept for the run's `detail_json`.
@@ -473,6 +473,18 @@ pub fn parse_endpoints(raw: &str) -> Result<Vec<OrEndpoint>, SyncError> {
     Ok(list.iter().filter_map(parse_endpoint).collect())
 }
 
+/// Whether `value` is a plausible OpenRouter provider slug: non-empty and only
+/// `[a-z0-9_-]`. The fallback to `provider_name` is accepted only in this
+/// shape, because the routing fragment pins with `allow_fallbacks=false` — a
+/// name that is not a real slug (e.g. `"amazon bedrock"`) would make every
+/// request fail rather than route somewhere else.
+fn is_route_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 fn parse_endpoint(entry: &serde_json::Value) -> Option<OrEndpoint> {
     let route = entry
         .get("tag")
@@ -485,7 +497,7 @@ fn parse_endpoint(entry: &serde_json::Value) -> Option<OrEndpoint> {
                 .get("provider_name")
                 .and_then(serde_json::Value::as_str)
                 .map(|value| value.trim().to_lowercase())
-                .filter(|value| !value.is_empty())
+                .filter(|value| is_route_slug(value))
         })?;
     let pricing = entry.get("pricing").filter(|p| p.is_object());
     Some(OrEndpoint {
@@ -806,6 +818,9 @@ async fn apply_success(
     let mut raw_prices = serde_json::Map::new();
     let mut route_prices = serde_json::Map::new();
     let mut variable_prices: Vec<&str> = Vec::new();
+    // D64: routed offerings of a model whose provider left OpenRouter. Recorded
+    // in the run detail so an operator can see what the sync removed.
+    let mut pruned_routes: Vec<String> = Vec::new();
     for model in &parsed.models {
         // Discovery's id filter is the single source of truth: a filtered id
         // never creates a model or offering. It may still refresh the price of
@@ -945,6 +960,13 @@ async fn apply_success(
                     );
                 }
             }
+            // The lookup succeeded, so this is the complete provider set: a
+            // routed offering the response no longer lists is stale and must
+            // go, or it keeps its last price and pins a provider that is gone
+            // (`allow_fallbacks=false`).
+            for route in prune_stale_routes(&mut tx, &provider_id, &model.id, endpoints).await? {
+                pruned_routes.push(format!("{}@{}", model.id, route));
+            }
         }
     }
 
@@ -960,6 +982,9 @@ async fn apply_success(
         // of every route whose stored price changed (or was skipped manual).
         "routed_models": routed_models,
         "route_prices": serde_json::Value::Object(route_prices),
+        // D64: routed offerings removed because OpenRouter no longer lists
+        // that provider for the model (`"<model_id>@<route>"`).
+        "pruned_routes": pruned_routes,
     });
 
     let model_count = parsed.models.iter().filter(|model| model.managed).count();
@@ -1269,8 +1294,10 @@ fn modalities_json(items: &[String]) -> Option<String> {
     serde_json::to_string(items).ok()
 }
 
-/// Upserts the offering row keyed on `(provider_id, upstream_model_id)`.
-/// Admin-set overrides, `enabled`, and headers survive the sync.
+/// Upserts the aggregated (route-less) offering row keyed on
+/// `(provider_id, upstream_model_id, route = '')`, so it never collides with a
+/// per-provider offering of the same model (D64). Admin-set overrides,
+/// `enabled`, and headers survive the sync.
 async fn upsert_offering(
     conn: &mut sqlx::SqliteConnection,
     provider_id: &str,
@@ -1278,7 +1305,8 @@ async fn upsert_offering(
     upstream_model_id: &str,
 ) -> Result<String, SyncError> {
     let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
+        "SELECT id FROM offerings \
+         WHERE provider_id = ? AND upstream_model_id = ? AND route = ''",
     )
     .bind(provider_id)
     .bind(upstream_model_id)
@@ -1403,6 +1431,57 @@ async fn upsert_route_offering(
     }
 }
 
+/// Deletes the routed offerings of `(provider_id, upstream_model_id)` whose
+/// route is absent from `endpoints` (D64). When OpenRouter drops a provider
+/// from a model, the stale offering would otherwise keep its last price and
+/// pin a provider that no longer serves, with `allow_fallbacks=false`.
+///
+/// A row whose price is `source = 'manual'` is an operator's own row and is
+/// never deleted: it is skipped and logged. Returns the pruned routes, in
+/// route order, for the run's `detail_json`.
+async fn prune_stale_routes(
+    conn: &mut sqlx::SqliteConnection,
+    provider_id: &str,
+    upstream_model_id: &str,
+    endpoints: &[OrEndpoint],
+) -> Result<Vec<String>, SyncError> {
+    if endpoints.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; endpoints.len()].join(", ");
+    let sql = format!(
+        "SELECT o.id, o.route, p.source FROM offerings o \
+         LEFT JOIN prices p ON p.offering_id = o.id \
+         WHERE o.provider_id = ? AND o.upstream_model_id = ? AND o.route <> '' \
+           AND o.route NOT IN ({placeholders}) \
+         ORDER BY o.route"
+    );
+    let mut query = sqlx::query_as::<_, (String, String, Option<String>)>(&sql);
+    query = query.bind(provider_id).bind(upstream_model_id);
+    for endpoint in endpoints {
+        query = query.bind(&endpoint.route);
+    }
+    let stale = query.fetch_all(&mut *conn).await?;
+
+    let mut pruned = Vec::new();
+    for (id, route, source) in stale {
+        if source.as_deref() == Some("manual") {
+            tracing::warn!(
+                upstream_model_id = %upstream_model_id,
+                route = %route,
+                "stale OpenRouter route has a manual price; keeping the offering"
+            );
+            continue;
+        }
+        sqlx::query("DELETE FROM offerings WHERE id = ?")
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+        pruned.push(route);
+    }
+    Ok(pruned)
+}
+
 /// `capabilities_json` for a synced model: the display name (the spec schema
 /// has no display-name column) and `supported_parameters`, when present.
 fn capabilities_json(model: &OrModel) -> Option<String> {
@@ -1485,6 +1564,26 @@ mod tests {
             .map(|value| value.to_string())
             .unwrap_or_else(|| r#"{"data":{"endpoints":[]}}"#.to_string());
         Box::pin(std::future::ready(Ok(body)))
+    }
+
+    /// A later lookup for the same catalog where OpenRouter dropped the
+    /// `openai` provider from `openai/gpt-4o` (only `azure` remains). Used to
+    /// prove the sync prunes the stale route (D64).
+    fn reduced_endpoints_fetch(model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+        let body = match model_id.as_str() {
+            "openai/gpt-4o" => {
+                r#"{"data":{"endpoints":[
+                {"tag":"azure","provider_name":"Azure","pricing":{"prompt":"0.0000025","completion":"0.00001"}}
+            ]}}"#
+            }
+            "deepseek/deepseek-r1" => {
+                r#"{"data":{"endpoints":[
+                {"tag":"deepseek","provider_name":"DeepSeek","pricing":{"prompt":"0.00000055","completion":"0.00000219"}}
+            ]}}"#
+            }
+            _ => r#"{"data":{"endpoints":[]}}"#,
+        };
+        Box::pin(std::future::ready(Ok(body.to_string())))
     }
 
     // -----------------------------------------------------------------------
@@ -2710,6 +2809,24 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_name_that_is_not_a_slug_is_not_a_route() {
+        // The pin uses `allow_fallbacks=false`, so a name that is not a real
+        // OpenRouter slug must be skipped, not pinned.
+        let raw = r#"{"data":{"endpoints":[
+            {"provider_name":"Amazon Bedrock","pricing":{"prompt":"0.000001"}},
+            {"provider_name":"gpt-4o/eu","pricing":{"prompt":"0.000002"}},
+            {"provider_name":"deepinfra-2","pricing":{"prompt":"0.000003"}}
+        ]}}"#;
+        let endpoints = parse_endpoints(raw).expect("parses");
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "only the slug-shaped fallback is kept: {endpoints:?}"
+        );
+        assert_eq!(endpoints[0].route, "deepinfra-2");
+    }
+
+    #[test]
     fn malformed_endpoint_bodies_fail_parse() {
         assert!(matches!(
             parse_endpoints("not json"),
@@ -2820,5 +2937,162 @@ mod tests {
             .await
             .expect("offering count");
         assert_eq!(total, 5, "every model keeps its aggregated offering");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_provider_route_is_pruned_and_recorded() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+
+        // First sync records two routes for gpt-4o: azure and openai.
+        run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
+            .await
+            .expect("first sync");
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route <> ''",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("route count");
+        assert_eq!(before, 2);
+
+        // The next lookup no longer lists the `openai` provider.
+        run_sync(
+            &app.state.pool,
+            fixture_fetch,
+            reduced_endpoints_fetch,
+            &actor,
+        )
+        .await
+        .expect("second sync");
+        let routes: Vec<String> = sqlx::query_scalar(
+            "SELECT o.route FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route <> '' ORDER BY o.route",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("routes");
+        assert_eq!(
+            routes,
+            vec!["azure".to_string()],
+            "the dropped openai route is deleted, azure stays"
+        );
+        // The removed row's price went with it (ON DELETE CASCADE).
+        let orphan_prices: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM prices p \
+             WHERE p.offering_id NOT IN (SELECT id FROM offerings)",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("orphan prices");
+        assert_eq!(orphan_prices, 0);
+
+        let detail: String = sqlx::query_scalar(
+            "SELECT detail_json FROM price_sync_runs ORDER BY rowid DESC LIMIT 1",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("run detail");
+        let detail: serde_json::Value = serde_json::from_str(&detail).expect("detail json");
+        let pruned = detail["pruned_routes"].as_array().expect("pruned_routes");
+        assert!(
+            pruned.iter().any(|route| route == "openai/gpt-4o@openai"),
+            "the pruned route is recorded: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_route_with_a_manual_price_is_kept() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+
+        run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
+            .await
+            .expect("first sync");
+
+        // The operator pins the openai route's price by hand.
+        let openai_id: String = sqlx::query_scalar(
+            "SELECT o.id FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route = 'openai'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("openai route id");
+        sqlx::query("UPDATE prices SET source = 'manual', updated_by = ? WHERE offering_id = ?")
+            .bind(&user_id)
+            .bind(&openai_id)
+            .execute(&app.state.pool)
+            .await
+            .expect("mark manual");
+
+        run_sync(
+            &app.state.pool,
+            fixture_fetch,
+            reduced_endpoints_fetch,
+            &actor,
+        )
+        .await
+        .expect("second sync");
+
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM offerings o JOIN models m ON m.id = o.model_id \
+             WHERE m.canonical_name = 'openai/gpt-4o' AND o.route = 'openai'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("kept count");
+        assert_eq!(kept, 1, "an operator's manual route row is never deleted");
+
+        let detail: String = sqlx::query_scalar(
+            "SELECT detail_json FROM price_sync_runs ORDER BY rowid DESC LIMIT 1",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("run detail");
+        let detail: serde_json::Value = serde_json::from_str(&detail).expect("detail json");
+        let pruned = detail["pruned_routes"].as_array().expect("pruned_routes");
+        assert!(
+            !pruned.iter().any(|route| route == "openai/gpt-4o@openai"),
+            "a kept manual route is not recorded as pruned: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_endpoint_lookup_does_not_prune_existing_routes() {
+        let app = TestApp::new().await;
+        let user_id = admin_id(&app).await;
+        let actor = Actor {
+            user_id: &user_id,
+            ip: "127.0.0.1",
+        };
+        fn failing_endpoints(_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
+            Box::pin(std::future::ready(Err(SyncError::Fetch(
+                "endpoints timed out".to_string(),
+            ))))
+        }
+
+        run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
+            .await
+            .expect("first sync");
+
+        // A total lookup failure must leave the known routes alone: an absent
+        // model is not evidence that its providers are gone.
+        run_sync(&app.state.pool, fixture_fetch, failing_endpoints, &actor)
+            .await
+            .expect("second sync");
+        let routed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM offerings WHERE route <> ''")
+            .fetch_one(&app.state.pool)
+            .await
+            .expect("routed count");
+        assert_eq!(routed, 3, "azure and openai for gpt-4o, deepseek for r1");
     }
 }

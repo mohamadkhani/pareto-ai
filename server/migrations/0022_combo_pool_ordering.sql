@@ -1,4 +1,4 @@
--- 0021_combo_pool_ordering: pool sort axis, provider selection, sticky tolerance.
+-- 0022_combo_pool_ordering: pool sort axis, provider selection, sticky tolerance.
 --
 -- Decision D64. Three new knobs on a combo:
 --
