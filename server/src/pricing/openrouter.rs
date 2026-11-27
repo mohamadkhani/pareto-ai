@@ -460,8 +460,11 @@ pub struct OrEndpoint {
 
 /// Parses one model's `.../endpoints` body into its usable providers.
 ///
-/// Fails only when the body is not JSON or has no `data.endpoints` array;
-/// individual unusable entries (no `tag`/`provider_name`) are skipped.
+/// Fails when the body is not JSON, has no `data.endpoints` array, or has a
+/// non-empty `endpoints` array whose entries are all unusable (no
+/// `tag`/slug-shaped `provider_name`) — a shape failure, not a real empty
+/// provider set, so the sync must not treat it as "every route is gone".
+/// Individual unusable entries in an otherwise usable list are skipped.
 pub fn parse_endpoints(raw: &str) -> Result<Vec<OrEndpoint>, SyncError> {
     let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| SyncError::Json(e.to_string()))?;
@@ -470,7 +473,13 @@ pub fn parse_endpoints(raw: &str) -> Result<Vec<OrEndpoint>, SyncError> {
         .and_then(|data| data.get("endpoints"))
         .and_then(serde_json::Value::as_array)
         .ok_or(SyncError::Shape)?;
-    Ok(list.iter().filter_map(parse_endpoint).collect())
+    let filtered: Vec<OrEndpoint> = list.iter().filter_map(parse_endpoint).collect();
+    // A non-empty list that yields no usable providers is a shape we do not
+    // understand; returning `Ok(vec![])` would prune every existing route.
+    if filtered.is_empty() && !list.is_empty() {
+        return Err(SyncError::Shape);
+    }
+    Ok(filtered)
 }
 
 /// Whether `value` is a plausible OpenRouter provider slug: non-empty and only
@@ -972,10 +981,11 @@ async fn apply_success(
             }
             // The lookup succeeded, so this is the complete provider set: a
             // routed offering the response no longer lists is stale. It is
-            // disabled (never deleted) so it stops pinning a provider that is
-            // gone (`allow_fallbacks=false`) while its telemetry, usage
-            // attribution, breaker history, headers, and overrides survive.
-            // An empty successful list disables every route.
+            // marked removed (`route_removed_at`), never deleted and never
+            // re-enabling/disabling the operator's `enabled`, so it stops
+            // pinning a provider that is gone (`allow_fallbacks=false`) while
+            // its telemetry, usage attribution, breaker history, headers, and
+            // overrides survive. An empty successful list removes every route.
             for route in prune_stale_routes(&mut tx, &provider_id, &model.id, endpoints).await? {
                 pruned_routes.push(format!("{}@{}", model.id, route));
             }
@@ -1386,10 +1396,10 @@ fn routing_json_for_route(route: &str) -> String {
 }
 
 /// Upserts the routed offering row keyed on
-/// `(provider_id, upstream_model_id, route)`, refreshing its `routing_json`.
-/// Admin-set overrides and headers survive the sync; an operator's own
-/// `enabled = 0` is preserved, but a route the sync disabled (a routed row
-/// with no `routing_json`) is re-enabled because the route is listed again.
+/// `(provider_id, upstream_model_id, route)`, refreshing its `routing_json`
+/// and clearing any sync-owned `route_removed_at` marker. Admin-set overrides
+/// and headers survive the sync; `enabled` is never touched, so an operator's
+/// own disable (`enabled = 0`) is preserved.
 async fn upsert_route_offering(
     conn: &mut sqlx::SqliteConnection,
     provider_id: &str,
@@ -2885,6 +2895,27 @@ mod tests {
             parse_endpoints(r#"{"data":{}}"#),
             Err(SyncError::Shape)
         ));
+    }
+
+    #[test]
+    fn an_empty_endpoints_array_is_a_real_empty_provider_set() {
+        // A genuinely empty list is `Ok(vec![])`: the sync treats it as "no
+        // provider serves this model" and prunes the existing routes.
+        let endpoints = parse_endpoints(r#"{"data":{"endpoints":[]}}"#).expect("empty list is ok");
+        assert!(endpoints.is_empty());
+    }
+
+    #[test]
+    fn a_non_empty_endpoints_array_with_no_usable_entries_is_a_shape_failure() {
+        // Every entry lacks a `tag` and a slug-shaped `provider_name`. This is
+        // a shape we do not understand, not an empty provider set: treating it
+        // as empty would prune every existing route.
+        let raw = r#"{"data":{"endpoints":[
+            {"provider_name":"Amazon Bedrock","pricing":{"prompt":"0.000001"}},
+            {"provider_name":"   ","pricing":{"prompt":"0.000002"}},
+            {"provider_name":"gpt-4o/eu","pricing":{"prompt":"0.000003"}}
+        ]}}"#;
+        assert!(matches!(parse_endpoints(raw), Err(SyncError::Shape)));
     }
 
     #[tokio::test]

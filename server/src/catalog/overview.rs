@@ -401,6 +401,7 @@ async fn fetch_rows(
          JOIN providers pr ON pr.id = o.provider_id \
          LEFT JOIN prices p ON p.offering_id = o.id \
          WHERE (? IS NULL OR o.provider_id = ?) \
+           AND o.route_removed_at IS NULL \
            AND (? IS NULL \
                 OR instr(lower(m.canonical_name), ?) > 0 \
                 OR instr(lower(coalesce(m.family, '')), ?) > 0 \
@@ -783,6 +784,39 @@ mod tests {
         assert!((mix.per_m - 1.004).abs() < 1e-9, "{}", mix.per_m);
         assert_eq!(mix.basis, "blended");
         assert!((a.mix_price_min.as_ref().expect("min").per_m - 1.004).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn all_scope_ignores_removed_routes_in_its_counts() {
+        let app = TestApp::new().await;
+        insert_provider(&app, "prov-r", "removed").await;
+        insert_model(&app, "model-r", "r-model", None, None).await;
+        insert_offering(
+            &app,
+            "off-r1",
+            "prov-r",
+            "model-r",
+            "r-1",
+            None,
+            Some((Some(1.0), Some(2.0), None)),
+        )
+        .await;
+        insert_offering(&app, "off-r2", "prov-r", "model-r", "r-2", None, None).await;
+        // The price sync marks a route the model no longer serves removed.
+        sqlx::query("UPDATE offerings SET route_removed_at = ? WHERE id = 'off-r2'")
+            .bind(NOW)
+            .execute(&app.state.pool)
+            .await
+            .expect("mark removed");
+
+        let overview = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("overview");
+        let OverviewRow::All(row) = &overview.rows[0] else {
+            panic!("all row");
+        };
+        assert_eq!(row.offerings_count, 1, "a removed route is not counted");
+        assert_eq!(row.unpriced_offerings, 0, "the removed row is not unpriced");
     }
 
     #[tokio::test]

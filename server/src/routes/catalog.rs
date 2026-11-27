@@ -1370,6 +1370,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_removed_route_is_absent_from_v1_models() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (cookie, csrf) = test_support::login(&router, "admin@example.com").await;
+        let (provider_id, model_id) = provider_and_model(&router, &cookie, &csrf).await;
+        let kept =
+            create_offering(&router, &cookie, &csrf, &provider_id, &model_id, "brain-1").await;
+        let removed = create_offering(
+            &router,
+            &cookie,
+            &csrf,
+            &provider_id,
+            &model_id,
+            "brain-1-old",
+        )
+        .await;
+        // The price sync marks a route OpenRouter no longer lists removed.
+        sqlx::query("UPDATE offerings SET route_removed_at = ?, route = ? WHERE id = ?")
+            .bind("2026-11-27T00:00:00.000Z")
+            .bind("removed-provider")
+            .bind(&removed)
+            .execute(&app.state.pool)
+            .await
+            .expect("mark removed");
+
+        let listing = send(
+            router.clone(),
+            api_request(Method::GET, "/v1/models", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(listing.status, StatusCode::OK, "{}", listing.body);
+        let ids: Vec<&str> = listing.body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["brain-1"], "the removed route is not advertised");
+        assert!(!ids.contains(&"brain-1-old"));
+
+        // The member picker (`GET /api/offerings`) hides it too, so an
+        // operator cannot add a member the router would silently drop.
+        let offerings = send(
+            router.clone(),
+            api_request(Method::GET, "/api/offerings", None, Some(&cookie), None),
+        )
+        .await;
+        assert_eq!(offerings.status, StatusCode::OK, "{}", offerings.body);
+        let listed: Vec<&str> = offerings
+            .body
+            .as_array()
+            .expect("offerings")
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect();
+        assert_eq!(
+            listed,
+            [kept.as_str()],
+            "the removed offering is hidden from the picker"
+        );
+    }
+
+    #[tokio::test]
     async fn a_model_disabled_for_all_providers_stays_out_of_v1_models_after_a_new_offering() {
         let app = TestApp::new().await;
         app.create_user("admin@example.com", Role::Admin, true)

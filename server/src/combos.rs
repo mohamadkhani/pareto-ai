@@ -974,7 +974,43 @@ fn apply_pool_ordering(mut ordered: Vec<PoolScored>, ordering: &PoolOrdering) ->
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
+    // The weighted order that built each explanation ran before this D64
+    // re-ordering, so its embedded `#<rank> of <count>` would otherwise
+    // disagree with the shown position. Rewrite it to the new position.
+    for (index, entry) in ordered.iter_mut().enumerate() {
+        entry.explanation = rewrite_explanation_rank(&entry.explanation, index + 1);
+    }
     ordered
+}
+
+/// Rewrites the first `#<rank> of <count>` token in a pool explanation to
+/// `position`, keeping the original `count`. The explanation is built by
+/// [`routing::weighted_order`] before the D64 re-ordering, so the embedded
+/// rank can name a different position than the one shown. A string without
+/// that token is returned unchanged.
+fn rewrite_explanation_rank(explanation: &str, position: usize) -> String {
+    let Some(hash) = explanation.find('#') else {
+        return explanation.to_string();
+    };
+    let Some((rank, rest)) = explanation[hash + 1..].split_once(" of ") else {
+        return explanation.to_string();
+    };
+    if rank.is_empty() || !rank.bytes().all(|byte| byte.is_ascii_digit()) {
+        return explanation.to_string();
+    }
+    let count_len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if count_len == 0 {
+        return explanation.to_string();
+    }
+    let count = &rest[..count_len];
+    format!(
+        "{}#{position} of {count}{}",
+        &explanation[..hash],
+        &rest[count_len..]
+    )
 }
 
 /// The first constraint/filter failure of a pool item, in pipeline order.
@@ -2504,6 +2540,67 @@ mod tests {
             pool_ids(&by_quality),
             ["pricey-high-quality", "cheap-low-quality"]
         );
+    }
+
+    #[test]
+    fn reordering_rewrites_the_embedded_explanation_ranks() {
+        let items = || {
+            vec![
+                pool_item("cheap-low-quality", 0.2, Some(1.0)),
+                pool_item("pricey-high-quality", 0.9, Some(4.0)),
+            ]
+        };
+        // Quality-only weights rank the high-quality model first, so the
+        // cheap model's explanation embeds `#2 of 2`.
+        let quality_only = Weights {
+            price: 0.0,
+            speed: 0.0,
+            quality: 1.0,
+            reliability: 0.0,
+        };
+        let weighted = resolve_pool(items(), &PoolConstraints::default(), &quality_only, None);
+        assert_eq!(
+            pool_ids(&weighted),
+            ["pricey-high-quality", "cheap-low-quality"]
+        );
+        assert!(
+            weighted.ordered[1].explanation.contains("#2 of 2"),
+            "{}",
+            weighted.ordered[1].explanation
+        );
+
+        // The D64 price ordering puts the cheap model first; the embedded
+        // ranks must follow the shown positions.
+        let by_price = resolve_pool(
+            items(),
+            &PoolConstraints::default(),
+            &quality_only,
+            ordering(PoolSort::Price, ProviderSelection::MixPrice),
+        );
+        assert_eq!(
+            pool_ids(&by_price),
+            ["cheap-low-quality", "pricey-high-quality"]
+        );
+        assert!(
+            by_price.ordered[0].explanation.contains("#1 of 2"),
+            "first row must read #1 of 2: {}",
+            by_price.ordered[0].explanation
+        );
+        assert!(
+            by_price.ordered[1].explanation.contains("#2 of 2"),
+            "second row must read #2 of 2: {}",
+            by_price.ordered[1].explanation
+        );
+    }
+
+    #[test]
+    fn rewriting_a_foreign_explanation_leaves_it_unchanged() {
+        assert_eq!(rewrite_explanation_rank("no rank here", 1), "no rank here");
+        assert_eq!(
+            rewrite_explanation_rank("#nope of 2: text", 1),
+            "#nope of 2: text"
+        );
+        assert_eq!(rewrite_explanation_rank("scored #2:", 1), "scored #2:");
     }
 
     #[test]
