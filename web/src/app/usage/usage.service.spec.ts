@@ -40,6 +40,7 @@ function logFixture(overrides: Partial<RequestLogEntry> = {}): RequestLogEntry {
     resolved_offering_id: 'off1',
     provider_id: 'p1',
     provider_name: 'OpenRouter',
+    route: 'azure',
     model_id: 'm1',
     model_canonical_name: 'openai/gpt-5',
     model_upstream_model_id: 'openai/gpt-5',

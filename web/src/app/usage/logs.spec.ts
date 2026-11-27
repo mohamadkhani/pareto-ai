@@ -47,6 +47,7 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     resolved_offering_id: 'off1',
     provider_id: 'p1',
     provider_name: 'OpenRouter',
+    route: 'azure',
     model_id: 'm1',
     model_canonical_name: 'openai/gpt-5',
     model_upstream_model_id: 'openai/gpt-5',
@@ -83,6 +84,7 @@ function attemptFixture(overrides: Partial<LogAttempt> = {}): LogAttempt {
     offering_id: 'off1',
     provider_id: 'p1',
     provider_name: 'OpenRouter',
+    route: 'azure',
     model_id: 'm1',
     model_canonical_name: 'openai/gpt-5',
     model_upstream_model_id: 'openai/gpt-5-2025-01-01',
@@ -308,6 +310,25 @@ describe('Logs', () => {
     expect(url.searchParams.get('user')).toBe('u1');
   });
 
+  it('names and filters the OpenRouter route that served a request', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    fetchMock.respond(jsonResponse(200, { entries: [entry(1, { route: 'vertex' })] }));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    // The provider cell names the pinned upstream route next to the provider.
+    expect(root.querySelector('td.col-access .route-link')?.textContent?.trim()).toBe('· azure');
+
+    comboboxInto(root, '#logs-route', 'azure');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const url = new URL(fetchMock.requests[2].url, 'https://example.test');
+    expect(url.searchParams.get('route')).toBe('azure');
+    expect(url.searchParams.get('provider')).toBeNull();
+  });
+
   it('opens the why-this-model panel with the recorded decision', async () => {
     const decision = {
       candidates: [
@@ -464,10 +485,12 @@ describe('Logs', () => {
     const cells = Array.from(root.querySelectorAll('td.col-access'));
     expect(cells).toHaveLength(3);
     expect(cells[0]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[0]?.querySelector('.route-link')?.textContent?.trim()).toBe('· azure');
     expect(cells[0]?.querySelector('.credential-name')?.textContent?.trim()).toBe('primary');
     expect(cells[1]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
     expect(cells[1]?.querySelector('.credential-name')).toBeNull();
     expect(cells[2]?.textContent?.trim()).toBe('—');
+    expect(cells[2]?.querySelector('.route-link')).toBeNull();
   });
 
   it('stacks the token counts on two lines, and shows a dash when there are none', async () => {

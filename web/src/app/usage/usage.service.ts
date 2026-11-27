@@ -48,6 +48,8 @@ export interface LogQuery {
   provider?: string;
   /** Narrow to one offering id. */
   offering?: string;
+  /** Narrow to one OpenRouter route slug (D65). */
+  route?: string;
 }
 
 /** Read access to the usage reports and the request logs. */
@@ -104,6 +106,9 @@ export class UsageService {
     }
     if (query.offering !== undefined) {
       params.set('offering', query.offering);
+    }
+    if (query.route !== undefined) {
+      params.set('route', query.route);
     }
     const response = await requestJson<LogListResponse>(`/api/logs?${params.toString()}`);
     return { entries: response.entries, next_cursor: response.next_cursor ?? null };

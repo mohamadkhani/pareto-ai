@@ -35,6 +35,14 @@
           (valueChange)="onProviderFilterChange($event)"
         />
       </ui-field>
+      <ui-field label="Route" [controlId]="'logs-route'">
+        <ui-combobox
+          [value]="routeFilter()"
+          placeholder="All routes"
+          [options]="routeOptions()"
+          (valueChange)="onRouteFilterChange($event)"
+        />
+      </ui-field>
       <ui-field label="Status" [controlId]="'logs-status'">
         <ui-select [value]="statusFilter()" (valueChange)="onStatusFilterChange($event)">
           <option value="">All statuses</option>
@@ -112,6 +120,14 @@
                       (clicked)="filterByProvider(entry.provider_id)"
                       >{{ entry.provider_name }}</ui-link-button
                     >
+                    @if (entry.route) {
+                      <ui-link-button
+                        class="route-link"
+                        [label]="'Filter logs by route ' + entry.route"
+                        (clicked)="filterByRoute(entry.route)"
+                        >· {{ entry.route }}</ui-link-button
+                      >
+                    }
                     @if (entry.credential_name) {
                       <span class="credential-name">{{ entry.credential_name }}</span>
                     }
@@ -252,7 +268,16 @@
                             @for (attempt of expandedAttempts(); track attempt.id) {
                               <tr>
                                 <td class="col-time">{{ formatTime(attempt.occurred_at) }}</td>
-                                <td>{{ attempt.provider_name ?? '—' }}</td>
+                                <td>
+                                  @if (attempt.provider_name) {
+                                    {{ attempt.provider_name }}
+                                    @if (attempt.route) {
+                                      <span class="route-name">· {{ attempt.route }}</span>
+                                    }
+                                  } @else {
+                                    —
+                                  }
+                                </td>
                                 <td>
                                   @if (attempt.model_id) {
                                     <a

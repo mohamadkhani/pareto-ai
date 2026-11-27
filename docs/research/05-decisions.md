@@ -1486,6 +1486,12 @@ OpenRouter model as one aggregated offering:
    *different* model never moves the pin — that is what lets a `sort = quality`
    pool stay on its chosen model. A bigger gap moves the session and rewrites
    the pin (the decision records `replaced_why: "price_moved"`).
+6. **Observability.** The request log and the per-request attempts join
+   `offerings.route`, so the console names the provider that actually served a
+   request (e.g. `openrouter · azure`) next to the credential, and
+   `GET /api/logs?route=<slug>` narrows the log to one upstream provider. D64
+   already names the provider row; D65 adds the route that the row does not
+   distinguish.
 
 **Why:** without the provider pin, the price we score is not the price that
 runs — OpenRouter would pick a provider itself. Storing the fragment instead of

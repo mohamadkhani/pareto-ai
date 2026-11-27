@@ -59,6 +59,8 @@ pub struct LogQuery {
     pub provider: Option<String>,
     /// Only requests whose resolved offering is this id.
     pub offering: Option<String>,
+    /// Only requests whose offering pinned this OpenRouter route slug (D65).
+    pub route: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,7 +191,8 @@ pub async fn usage_admin(
         ("status" = Option<i64>, Query, description = "exact settled status, e.g. 502"),
         ("error_class" = Option<String>, Query, description = "taxonomy code, e.g. upstream_auth"),
         ("provider" = Option<String>, Query, description = "narrow to one provider id"),
-        ("offering" = Option<String>, Query, description = "narrow to one offering id")
+        ("offering" = Option<String>, Query, description = "narrow to one offering id"),
+        ("route" = Option<String>, Query, description = "narrow to one OpenRouter route slug (D65)")
     ),
     responses(
         (status = 200, description = "request log entries, newest first", body = LogListResponse),
@@ -243,6 +246,7 @@ pub async fn logs(
         query.error_class.as_deref(),
         query.provider.as_deref(),
         query.offering.as_deref(),
+        query.route.as_deref(),
         limit,
         before.as_deref(),
         before_request_id.as_deref(),
@@ -646,6 +650,108 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["provider_id"], "p1");
         assert_eq!(rows[0]["errors"], 1);
+    }
+
+    #[tokio::test]
+    async fn log_entries_and_attempts_name_the_openrouter_route() {
+        let app = TestApp::new().await;
+        app.create_user("admin@example.com", Role::Admin, true)
+            .await;
+        let router = app.router();
+        let (admin_cookie, _) = test_support::login(&router, "admin@example.com").await;
+
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url) \
+             VALUES ('p1', 'openrouter', 'https://openrouter.ai/api/v1')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("provider");
+        sqlx::query("INSERT INTO models (id, canonical_name) VALUES ('m1', 'openai/gpt-4o')")
+            .execute(&app.state.pool)
+            .await
+            .expect("model");
+        sqlx::query(
+            "INSERT INTO offerings \
+               (id, provider_id, model_id, upstream_model_id, route, routing_json) \
+             VALUES ('o1', 'p1', 'm1', 'openai/gpt-4o', 'azure', \
+                     '{\"provider\":{\"order\":[\"azure\"],\"allow_fallbacks\":false}}')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("offering");
+        sqlx::query(
+            "INSERT INTO request_logs \
+               (request_id, occurred_at, method, path, resolved_offering_id, status) \
+             VALUES ('r1', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'POST', \
+                     '/v1/chat/completions', 'o1', 200)",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("log row");
+        sqlx::query(
+            "INSERT INTO telemetry_attempts (id, request_id, offering_id, occurred_at) \
+             VALUES (1, 'r1', 'o1', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("attempt");
+
+        // The entry names both the provider row and the pinned upstream route.
+        let logs = send(
+            router.clone(),
+            api_request(Method::GET, "/api/logs", None, Some(&admin_cookie), None),
+        )
+        .await;
+        assert_eq!(logs.status, StatusCode::OK, "{}", logs.body);
+        let entries = logs.body["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["provider_name"], "openrouter");
+        assert_eq!(entries[0]["route"], "azure");
+
+        // `?route=` filters to the pinned upstream provider.
+        let matching = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs?route=azure",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            matching.body["entries"].as_array().expect("entries").len(),
+            1
+        );
+        let other = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs?route=openai",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(other.body["entries"].as_array().expect("entries").len(), 0);
+
+        // The attempts table carries the same route.
+        let attempts = send(
+            router.clone(),
+            api_request(
+                Method::GET,
+                "/api/logs/r1/attempts",
+                None,
+                Some(&admin_cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(attempts.status, StatusCode::OK, "{}", attempts.body);
+        assert_eq!(attempts.body[0]["route"], "azure");
     }
 
     #[tokio::test]

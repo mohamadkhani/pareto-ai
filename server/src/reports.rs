@@ -571,6 +571,9 @@ pub struct RequestLogEntry {
     /// The provider that served the request (resolved through the offering).
     pub provider_id: Option<String>,
     pub provider_name: Option<String>,
+    /// The OpenRouter upstream provider slug the offering pinned (D65); `None`
+    /// for a direct provider or an unrouted offering.
+    pub route: Option<String>,
     /// The model the offering resolves to, and the id sent upstream.
     pub model_id: Option<String>,
     pub model_canonical_name: Option<String>,
@@ -627,6 +630,8 @@ pub struct AttemptEntry {
     /// The provider that owns the offering, and its name.
     pub provider_id: Option<String>,
     pub provider_name: Option<String>,
+    /// The OpenRouter upstream provider slug the offering pinned (D65).
+    pub route: Option<String>,
     /// The model the offering resolves to, and the id sent upstream.
     pub model_id: Option<String>,
     pub model_canonical_name: Option<String>,
@@ -658,10 +663,10 @@ pub struct ErrorSummaryRow {
 /// One page of request logs, newest first, with the same exclusive
 /// `(occurred_at, request_id)` cursor pattern as `/api/audit`. The optional
 /// filters narrow to one user, one settled status, one taxonomy class, one
-/// provider, or one offering (D49). Each entry carries the resolved target's
-/// names and ids (provider, model, credential) joined from the catalog, so the
-/// console renders names without a client-side lookup (D64). Failure mode:
-/// [`sqlx::Error`].
+/// provider, one offering, or one OpenRouter route (D49, D65). Each entry
+/// carries the resolved target's names and ids (provider, route, model,
+/// credential) joined from the catalog, so the console renders names without a
+/// client-side lookup (D64, D65). Failure mode: [`sqlx::Error`].
 #[allow(clippy::too_many_arguments)]
 pub async fn list_request_logs(
     pool: &SqlitePool,
@@ -670,6 +675,7 @@ pub async fn list_request_logs(
     error_class: Option<&str>,
     provider_id: Option<&str>,
     offering_id: Option<&str>,
+    route: Option<&str>,
     limit: i64,
     before: Option<&str>,
     before_request_id: Option<&str>,
@@ -679,7 +685,7 @@ pub async fn list_request_logs(
                 l.requested_model, l.resolved_offering_id, l.decision_json, l.status, \
                 l.error_class, l.error_detail, l.bytes_in, l.bytes_out, l.user_id, l.api_key_id, \
                 l.credential_id, l.upstream_status, l.provider_error_code, \
-                o.provider_id, pr.name AS provider_name, o.model_id, \
+                o.provider_id, pr.name AS provider_name, o.route, o.model_id, \
                 m.canonical_name AS model_canonical_name, \
                 o.upstream_model_id AS model_upstream_model_id, \
                 c.label AS credential_name, \
@@ -695,6 +701,7 @@ pub async fn list_request_logs(
            AND (?6 IS NULL OR l.error_class = ?6) \
            AND (?7 IS NULL OR o.provider_id = ?7) \
            AND (?8 IS NULL OR l.resolved_offering_id = ?8) \
+           AND (?9 IS NULL OR o.route = ?9) \
            AND (?2 IS NULL OR l.occurred_at < ?2 \
                 OR (?3 IS NOT NULL AND l.occurred_at = ?2 AND l.request_id < ?3)) \
          ORDER BY l.occurred_at DESC, l.request_id DESC \
@@ -708,6 +715,7 @@ pub async fn list_request_logs(
     .bind(error_class)
     .bind(provider_id)
     .bind(offering_id)
+    .bind(route)
     .fetch_all(pool)
     .await?;
 
@@ -735,7 +743,7 @@ pub async fn list_attempts(
         "SELECT t.id, t.request_id, t.occurred_at, t.offering_id, t.credential_id, t.outcome, \
                 t.upstream_status, t.provider_error_code, t.error_detail, t.latency_ms, t.ttft_ms, \
                 t.output_tokens, \
-                o.provider_id, pr.name AS provider_name, o.model_id, \
+                o.provider_id, pr.name AS provider_name, o.route, o.model_id, \
                 m.canonical_name AS model_canonical_name, \
                 o.upstream_model_id AS model_upstream_model_id, \
                 c.label AS credential_name \
@@ -1202,6 +1210,7 @@ mod tests {
         loop {
             let page = list_request_logs(
                 &pool,
+                None,
                 None,
                 None,
                 None,

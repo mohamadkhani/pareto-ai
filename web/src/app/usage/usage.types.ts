@@ -83,6 +83,11 @@ export interface RequestLogEntry {
   /** The provider that served the request, resolved through the offering. */
   provider_id: string | null;
   provider_name: string | null;
+  /**
+   * The OpenRouter upstream provider slug the offering pinned (D65), e.g.
+   * `azure`; null for a direct provider or an unrouted offering.
+   */
+  route: string | null;
   /** The model the offering resolves to, and the id sent upstream. */
   model_id: string | null;
   model_canonical_name: string | null;
@@ -144,6 +149,8 @@ export interface LogAttempt {
   offering_id: string;
   provider_id: string | null;
   provider_name: string | null;
+  /** The OpenRouter upstream provider slug the attempt used (D65). */
+  route: string | null;
   model_id: string | null;
   model_canonical_name: string | null;
   model_upstream_model_id: string | null;
