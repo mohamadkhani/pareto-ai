@@ -87,6 +87,8 @@ function comboFixture(overrides: Partial<Combo> = {}): Combo {
     min_quality: null,
     max_mix_price_per_m: null,
     sort: 'price',
+    sort_2: 'quality',
+    sort_3: 'reliability',
     provider_selection: 'mix_price',
     members: [{ offering_id: 'off1', weight: 1 }],
     enabled: true,
@@ -585,6 +587,8 @@ describe('Combos', () => {
     typeInto(root, '#combo-max-mix-price', '2.5');
     selectInto(root, '#combo-mix-profile', 'mix-chat');
     selectInto(root, '#combo-pool-sort', 'quality');
+    selectInto(root, '#combo-pool-sort-2', 'price');
+    selectInto(root, '#combo-pool-sort-3', 'speed');
     selectInto(root, '#combo-provider-selection', 'reliability');
 
     const pinSwitch = Array.from(
@@ -627,8 +631,32 @@ describe('Combos', () => {
         price_tolerance_pct: 12,
       },
       sort: 'quality',
+      sort_2: 'price',
+      sort_3: 'speed',
       provider_selection: 'reliability',
     });
+  });
+
+  it('keeps the sort chain distinct when the operator changes an axis', async () => {
+    queueLoad(fetchMock);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'New combo').click();
+    fixture.detectChanges();
+    buttonByText(root, 'All models with constraints').click();
+    fixture.detectChanges();
+
+    // Choosing "reliability" as the primary axis evicts it from the two
+    // tie-break slots, so no duplicate axis can be submitted.
+    selectInto(root, '#combo-pool-sort', 'reliability');
+    fixture.detectChanges();
+    const select = (id: string): string =>
+      (root.querySelector(id) as HTMLSelectElement | null)?.value ?? '';
+    expect(select('#combo-pool-sort')).toBe('reliability');
+    expect(select('#combo-pool-sort-2')).not.toBe('reliability');
+    expect(select('#combo-pool-sort-3')).not.toBe('reliability');
+    expect(select('#combo-pool-sort-2')).not.toBe(select('#combo-pool-sort-3'));
   });
 
   it('refuses an all-models combo with no constraint and mirrors the server message', async () => {

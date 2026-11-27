@@ -559,13 +559,14 @@ mod tests {
                 .find(|(applied_version, _)| *applied_version == version)
                 .map(|(_, description)| description.as_str())
         };
-        assert_eq!(applied.last().map(|(version, _)| *version), Some(23));
+        assert_eq!(applied.last().map(|(version, _)| *version), Some(24));
         assert_eq!(description(21), Some("request log target"));
         assert_eq!(description(22), Some("offering routes"));
         assert_eq!(description(23), Some("combo pool ordering"));
+        assert_eq!(description(24), Some("combo sort chain"));
         assert_eq!(
             applied.len(),
-            23,
+            24,
             "every migration is recorded once: {applied:?}"
         );
 

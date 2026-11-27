@@ -27,7 +27,7 @@ export type ComboPool = 'members' | 'all';
 export type StickinessKeySource = 'auto' | 'header';
 
 /** The `pool = all` ordering axis (D65). */
-export type PoolSort = 'price' | 'quality';
+export type PoolSort = 'price' | 'quality' | 'speed' | 'reliability';
 
 /** How a catalog pool picks among the providers of one model (D65). */
 export type ProviderSelection = 'mix_price' | 'speed' | 'reliability';
@@ -86,6 +86,10 @@ export interface Combo {
   max_mix_price_per_m: number | null;
   /** The `pool = all` ordering axis (D65). */
   sort: PoolSort;
+  /** First tie-break of the `pool = all` ordering (D65). */
+  sort_2: PoolSort;
+  /** Second tie-break of the `pool = all` ordering (D65). */
+  sort_3: PoolSort;
   /** How the pool picks among the providers of one model (D65). */
   provider_selection: ProviderSelection;
   /** Stored order: the fallback chain for `ordered`, the rotation for `round_robin`. */
@@ -131,6 +135,10 @@ export interface ComboInput {
   stickiness?: ComboStickiness;
   /** The `pool = all` ordering axis; absent means `price` (D65). */
   sort?: PoolSort;
+  /** First tie-break; absent means `quality` (D65). */
+  sort_2?: PoolSort;
+  /** Second tie-break; absent means `reliability` (D65). */
+  sort_3?: PoolSort;
   /** How the pool picks among the providers of one model (D65). */
   provider_selection?: ProviderSelection;
 }

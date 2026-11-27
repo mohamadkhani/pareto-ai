@@ -61,8 +61,10 @@ interface ComboDraft {
   maxMixPrice: string;
   /** A mix profile id, or '' for the global default. */
   mixProfile: string;
-  /** The `pool = all` ordering axis (D65). */
+  /** The `pool = all` ordering axis and its tie-breaks (D65). */
   poolSort: PoolSort;
+  poolSort2: PoolSort;
+  poolSort3: PoolSort;
   /** How the pool picks among the providers of one model (D65). */
   providerSelection: ProviderSelection;
   stickinessEnabled: boolean;
@@ -443,6 +445,8 @@ export class Combos {
       maxMixPrice: combo.max_mix_price_per_m === null ? '' : String(combo.max_mix_price_per_m),
       mixProfile: combo.mix_profile ?? '',
       poolSort: combo.sort,
+      poolSort2: combo.sort_2,
+      poolSort3: combo.sort_3,
       providerSelection: combo.provider_selection,
       stickinessEnabled: combo.stickiness.enabled,
       stickinessTtl: combo.stickiness.ttl_seconds,
@@ -512,7 +516,28 @@ export class Combos {
   }
 
   protected setPoolSort(value: string): void {
-    this.draft.update((draft) => ({ ...draft, poolSort: poolSortFromValue(value) }));
+    const sort = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      const chain = rebalanceAxes(sort, draft.poolSort2, draft.poolSort3);
+      return { ...draft, poolSort: sort, poolSort2: chain[0], poolSort3: chain[1] };
+    });
+  }
+
+  protected setPoolSort2(value: string): void {
+    const sort2 = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      // Keep the primary axis fixed and re-pick only the lower tie-breaks.
+      const chain = rebalanceAxes(draft.poolSort, sort2, draft.poolSort3);
+      return { ...draft, poolSort2: chain[0], poolSort3: chain[1] };
+    });
+  }
+
+  protected setPoolSort3(value: string): void {
+    const sort3 = poolSortFromValue(value);
+    this.draft.update((draft) => {
+      const chain = rebalanceAxes(draft.poolSort, draft.poolSort2, sort3);
+      return { ...draft, poolSort2: chain[0], poolSort3: chain[1] };
+    });
   }
 
   protected setProviderSelection(value: string): void {
@@ -798,6 +823,8 @@ export class Combos {
       // The ordering knobs only describe a catalog pool (D65); a member pool
       // leaves them off so the server keeps its defaults.
       sort: pool === 'all' ? this.draft().poolSort : undefined,
+      sort_2: pool === 'all' ? this.draft().poolSort2 : undefined,
+      sort_3: pool === 'all' ? this.draft().poolSort3 : undefined,
       provider_selection: pool === 'all' ? this.draft().providerSelection : undefined,
     };
   }
@@ -831,6 +858,8 @@ function emptyDraft(): ComboDraft {
     maxMixPrice: '',
     mixProfile: '',
     poolSort: 'price',
+    poolSort2: 'quality',
+    poolSort3: 'reliability',
     providerSelection: 'mix_price',
     stickinessEnabled: false,
     stickinessTtl: 1800,
@@ -856,8 +885,37 @@ function strategyFromValue(value: string): ComboStrategy {
   }
 }
 
+/**
+ * Repairs the lower tie-breaks so the three axes stay distinct: the server
+ * rejects a chain that repeats an axis, so the form never sends one. `wanted2`
+ * is kept when possible; otherwise the first unused axis is chosen in the
+ * documented order (quality, reliability, speed, price).
+ */
+function rebalanceAxes(
+  primary: PoolSort,
+  wanted2: PoolSort,
+  wanted3: PoolSort,
+): [PoolSort, PoolSort] {
+  const all: readonly PoolSort[] = ['quality', 'reliability', 'speed', 'price'];
+  const second =
+    wanted2 !== primary ? wanted2 : (all.find((axis) => axis !== primary) ?? 'quality');
+  const third =
+    wanted3 !== primary && wanted3 !== second
+      ? wanted3
+      : (all.find((axis) => axis !== primary && axis !== second) ?? 'reliability');
+  return [second, third];
+}
+
 function poolSortFromValue(value: string): PoolSort {
-  return value === 'quality' ? 'quality' : 'price';
+  switch (value) {
+    case 'quality':
+    case 'speed':
+    case 'reliability':
+    case 'price':
+      return value;
+    default:
+      return 'price';
+  }
 }
 
 function providerSelectionFromValue(value: string): ProviderSelection {
@@ -911,6 +969,8 @@ function comboInputOf(combo: Combo, enabled: boolean): ComboInput {
     mix_profile: combo.mix_profile,
     stickiness: { ...combo.stickiness },
     sort: combo.sort,
+    sort_2: combo.sort_2,
+    sort_3: combo.sort_3,
     provider_selection: combo.provider_selection,
   };
 }

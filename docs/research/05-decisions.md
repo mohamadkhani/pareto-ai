@@ -1473,12 +1473,22 @@ OpenRouter model as one aggregated offering:
    plain-model and catalog-pool candidates (`drop_superseded_aggregates`);
    explicit combo members are left alone because the operator named those
    rows.
-4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
-   (`price` — cheapest model first — or `quality` — best model first) orders
-   the models, and `provider_selection` (`mix_price` — cheapest at the combo's
-   own blend — `speed`, or `reliability`) orders the providers of one model
-   once it is chosen. Both default to the cheapest behaviour that matches the
-   pre-D65 pool order. A member pool keeps its explicit strategy order.
+4. **Combo knobs.** A `pool = all` combo carries two ordering axes: the
+   **model chain** and the **provider axis**. The model chain is `sort` →
+   `sort_2` → `sort_3`, each one of `price` (cheapest model first), `quality`
+   (best model first), `speed`, or `reliability`; a tie on one axis falls
+   through to the next, and the three axes must be distinct (validation
+   rejects a repeated axis, and the form re-picks the lower slots so it can
+   never submit one). Defaults are `price`, `quality`, `reliability`, which
+   keep the previous first-axis behaviour and add deterministic tie-breaking
+   — before this, a price tie fell back to the weighted score's internal
+   tie-break (latency, then id), which was neither documented nor intended.
+   The provider axis `provider_selection` (`mix_price` — cheapest at the
+   combo's own blend — `speed`, or `reliability`) orders the providers of one
+   model once it is chosen, and is deliberately separate from the model chain:
+   quality is constant across a model's providers, so a quality-first combo
+   still wants the cheapest provider of the chosen model. A member pool keeps
+   its explicit strategy order.
 5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0-100, default
    5) keeps a session on its pinned provider while it costs no more than that
    much over the cheapest ready provider **of the same model**, ignoring

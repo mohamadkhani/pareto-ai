@@ -194,11 +194,37 @@
               <ui-field
                 label="Sort"
                 controlId="combo-pool-sort"
-                hint="Orders the models of the pool."
+                hint="Orders the models of the pool; ties fall through to the next axis."
               >
                 <ui-select [value]="draft().poolSort" (valueChange)="setPoolSort($event)">
                   <option value="price">price (cheapest model first)</option>
                   <option value="quality">quality (best model first)</option>
+                  <option value="speed">speed (fastest model first)</option>
+                  <option value="reliability">reliability (steadiest model first)</option>
+                </ui-select>
+              </ui-field>
+              <ui-field
+                label="Then by"
+                controlId="combo-pool-sort-2"
+                hint="First tie-break when models share the primary axis."
+              >
+                <ui-select [value]="draft().poolSort2" (valueChange)="setPoolSort2($event)">
+                  <option value="quality">quality (best model first)</option>
+                  <option value="price">price (cheapest model first)</option>
+                  <option value="speed">speed (fastest model first)</option>
+                  <option value="reliability">reliability (steadiest model first)</option>
+                </ui-select>
+              </ui-field>
+              <ui-field
+                label="Finally by"
+                controlId="combo-pool-sort-3"
+                hint="Second tie-break; the three axes must differ."
+              >
+                <ui-select [value]="draft().poolSort3" (valueChange)="setPoolSort3($event)">
+                  <option value="reliability">reliability (steadiest model first)</option>
+                  <option value="quality">quality (best model first)</option>
+                  <option value="price">price (cheapest model first)</option>
+                  <option value="speed">speed (fastest model first)</option>
                 </ui-select>
               </ui-field>
               <ui-field

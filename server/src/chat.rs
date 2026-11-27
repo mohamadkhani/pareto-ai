@@ -8342,6 +8342,8 @@ mod tests {
                 mix_profile: None,
                 stickiness: None,
                 sort: None,
+                sort_2: None,
+                sort_3: None,
                 provider_selection: None,
             },
         )
@@ -8553,6 +8555,8 @@ mod tests {
                 mix_profile: None,
                 stickiness: None,
                 sort: None,
+                sort_2: None,
+                sort_3: None,
                 provider_selection: None,
             },
         )
@@ -9467,6 +9471,8 @@ mod tests {
                     price_tolerance_pct: None,
                 }),
                 sort: None,
+                sort_2: None,
+                sort_3: None,
                 provider_selection: None,
             },
         )
@@ -9503,6 +9509,8 @@ mod tests {
                     price_tolerance_pct: None,
                 }),
                 sort: Some("quality".to_string()),
+                sort_2: Some("price".to_string()),
+                sort_3: Some("reliability".to_string()),
                 provider_selection: None,
             },
         )

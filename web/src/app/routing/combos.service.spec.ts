@@ -17,6 +17,8 @@ function comboFixture(overrides: Partial<Combo> = {}): Combo {
     min_quality: null,
     max_mix_price_per_m: null,
     sort: 'price',
+    sort_2: 'quality',
+    sort_3: 'reliability',
     provider_selection: 'mix_price',
     members: [{ offering_id: 'off1', weight: 1 }],
     enabled: true,
