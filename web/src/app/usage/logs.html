@@ -4,8 +4,8 @@
     <p class="hint">
       Metadata and settled usage for every request, newest first — request and response bodies are
       never stored, but the provider's own error excerpt is kept bounded and redacted for the
-      operator. Statuses <code>402</code>, <code>429</code>, and <code>403</code> are money events:
-      the request was refused before forwarding.
+      operator. A highlighted row consumed nothing: the gateway refused it before forwarding, or the
+      upstream failed before any stream opened. Its cost reads <code>—</code>.
     </p>
   </header>
 
@@ -120,15 +120,9 @@
                   }
                 </td>
                 <td>
-                  @if (entry.status === 402) {
-                    <ui-badge tone="danger" title="Refused: budget exceeded">402 budget</ui-badge>
-                  } @else if (entry.status === 429) {
-                    <ui-badge tone="warning" title="Refused: token cap exceeded">429 cap</ui-badge>
-                  } @else if (entry.status === 403) {
-                    <ui-badge tone="danger" title="Refused: access denied">403 access</ui-badge>
-                  } @else if (entry.status !== null) {
-                    <ui-badge [tone]="entry.status >= 400 ? 'danger' : 'success'">{{
-                      entry.status
+                  @if (statusBadge(entry); as badge) {
+                    <ui-badge [tone]="badge.tone" [attr.title]="badge.title">{{
+                      badge.label
                     }}</ui-badge>
                   } @else {
                     —
@@ -138,7 +132,7 @@
                   @if (entry.error_class) {
                     <ui-badge
                       tone="danger"
-                      [title]="entry.error_detail ?? 'The provider returned an error.'"
+                      [title]="entry.error_detail ?? 'No provider text was recorded.'"
                       >{{ entry.error_class }}</ui-badge
                     >
                   } @else {

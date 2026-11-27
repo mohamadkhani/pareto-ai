@@ -7,7 +7,7 @@ import { describeError, isForbidden } from '../catalog/errors';
 import { formatTime, formatUsdPrecise } from '../catalog/format';
 import { DecisionPanel } from '../routing/decision-panel';
 import { parseDecision } from '../routing/routing.types';
-import { UiBadge } from '../ui/badge';
+import { type BadgeTone, UiBadge } from '../ui/badge';
 import { UiBanner } from '../ui/banner';
 import { UiButton } from '../ui/button';
 import { type ComboboxOption, UiCombobox } from '../ui/combobox';
@@ -37,6 +37,67 @@ const ERROR_CLASSES = [
 
 /** Settled statuses worth filtering on, including the common failures. */
 const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as const;
+
+/**
+ * The gateway's own pre-send refusals, keyed by settled status: the label, tone
+ * and tooltip that name the refusal, and the taxonomy class that proves the
+ * status is that refusal rather than something else.
+ */
+const GATEWAY_REFUSALS: ReadonlyMap<
+  number,
+  { code: string; label: string; tone: BadgeTone; title: string }
+> = new Map([
+  [
+    402,
+    {
+      code: 'budget_exceeded',
+      label: '402 budget',
+      tone: 'danger',
+      title: 'Refused: budget exceeded',
+    },
+  ],
+  [
+    429,
+    {
+      code: 'token_cap_exceeded',
+      label: '429 cap',
+      tone: 'warning',
+      title: 'Refused: token cap exceeded',
+    },
+  ],
+  [
+    403,
+    { code: 'access_denied', label: '403 access', tone: 'danger', title: 'Refused: access denied' },
+  ],
+]);
+
+/** One settled-status badge: what it reads, its tone, and its tooltip. */
+interface StatusBadge {
+  label: string;
+  tone: BadgeTone;
+  title: string | null;
+}
+
+/**
+ * The badge for a settled status (D64). A refusal is named only when the row's
+ * taxonomy class is the gateway denial for that status — an upstream 429 is not
+ * the token cap, and calling it one contradicts the origin error the same row
+ * shows. Anything else gets the bare status, `—` when there is none.
+ */
+function statusBadgeOf(entry: RequestLogEntry): StatusBadge | null {
+  if (entry.status === null) {
+    return null;
+  }
+  const refusal = GATEWAY_REFUSALS.get(entry.status);
+  if (refusal !== undefined && entry.error_class === refusal.code) {
+    return { label: refusal.label, tone: refusal.tone, title: refusal.title };
+  }
+  return {
+    label: String(entry.status),
+    tone: entry.status >= 400 ? 'danger' : 'success',
+    title: null,
+  };
+}
 
 /** The request log: metadata and settled usage, never bodies. Admin only. */
 @Component({
@@ -230,11 +291,20 @@ export class Logs {
   }
 
   /**
-   * 402 budget, 429 token cap, and 403 access refusals are money events: the
-   * request was refused before anything was sent upstream (see `usage.types.ts`).
+   * A row that consumed nothing is highlighted and its cost reads '—': the
+   * gateway refused the request before forwarding (402 budget, 429 cap, 403
+   * access), or the upstream failed before any stream opened (see
+   * `usage.types.ts`). The status alone decides this, because the ledger books
+   * both as a refusal; the badge's wording is decided separately by
+   * [`Logs.statusBadge`], which can tell the two apart.
    */
   protected isMoneyEvent(entry: RequestLogEntry): boolean {
     return entry.status === 402 || entry.status === 403 || entry.status === 429;
+  }
+
+  /** The badge for this row's settled status; see [`statusBadgeOf`]. */
+  protected statusBadge(entry: RequestLogEntry): StatusBadge | null {
+    return statusBadgeOf(entry);
   }
 
   /**

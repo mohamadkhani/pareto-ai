@@ -229,6 +229,39 @@ describe('Logs', () => {
     ).toBe('403 access');
   });
 
+  it('names a refusal only when the class is the gateway denials, not for a provider status', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          // An upstream 429 shares the status with the token cap but is not it.
+          entry(0, {
+            status: 429,
+            error_class: 'upstream_rate_limited',
+            upstream_status: 429,
+            provider_error_code: 'rate_limit_exceeded',
+          }),
+          entry(1, { status: 429, error_class: 'token_cap_exceeded', cost_usd: null }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const badges = Array.from(
+      root.querySelectorAll('tbody tr:not(.details-row) td:nth-child(5) ui-badge'),
+    );
+    // The provider's 429 reads as its status, not as the gateway's cap.
+    expect(badges[0]?.textContent?.trim()).toBe('429');
+    expect(badges[0]?.classList.contains('tone-danger')).toBe(true);
+    expect(badges[0]?.getAttribute('title')).toBeNull();
+    // The real token-cap refusal keeps its name.
+    expect(badges[1]?.textContent?.trim()).toBe('429 cap');
+    expect(badges[1]?.getAttribute('title')).toBe('Refused: token cap exceeded');
+    // Both consumed nothing, so both keep the money-event emphasis.
+    expect(root.querySelectorAll('tbody tr.money-event').length).toBe(2);
+  });
+
   it('pages with the composite cursor and passes before_request_id', async () => {
     const tiedAt = '2026-01-01T00:00:00.000Z';
     const firstPage = Array.from({ length: 50 }, (_, i) => entry(i));
