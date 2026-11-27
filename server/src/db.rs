@@ -49,7 +49,7 @@ async fn open_inner(path: &Path, log_statements: bool) -> Result<SqlitePool> {
     }
 
     // Migrations run on a dedicated connection with foreign keys OFF. SQLite
-    // cannot drop a table-level constraint, so a rebuild (e.g. 0021 widening
+    // cannot drop a table-level constraint, so a rebuild (e.g. 0022 widening
     // the `UNIQUE` on `offerings`) must create a new table, copy, drop the old
     // one, and rename. `DROP TABLE` runs an implicit DELETE, so with foreign
     // keys ON the child rows of `offerings` (`prices`, `usage_events`,
@@ -167,19 +167,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Regression for the 0021 rebuild (D64): dropping the referenced
+    /// Regression for the 0022 rebuild (D65): dropping the referenced
     /// `offerings` table with foreign keys ON cascades the child rows away.
     /// The upgrade path must run migrations with foreign keys off, so a
     /// non-empty database keeps its `prices` and `usage_events` rows and the
     /// rebuilt `offerings` gains the new `route`/`routing_json` columns.
     #[tokio::test]
-    async fn upgrading_past_0021_keeps_child_rows() {
+    async fn upgrading_past_0022_keeps_child_rows() {
         let dir = std::env::temp_dir().join(format!("gateway-migrate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create data dir");
         let path = dir.join("gateway.db");
 
-        // Build the database a pre-D64 install has: migrations 0001..0020
-        // applied, then the provider/model/offering/price/usage rows the 0021
+        // Build the database a pre-D65 install has: migrations 0001..0020
+        // applied, then the provider/model/offering/price/usage rows the 0022
         // rebuild must preserve. Running the embedded migrations filtered to
         // `<= 20` records the same checksums the real runner then expects.
         let mut pre_upgrade = sqlx::migrate!("./migrations");
@@ -251,7 +251,7 @@ mod tests {
         drop(connection);
 
         // Exercise the real production entry point: `open` runs the remaining
-        // migrations with foreign keys off (the 0021 rebuild drops the
+        // migrations with foreign keys off (the 0022 rebuild drops the
         // referenced `offerings` table; with foreign keys on the child rows
         // cascade away) and returns a pool whose own connections keep foreign
         // keys on. Reverting `open_inner`'s call site would break this test.

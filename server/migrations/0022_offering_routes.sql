@@ -1,6 +1,6 @@
--- 0021_offering_routes: per-provider (route) offerings for OpenRouter.
+-- 0022_offering_routes: per-provider (route) offerings for OpenRouter.
 --
--- Decision D64. OpenRouter fronts many upstream providers (Azure, OpenAI,
+-- Decision D65. OpenRouter fronts many upstream providers (Azure, OpenAI,
 -- Together, ...) and publishes a *different price per provider* for the same
 -- model through `GET /api/v1/models/{author}/{slug}/endpoints`. Until now the
 -- sync stored one offering per OpenRouter model at the aggregated price and

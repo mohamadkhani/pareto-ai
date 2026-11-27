@@ -135,7 +135,7 @@ mod tests {
     }
 
     /// An endpoints fetcher that finds no per-provider endpoints, so the sync
-    /// keeps one aggregated offering per model (the pre-D64 behaviour).
+    /// keeps one aggregated offering per model (the pre-D65 behaviour).
     fn no_endpoints(
         _model_id: String,
     ) -> futures_util::future::BoxFuture<'static, Result<String, openrouter::SyncError>> {

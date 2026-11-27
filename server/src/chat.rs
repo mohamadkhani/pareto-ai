@@ -311,14 +311,14 @@ struct Candidate {
     provider_name: String,
     base_url: String,
     /// OpenRouter upstream provider slug (`''` when the offering is unrouted,
-    /// D64). Set together with `routing_json`.
+    /// D65). Set together with `routing_json`.
     route: String,
     /// The sync marked this route removed (`route_removed_at`): OpenRouter no
-    /// longer lists the provider (D64). It is excluded from routing but kept
+    /// longer lists the provider (D65). It is excluded from routing but kept
     /// so its telemetry, usage, and admin settings survive.
     route_removed: bool,
     /// Body fragment merged into the upstream request to pin the provider, e.g.
-    /// `{"provider":{"order":["azure"],"allow_fallbacks":false}}` (D64).
+    /// `{"provider":{"order":["azure"],"allow_fallbacks":false}}` (D65).
     routing_json: Option<String>,
     /// The offering and its provider are both enabled (D35 pools include
     /// disabled rows so the preview can explain them).
@@ -345,11 +345,11 @@ struct OfferingJoin {
     offering_id: String,
     model_id: String,
     upstream_model_id: String,
-    /// OpenRouter upstream provider slug; `''` for an unrouted offering (D64).
+    /// OpenRouter upstream provider slug; `''` for an unrouted offering (D65).
     offering_route: String,
     /// Body fragment merged into the upstream request (provider pinning).
     offering_routing_json: Option<String>,
-    /// Sync-owned stale marker (D64): non-NULL means OpenRouter no longer
+    /// Sync-owned stale marker (D65): non-NULL means OpenRouter no longer
     /// lists this route, so it is excluded from routing.
     offering_route_removed_at: Option<String>,
     context_override: Option<i64>,
@@ -438,7 +438,7 @@ fn build_candidate(
 impl Candidate {
     /// The provider label a decision or preview shows: the provider name, plus
     /// the OpenRouter route slug when the offering is pinned to a provider
-    /// (D64), so two offerings of one provider stay distinguishable.
+    /// (D65), so two offerings of one provider stay distinguishable.
     fn provider_label(&self) -> String {
         match self.route.is_empty() {
             true => self.provider_name.clone(),
@@ -450,7 +450,7 @@ impl Candidate {
 /// Drops the route-less aggregate offering of any model that also has a routed
 /// (per-provider) offering: when the per-provider prices are known, routing
 /// must pick a provider we can pin, not the aggregate that lets OpenRouter
-/// choose (D64). Only *routable* routed siblings count — an offering, provider,
+/// choose (D65). Only *routable* routed siblings count — an offering, provider,
 /// or model that is disabled cannot serve, so an all-disabled routed set must
 /// not starve the model's aggregate. Member pools are left alone — the operator
 /// picked those rows.
@@ -881,9 +881,9 @@ struct RoutingInfo {
     mix_profile: Option<mix::MixProfileRef>,
     /// The round-robin cursor consumed by this request.
     rr_cursor: Option<i64>,
-    /// The `pool = all` ordering axis (D64); absent for member pools.
+    /// The `pool = all` ordering axis (D65); absent for member pools.
     pool_sort: Option<&'static str>,
-    /// How the pool picked among the providers of one model (D64).
+    /// How the pool picked among the providers of one model (D65).
     provider_selection: Option<&'static str>,
 }
 
@@ -1249,7 +1249,7 @@ fn offering_mix_price(
 
 /// Whether a pinned offering is more than `tolerance_pct` pricier than the
 /// cheapest *ready* candidate **of the same model**, at the combo's mix profile
-/// (D64). Comparing across models would move a pin off its chosen model whenever
+/// (D65). Comparing across models would move a pin off its chosen model whenever
 /// another model is cheaper overall — which is the normal case for a
 /// `sort = quality` pool — so only the pinned model's other providers compete.
 /// Candidates excluded by either routing path are ignored too: a cheap row that
@@ -1837,7 +1837,7 @@ pub async fn execute(
                     let ready = pinned_index
                         .is_some_and(|index| candidate_ready(state, &candidates[index], &parsed));
                     if let (None, true) = (&excluded, ready) {
-                        // D64: keep the pin while it is within the combo's
+                        // D65: keep the pin while it is within the combo's
                         // price tolerance of the cheapest ready candidate *of
                         // the same model* (the pinned model's own providers);
                         // a cheaper provider of a different model cannot move
@@ -1990,7 +1990,7 @@ pub async fn execute(
             ));
             continue;
         }
-        // D64: an offering's routing fragment pins the upstream provider (for
+        // D65: an offering's routing fragment pins the upstream provider (for
         // OpenRouter, `provider.order`). Invalid JSON is ignored, never fatal.
         let routing = candidate
             .routing_json
@@ -4263,7 +4263,7 @@ mod tests {
     #[test]
     fn a_disabled_routed_sibling_does_not_drop_the_aggregate() {
         // A disabled route cannot serve, so it must not supersede the
-        // aggregate (D64): otherwise the model has no candidate at all.
+        // aggregate (D65): otherwise the model has no candidate at all.
         let kept = drop_superseded_aggregates(vec![
             join_row("p", "gpt-4o", "", 1, 1, 1),
             join_row("p", "gpt-4o", "azure", 0, 1, 1),
@@ -9476,7 +9476,7 @@ mod tests {
     }
 
     /// A `pool = all`, sticky, `sort = quality` combo for the tolerance tests
-    /// (D64). The mix-price cap is generous so both test models stay in the
+    /// (D65). The mix-price cap is generous so both test models stay in the
     /// pool.
     async fn create_quality_pool_combo(s: &Seeded, name: &str) -> String {
         let actor = Actor {
@@ -9793,7 +9793,7 @@ mod tests {
 
         // Re-price: per-turn re-picking would switch to `second`, but the
         // move is within the 5% tolerance so the pin keeps the warm-cache
-        // offering for the same session (D64).
+        // offering for the same session (D65).
         price_offering(&s, &first, 1.02).await;
         price_offering(&s, &second, 1.0).await;
         let (status, _, body) = send_streaming(
@@ -9924,7 +9924,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_quality_pool_keeps_its_pinned_model_when_another_model_is_cheaper() {
-        // D64 regression: the tolerance compares the pinned offering against
+        // D65 regression: the tolerance compares the pinned offering against
         // the other providers *of its own model*. A `sort = quality` pool
         // usually pins a model that is not the pool's cheapest, so comparing
         // across models would flag `price_moved` on every single request,

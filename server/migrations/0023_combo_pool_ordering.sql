@@ -1,6 +1,6 @@
--- 0022_combo_pool_ordering: pool sort axis, provider selection, sticky tolerance.
+-- 0023_combo_pool_ordering: pool sort axis, provider selection, sticky tolerance.
 --
--- Decision D64. Three new knobs on a combo:
+-- Decision D65. Three new knobs on a combo:
 --
 --   * `pool_sort` — the `pool = all` ordering axis: `price` (ascending blended
 --     mix price) or `quality` (descending resolved quality). It orders the

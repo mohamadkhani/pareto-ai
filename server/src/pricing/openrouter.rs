@@ -29,7 +29,7 @@
 //! through the fixture `server/tests/fixtures/openrouter_models.json` or a
 //! failing fetcher; live verification is a documented follow-up.
 //!
-//! Decision D64: besides the aggregated catalog, each managed model is asked
+//! Decision D65: besides the aggregated catalog, each managed model is asked
 //! for its per-provider endpoints (`GET .../models/{id}/endpoints`) and every
 //! upstream provider becomes its own offering under the one `openrouter`
 //! provider row. The offering carries the provider slug in `offerings.route`
@@ -446,7 +446,7 @@ fn parse_entry(entry: &serde_json::Value) -> Option<OrModel> {
     })
 }
 /// One upstream provider behind an OpenRouter model, from
-/// `GET /api/v1/models/{id}/endpoints` (D64).
+/// `GET /api/v1/models/{id}/endpoints` (D65).
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrEndpoint {
     /// OpenRouter provider slug (the endpoint's `tag`, e.g. `azure`); falls
@@ -707,7 +707,7 @@ fn modalities(entry: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 }
 
 /// Runs one sync attempt: fetch the catalog, then each managed model's
-/// per-provider endpoints (D64), then apply everything inside one transaction
+/// per-provider endpoints (D65), then apply everything inside one transaction
 /// that also records the `price_sync_runs` row and exactly one `sync.openrouter`
 /// audit row.
 ///
@@ -830,7 +830,7 @@ async fn apply_success(
     let mut raw_prices = serde_json::Map::new();
     let mut route_prices = serde_json::Map::new();
     let mut variable_prices: Vec<&str> = Vec::new();
-    // D64: routed offerings of a model whose provider left OpenRouter. Recorded
+    // D65: routed offerings of a model whose provider left OpenRouter. Recorded
     // in the run detail so an operator can see what the sync removed.
     let mut pruned_routes: Vec<String> = Vec::new();
     for model in &parsed.models {
@@ -931,7 +931,7 @@ async fn apply_success(
             variable_prices.push(model.id.as_str());
         }
 
-        // D64: every upstream provider of this model becomes its own offering,
+        // D65: every upstream provider of this model becomes its own offering,
         // priced from its endpoint, and carries the routing fragment that pins
         // it in the upstream request. The aggregated (route-less) offering is
         // kept but excluded from routing while a routable sibling exists.
@@ -1000,11 +1000,11 @@ async fn apply_success(
         // Ids whose source price was a negative sentinel: the components are
         // stored NULL and `prices.variable_price = 1`.
         "variable_prices": variable_prices,
-        // D64: models that gained per-provider offerings, and the raw pricing
+        // D65: models that gained per-provider offerings, and the raw pricing
         // of every route whose stored price changed (or was skipped manual).
         "routed_models": routed_models,
         "route_prices": serde_json::Value::Object(route_prices),
-        // D64: routed offerings removed because OpenRouter no longer lists
+        // D65: routed offerings removed because OpenRouter no longer lists
         // that provider for the model (`"<model_id>@<route>"`).
         "pruned_routes": pruned_routes,
     });
@@ -1318,7 +1318,7 @@ fn modalities_json(items: &[String]) -> Option<String> {
 
 /// Upserts the aggregated (route-less) offering row keyed on
 /// `(provider_id, upstream_model_id, route = '')`, so it never collides with a
-/// per-provider offering of the same model (D64). Admin-set overrides,
+/// per-provider offering of the same model (D65). Admin-set overrides,
 /// `enabled`, and headers survive the sync.
 async fn upsert_offering(
     conn: &mut sqlx::SqliteConnection,
@@ -1461,7 +1461,7 @@ async fn upsert_route_offering(
 }
 
 /// Marks the routed offerings of `(provider_id, upstream_model_id)` whose route
-/// is absent from `endpoints` as removed (D64). When OpenRouter drops a provider
+/// is absent from `endpoints` as removed (D65). When OpenRouter drops a provider
 /// from a model, the stale offering would otherwise keep its last price and pin
 /// a provider that no longer serves, with `allow_fallbacks=false`.
 ///
@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     /// An endpoints lookup that finds no per-provider endpoints, so the sync
-    /// keeps one aggregated offering per model (the pre-D64 behaviour). Tests
+    /// keeps one aggregated offering per model (the pre-D65 behaviour). Tests
     /// that exercise routes use [`endpoints_fetch`] instead.
     fn no_endpoints(_model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
         Box::pin(std::future::ready(Ok(
@@ -1633,7 +1633,7 @@ mod tests {
 
     /// A later lookup that lists no providers for `openai/gpt-4o` (the model
     /// is still in the catalog) and keeps the fixture answer otherwise. Used
-    /// to prove a dropped route is marked removed, not deleted (D64).
+    /// to prove a dropped route is marked removed, not deleted (D65).
     fn no_gpt4o_endpoints(model_id: String) -> BoxFuture<'static, Result<String, SyncError>> {
         if model_id == "openai/gpt-4o" {
             Box::pin(std::future::ready(Ok(
@@ -2828,7 +2828,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Per-provider endpoints (D64)
+    // Per-provider endpoints (D65)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3204,7 +3204,7 @@ mod tests {
 
         // Now the route goes stale and later returns: the sync must clear its
         // own `route_removed_at` marker while still leaving `enabled = 0`, so
-        // the operator's disable is never re-enabled (D64).
+        // the operator's disable is never re-enabled (D65).
         run_sync(&app.state.pool, fixture_fetch, no_gpt4o_endpoints, &actor)
             .await
             .expect("third sync");

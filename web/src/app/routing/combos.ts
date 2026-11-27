@@ -61,14 +61,14 @@ interface ComboDraft {
   maxMixPrice: string;
   /** A mix profile id, or '' for the global default. */
   mixProfile: string;
-  /** The `pool = all` ordering axis (D64). */
+  /** The `pool = all` ordering axis (D65). */
   poolSort: PoolSort;
-  /** How the pool picks among the providers of one model (D64). */
+  /** How the pool picks among the providers of one model (D65). */
   providerSelection: ProviderSelection;
   stickinessEnabled: boolean;
   stickinessTtl: number;
   stickinessKeySource: StickinessKeySource;
-  /** Sticky price tolerance percent, kept as typed until save (D64). */
+  /** Sticky price tolerance percent, kept as typed until save (D65). */
   stickinessTolerance: string;
 }
 
@@ -252,7 +252,7 @@ export class Combos {
 
   protected readonly catalogPool = computed(() => this.draft().pool === 'all');
 
-  /** The sticky price tolerance must be a number in 0–100 (D64). */
+  /** The sticky price tolerance must be a number in 0–100 (D65). */
   protected readonly stickinessToleranceError = computed(() => {
     if (!this.draft().stickinessEnabled) {
       return '';
@@ -795,7 +795,7 @@ export class Combos {
         key_source: this.draft().stickinessKeySource,
         price_tolerance_pct: stickyToleranceFromInput(this.draft().stickinessTolerance),
       },
-      // The ordering knobs only describe a catalog pool (D64); a member pool
+      // The ordering knobs only describe a catalog pool (D65); a member pool
       // leaves them off so the server keeps its defaults.
       sort: pool === 'all' ? this.draft().poolSort : undefined,
       provider_selection: pool === 'all' ? this.draft().providerSelection : undefined,

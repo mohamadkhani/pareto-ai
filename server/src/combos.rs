@@ -37,7 +37,7 @@ pub const MAX_STICKY_TTL_SECONDS: i64 = 86_400;
 /// Upper bound on sticky pins kept per combo (D35): bounds memory even when a
 /// caller sends an endless stream of session ids.
 pub const MAX_STICKY_PER_COMBO: i64 = 10_000;
-/// Default stickiness price tolerance (D64): a pin is kept while it is at most
+/// Default stickiness price tolerance (D65): a pin is kept while it is at most
 /// this much pricier than the current best candidate.
 pub const DEFAULT_STICKY_TOLERANCE_PCT: f64 = 5.0;
 
@@ -101,7 +101,7 @@ impl KeySource {
     }
 }
 
-/// The `pool = all` ordering axis (D64): how the models of a catalog pool are
+/// The `pool = all` ordering axis (D65): how the models of a catalog pool are
 /// ordered before the per-model provider choice applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolSort {
@@ -133,7 +133,7 @@ impl PoolSort {
 }
 
 /// How a catalog pool picks among the providers (offerings) of one model, once
-/// the model order is fixed (D64).
+/// the model order is fixed (D65).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSelection {
     /// Cheapest blended mix price at the combo's own profile (the default).
@@ -236,11 +236,11 @@ pub struct Combo {
     pub stickiness_ttl_seconds: i64,
     pub stickiness_key_source: KeySource,
     /// How much pricier a pinned offering may be before the pin is dropped
-    /// (D35/D64); 0.0 keeps the pin only when it is not more expensive.
+    /// (D35/D65); 0.0 keeps the pin only when it is not more expensive.
     pub sticky_price_tolerance_pct: f64,
-    /// The `pool = all` ordering axis (D64).
+    /// The `pool = all` ordering axis (D65).
     pub pool_sort: PoolSort,
-    /// How the pool picks among the providers of one model (D64).
+    /// How the pool picks among the providers of one model (D65).
     pub provider_selection: ProviderSelection,
 }
 
@@ -261,7 +261,7 @@ pub struct StickinessInput {
     /// `auto` (default) or `header`.
     pub key_source: Option<String>,
     /// How much pricier the pin may be than the current best before it is
-    /// dropped (percent, 0–100; default 5). See D64.
+    /// dropped (percent, 0–100; default 5). See D65.
     pub price_tolerance_pct: Option<f64>,
 }
 
@@ -290,10 +290,10 @@ pub struct ComboInput {
     pub mix_profile: Option<String>,
     /// Session stickiness (D35).
     pub stickiness: Option<StickinessInput>,
-    /// The `pool = all` ordering axis: `price` (default) or `quality` (D64).
+    /// The `pool = all` ordering axis: `price` (default) or `quality` (D65).
     pub sort: Option<String>,
     /// How the pool picks among the providers of one model: `mix_price`
-    /// (default), `speed`, or `reliability` (D64).
+    /// (default), `speed`, or `reliability` (D65).
     pub provider_selection: Option<String>,
 }
 
@@ -335,9 +335,9 @@ pub struct ComboView {
     pub min_quality: Option<f64>,
     /// The inclusive maximum mix price for a catalog pool.
     pub max_mix_price_per_m: Option<f64>,
-    /// The `pool = all` ordering axis: `price` or `quality` (D64).
+    /// The `pool = all` ordering axis: `price` or `quality` (D65).
     pub sort: String,
-    /// How the pool picks among the providers of one model (D64).
+    /// How the pool picks among the providers of one model (D65).
     pub provider_selection: String,
     pub members: Vec<MemberView>,
     pub enabled: bool,
@@ -693,7 +693,7 @@ fn validate_stickiness(
     Ok((enabled, ttl, key_source))
 }
 
-/// Validates the stickiness price tolerance (D64): a percentage in 0–100.
+/// Validates the stickiness price tolerance (D65): a percentage in 0–100.
 /// `None` means the default 5%. Failure mode: [`ComboError::Invalid`].
 fn validate_sticky_tolerance(input: Option<f64>) -> Result<f64, ComboError> {
     let value = input.unwrap_or(DEFAULT_STICKY_TOLERANCE_PCT);
@@ -755,7 +755,7 @@ impl PoolConstraints {
     }
 }
 
-/// How a catalog pool is ordered (D64): the model axis, then the provider axis
+/// How a catalog pool is ordered (D65): the model axis, then the provider axis
 /// within one model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolOrdering {
@@ -784,7 +784,7 @@ pub struct PoolItem {
     pub quality: routing::QualityScore,
     pub mix_price: Option<crate::mix::MixPrice>,
     pub signal: routing::CandidateSignal,
-    /// The sync marked this route removed (`route_removed_at`, D64). Reported
+    /// The sync marked this route removed (`route_removed_at`, D65). Reported
     /// with its own reason so it is not mistaken for an operator disable.
     pub route_removed: bool,
 }
@@ -793,7 +793,7 @@ pub struct PoolItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolReason {
     /// The sync marked the route removed: OpenRouter no longer lists the
-    /// provider (D64).
+    /// provider (D65).
     Removed,
     Disabled,
     NoAccess,
@@ -871,7 +871,7 @@ pub struct PoolOutcome {
 /// The shared resolution engine behind the runtime `weighted` path and the
 /// preview endpoints (D35): applies access/enabled/cooldown/breaker filters,
 /// then the inclusive quality and mix-price constraints, then
-/// [`routing::weighted_order`] with the combo's weights, and finally the D64
+/// [`routing::weighted_order`] with the combo's weights, and finally the D65
 /// pool ordering (model axis, then provider axis within one model).
 /// Deterministic — the same items, constraints, weights, and ordering always
 /// produce the same order.
@@ -943,7 +943,7 @@ fn ordering_price(item: &PoolItem) -> f64 {
         .unwrap_or(f64::INFINITY)
 }
 
-/// Re-orders a weighted pool by the D64 axes: models first (by the `sort`
+/// Re-orders a weighted pool by the D65 axes: models first (by the `sort`
 /// axis), then the providers of one model (by `provider_selection`). Stable:
 /// ties keep the weighted order. `sort = quality` is descending, so it is
 /// negated here to sort ascending.
@@ -981,7 +981,7 @@ fn apply_pool_ordering(mut ordered: Vec<PoolScored>, ordering: &PoolOrdering) ->
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
-    // The weighted order that built each explanation ran before this D64
+    // The weighted order that built each explanation ran before this D65
     // re-ordering, so its embedded `#<rank> of <count>` would otherwise
     // disagree with the shown position. Rewrite it to the new position.
     for (index, entry) in ordered.iter_mut().enumerate() {
@@ -992,7 +992,7 @@ fn apply_pool_ordering(mut ordered: Vec<PoolScored>, ordering: &PoolOrdering) ->
 
 /// Rewrites the first `#<rank> of <count>` token in a pool explanation to
 /// `position`, keeping the original `count`. The explanation is built by
-/// [`routing::weighted_order`] before the D64 re-ordering, so the embedded
+/// [`routing::weighted_order`] before the D65 re-ordering, so the embedded
 /// rank can name a different position than the one shown. A string without
 /// that token is returned unchanged.
 fn rewrite_explanation_rank(explanation: &str, position: usize) -> String {
@@ -2508,7 +2508,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // D64: pool sort axis and provider selection
+    // D65: pool sort axis and provider selection
     // -----------------------------------------------------------------------
 
     fn routed_item(model: &str, id: &str, per_m: f64, tps: f64) -> PoolItem {
@@ -2584,7 +2584,7 @@ mod tests {
             weighted.ordered[1].explanation
         );
 
-        // The D64 price ordering puts the cheap model first; the embedded
+        // The D65 price ordering puts the cheap model first; the embedded
         // ranks must follow the shown positions.
         let by_price = resolve_pool(
             items(),

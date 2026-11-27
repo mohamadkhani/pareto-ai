@@ -512,7 +512,7 @@ pub fn clamp_max_tokens(requested: Option<i64>, limit: Option<i64>) -> Option<i6
 /// clamped to the offering limit, and — when streaming —
 /// `stream_options.include_usage` forced on so the final chunk carries `usage`.
 ///
-/// `routing` is an offering's routing fragment (D64), merged in *after* the
+/// `routing` is an offering's routing fragment (D65), merged in *after* the
 /// caller's fields so the gateway's provider pin wins over any client-supplied
 /// `provider` object; `model`/`messages`/`stream`/`max_tokens` are written last
 /// and are never overridden by it.
