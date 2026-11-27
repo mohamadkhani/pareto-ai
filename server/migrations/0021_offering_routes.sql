@@ -8,7 +8,7 @@
 --
 -- Each upstream provider becomes its own offering under the single managed
 -- `openrouter` provider row (one credential, many offerings — the offering is
--- already "the routable unit"). Two columns are added:
+-- already "the routable unit"). Three columns are added:
 --
 --   * `route`        — the provider's OpenRouter slug (`tag`, e.g. "azure"),
 --                       the identity that makes two providers of one model two
@@ -18,6 +18,11 @@
 --                       e.g. {"provider":{"order":["azure"],"allow_fallbacks":
 --                       false}}. Stored here so the request path stays generic
 --                       and never hard-codes OpenRouter semantics.
+--   * `route_removed_at` — sync-owned stale marker: non-NULL means OpenRouter
+--                       no longer lists the route, so it is excluded from
+--                       routing and restored (cleared) when the route returns.
+--                       Kept separate from `enabled` so a sync prune never
+--                       touches an operator's own disable.
 --
 -- The old `UNIQUE (provider_id, upstream_model_id)` cannot express this and
 -- SQLite cannot drop a table-level constraint, so the table is rebuilt with
@@ -43,6 +48,12 @@ CREATE TABLE offerings_new (
     route               TEXT NOT NULL DEFAULT '',
     -- Body fragment merged into the upstream request (routing, not secrets).
     routing_json        TEXT,
+    -- Sync-owned. Non-NULL means OpenRouter no longer lists this route for the
+    -- model: the offering is excluded from routing until a later sync lists the
+    -- route again, which clears the marker (the route is restored). An operator
+    -- never sets this; it exists so pruning leaves `enabled` untouched and an
+    -- operator's own `enabled = 0` choice is never re-enabled by the sync.
+    route_removed_at    TEXT,
     context_override    INTEGER,
     max_output_override INTEGER,
     enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
@@ -55,10 +66,10 @@ CREATE TABLE offerings_new (
 
 INSERT INTO offerings_new
     (id, provider_id, model_id, upstream_model_id, route, routing_json,
-     context_override, max_output_override, enabled, headers_json,
-     created_at, updated_at)
+     route_removed_at, context_override, max_output_override, enabled,
+     headers_json, created_at, updated_at)
 SELECT
-    id, provider_id, model_id, upstream_model_id, '', NULL,
+    id, provider_id, model_id, upstream_model_id, '', NULL, NULL,
     context_override, max_output_override, enabled, headers_json,
     created_at, updated_at
 FROM offerings;

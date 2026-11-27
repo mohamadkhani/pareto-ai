@@ -1411,14 +1411,12 @@ async fn upsert_route_offering(
     let now = catalog::now_ts();
     match existing {
         Some(id) => {
-            // Re-enable a route the sync itself disabled (a routed row whose
-            // `routing_json` was cleared), while preserving an operator's own
-            // disable (`enabled = 0` with a non-null fragment). The CASE reads
-            // the pre-update row, so the two assignments do not interfere.
+            // A route the sync previously pruned (`route_removed_at` set) is
+            // restored by clearing the marker; `enabled` is never touched, so
+            // an operator's own disable (`enabled = 0`) survives.
             sqlx::query(
                 "UPDATE offerings SET model_id = ?, routing_json = ?, \
-                   enabled = CASE WHEN routing_json IS NULL THEN 1 ELSE enabled END, \
-                   updated_at = ? \
+                   route_removed_at = NULL, updated_at = ? \
                  WHERE id = ?",
             )
             .bind(model_id)
@@ -1452,17 +1450,19 @@ async fn upsert_route_offering(
     }
 }
 
-/// Disables the routed offerings of `(provider_id, upstream_model_id)` whose
-/// route is absent from `endpoints` (D64). When OpenRouter drops a provider
-/// from a model, the stale offering would otherwise keep its last price and
-/// pin a provider that no longer serves, with `allow_fallbacks=false`.
+/// Marks the routed offerings of `(provider_id, upstream_model_id)` whose route
+/// is absent from `endpoints` as removed (D64). When OpenRouter drops a provider
+/// from a model, the stale offering would otherwise keep its last price and pin
+/// a provider that no longer serves, with `allow_fallbacks=false`.
 ///
-/// The offering list is sync-owned, but the row is **disabled, never
-/// deleted**: `enabled` is set to 0 and `routing_json` cleared, so telemetry
-/// snapshots and attempts, usage attribution, breaker history, operator
-/// headers, and price overrides survive. A later sync that lists the route
-/// again re-enables it ([`upsert_route_offering`]). Returns the pruned routes,
-/// in route order, for the run's `detail_json`.
+/// The row is **never deleted and `enabled` is never changed**: a sync-owned
+/// `route_removed_at` timestamp is set, so telemetry snapshots and attempts,
+/// usage attribution, breaker history, operator headers and price overrides
+/// survive, and an operator's own `enabled = 0` disable is preserved (the sync
+/// cannot re-enable it). Routing excludes rows with `route_removed_at` set; a
+/// later sync that lists the route again clears the marker in
+/// [`upsert_route_offering`] and the route is restored. Returns the pruned
+/// routes, in route order, for the run's `detail_json`.
 async fn prune_stale_routes(
     conn: &mut sqlx::SqliteConnection,
     provider_id: &str,
@@ -1472,11 +1472,12 @@ async fn prune_stale_routes(
     let now = catalog::now_ts();
     // An empty `endpoints` is the all-routes-gone case: the `NOT IN ()`
     // predicate cannot express it, so the whole routed set is selected and
-    // disabled. Route values are always bound, never interpolated.
+    // marked. Route values are always bound, never interpolated.
     let routes: Vec<String> = if endpoints.is_empty() {
         sqlx::query_scalar(
             "SELECT route FROM offerings \
              WHERE provider_id = ? AND upstream_model_id = ? AND route <> '' \
+               AND route_removed_at IS NULL \
              ORDER BY route",
         )
         .bind(provider_id)
@@ -1488,7 +1489,7 @@ async fn prune_stale_routes(
         let sql = format!(
             "SELECT route FROM offerings \
              WHERE provider_id = ? AND upstream_model_id = ? AND route <> '' \
-               AND route NOT IN ({placeholders}) \
+               AND route_removed_at IS NULL AND route NOT IN ({placeholders}) \
              ORDER BY route"
         );
         let mut query = sqlx::query_scalar::<_, String>(&sql);
@@ -1505,9 +1506,11 @@ async fn prune_stale_routes(
 
     if endpoints.is_empty() {
         sqlx::query(
-            "UPDATE offerings SET enabled = 0, routing_json = NULL, updated_at = ? \
-             WHERE provider_id = ? AND upstream_model_id = ? AND route <> ''",
+            "UPDATE offerings SET route_removed_at = ?, updated_at = ? \
+             WHERE provider_id = ? AND upstream_model_id = ? AND route <> '' \
+               AND route_removed_at IS NULL",
         )
+        .bind(&now)
         .bind(&now)
         .bind(provider_id)
         .bind(upstream_model_id)
@@ -1516,12 +1519,16 @@ async fn prune_stale_routes(
     } else {
         let placeholders = vec!["?"; endpoints.len()].join(", ");
         let sql = format!(
-            "UPDATE offerings SET enabled = 0, routing_json = NULL, updated_at = ? \
+            "UPDATE offerings SET route_removed_at = ?, updated_at = ? \
              WHERE provider_id = ? AND upstream_model_id = ? AND route <> '' \
-               AND route NOT IN ({placeholders})"
+               AND route_removed_at IS NULL AND route NOT IN ({placeholders})"
         );
         let mut query = sqlx::query(&sql);
-        query = query.bind(&now).bind(provider_id).bind(upstream_model_id);
+        query = query
+            .bind(&now)
+            .bind(&now)
+            .bind(provider_id)
+            .bind(upstream_model_id);
         for endpoint in endpoints {
             query = query.bind(&endpoint.route);
         }
@@ -2985,7 +2992,7 @@ mod tests {
         // *absent* from the lookup result, so the known routes are untouched.
         // That is what separates an error from a successful empty lookup,
         // which is the complete provider set and disables every route (see
-        // `an_empty_endpoint_lookup_disables_all_routes`).
+        // `an_empty_endpoint_lookup_marks_all_routes_removed`).
         run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
             .await
             .expect("seed routes");
@@ -3001,7 +3008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dropped_route_is_disabled_not_deleted() {
+    async fn a_dropped_route_is_marked_removed_not_deleted() {
         let app = TestApp::new().await;
         let user_id = admin_id(&app).await;
         let actor = Actor {
@@ -3028,9 +3035,10 @@ mod tests {
             .await
             .expect("second sync");
 
-        // The rows survive, disabled and with their routing fragment cleared.
-        let mut routes: Vec<(String, i64, Option<String>)> = sqlx::query_as(
-            "SELECT o.route, o.enabled, o.routing_json \
+        // The rows survive, marked removed but still enabled with their
+        // fragments intact: pruning never deletes and never touches `enabled`.
+        let mut routes: Vec<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT o.route, o.enabled, o.routing_json, o.route_removed_at \
              FROM offerings o JOIN models m ON m.id = o.model_id \
              WHERE m.canonical_name = 'openai/gpt-4o' AND o.route <> '' ORDER BY o.route",
         )
@@ -3038,9 +3046,10 @@ mod tests {
         .await
         .expect("routes");
         assert_eq!(routes.len(), 2, "nothing is deleted");
-        for (route, enabled, routing) in routes.drain(..) {
-            assert_eq!(enabled, 0, "route {route} is disabled");
-            assert_eq!(routing, None, "route {route} lost its fragment");
+        for (route, enabled, routing, removed) in routes.drain(..) {
+            assert_eq!(enabled, 1, "route {route} stays enabled");
+            assert!(routing.is_some(), "route {route} keeps its fragment");
+            assert!(removed.is_some(), "route {route} is marked removed");
         }
 
         // The aggregate is enabled and, with no routable routed sibling, is
@@ -3050,7 +3059,8 @@ mod tests {
                     (SELECT COUNT(*) FROM offerings s \
                      WHERE s.provider_id = o.provider_id \
                        AND s.upstream_model_id = o.upstream_model_id \
-                       AND s.route <> '' AND s.enabled = 1) \
+                       AND s.route <> '' AND s.enabled = 1 \
+                       AND s.route_removed_at IS NULL) \
              FROM offerings o JOIN models m ON m.id = o.model_id \
              WHERE m.canonical_name = 'openai/gpt-4o' AND o.route = ''",
         )
@@ -3058,7 +3068,7 @@ mod tests {
         .await
         .expect("aggregate");
         assert_eq!(aggregate.0, 1, "the aggregate stays enabled");
-        assert_eq!(aggregate.1, 0, "no routed sibling supersedes it");
+        assert_eq!(aggregate.1, 0, "no routable routed sibling supersedes it");
 
         let detail: String = sqlx::query_scalar(
             "SELECT detail_json FROM price_sync_runs ORDER BY rowid DESC LIMIT 1",
@@ -3079,7 +3089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_returning_route_is_re_enabled_with_its_fragment() {
+    async fn a_returning_route_is_restored_with_its_fragment() {
         let app = TestApp::new().await;
         let user_id = admin_id(&app).await;
         let actor = Actor {
@@ -3099,8 +3109,8 @@ mod tests {
             .await
             .expect("third sync");
 
-        let mut routes: Vec<(String, i64, Option<String>)> = sqlx::query_as(
-            "SELECT o.route, o.enabled, o.routing_json \
+        let mut routes: Vec<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT o.route, o.enabled, o.routing_json, o.route_removed_at \
              FROM offerings o JOIN models m ON m.id = o.model_id \
              WHERE m.canonical_name = 'openai/gpt-4o' AND o.route <> '' ORDER BY o.route",
         )
@@ -3108,8 +3118,12 @@ mod tests {
         .await
         .expect("routes");
         assert_eq!(routes.len(), 2);
-        for (route, enabled, routing) in routes.drain(..) {
-            assert_eq!(enabled, 1, "route {route} is enabled again");
+        for (route, enabled, routing, removed) in routes.drain(..) {
+            assert_eq!(enabled, 1, "route {route} stays enabled");
+            assert!(
+                removed.is_none(),
+                "route {route} is no longer marked removed, so it is routable again"
+            );
             let routing: serde_json::Value =
                 serde_json::from_str(&routing.expect("routing json")).expect("routing parses");
             assert_eq!(
@@ -3156,10 +3170,44 @@ mod tests {
         .expect("route");
         assert_eq!(enabled, 0, "the operator's disable survives the sync");
         assert!(routing.is_some(), "the fragment is still present");
+
+        // Now the route goes stale and later returns: the sync must clear its
+        // own `route_removed_at` marker while still leaving `enabled = 0`, so
+        // the operator's disable is never re-enabled (D64).
+        run_sync(&app.state.pool, fixture_fetch, no_gpt4o_endpoints, &actor)
+            .await
+            .expect("third sync");
+        let removed: Option<String> = sqlx::query_scalar(
+            "SELECT route_removed_at FROM offerings \
+             WHERE route = 'openai' AND upstream_model_id = 'openai/gpt-4o'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("removed marker");
+        assert!(removed.is_some(), "the stale route is marked removed");
+
+        run_sync(&app.state.pool, fixture_fetch, endpoints_fetch, &actor)
+            .await
+            .expect("fourth sync");
+        let (enabled, removed): (i64, Option<String>) = sqlx::query_as(
+            "SELECT enabled, route_removed_at FROM offerings \
+             WHERE route = 'openai' AND upstream_model_id = 'openai/gpt-4o'",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("route");
+        assert_eq!(
+            enabled, 0,
+            "the operator's disable survives the route's return"
+        );
+        assert!(
+            removed.is_none(),
+            "the sync's own removed marker is cleared on return"
+        );
     }
 
     #[tokio::test]
-    async fn an_empty_endpoint_lookup_disables_all_routes() {
+    async fn an_empty_endpoint_lookup_marks_all_routes_removed() {
         let app = TestApp::new().await;
         let user_id = admin_id(&app).await;
         let actor = Actor {
@@ -3177,32 +3225,36 @@ mod tests {
         assert_eq!(routed, 3, "azure and openai for gpt-4o, deepseek for r1");
 
         // A *successful* lookup that now returns no endpoints is the complete
-        // provider set: every route is disabled, none deleted.
+        // provider set: every route is marked removed, none deleted.
         run_sync(&app.state.pool, fixture_fetch, no_endpoints, &actor)
             .await
             .expect("second sync");
 
+        let removed_routed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM offerings WHERE route <> '' AND route_removed_at IS NOT NULL",
+        )
+        .fetch_one(&app.state.pool)
+        .await
+        .expect("removed routed");
+        assert_eq!(removed_routed, 3, "all routes are marked removed");
         let enabled_routed: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM offerings WHERE route <> '' AND enabled = 1")
                 .fetch_one(&app.state.pool)
                 .await
                 .expect("enabled routed");
-        assert_eq!(enabled_routed, 0, "all routes are disabled");
-        let cleared: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM offerings WHERE route <> '' AND routing_json IS NULL",
-        )
-        .fetch_one(&app.state.pool)
-        .await
-        .expect("cleared");
-        assert_eq!(cleared, 3, "the rows survive with cleared fragments");
+        assert_eq!(
+            enabled_routed, 3,
+            "pruning never touches `enabled`; the rows just leave routing"
+        );
 
-        // The gpt-4o aggregate routes again: no enabled routed sibling.
+        // The gpt-4o aggregate routes again: no routable routed sibling.
         let aggregate: (i64, i64) = sqlx::query_as(
             "SELECT o.enabled, \
                     (SELECT COUNT(*) FROM offerings s \
                      WHERE s.provider_id = o.provider_id \
                        AND s.upstream_model_id = o.upstream_model_id \
-                       AND s.route <> '' AND s.enabled = 1) \
+                       AND s.route <> '' AND s.enabled = 1 \
+                       AND s.route_removed_at IS NULL) \
              FROM offerings o JOIN models m ON m.id = o.model_id \
              WHERE m.canonical_name = 'openai/gpt-4o' AND o.route = ''",
         )

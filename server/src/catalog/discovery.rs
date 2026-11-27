@@ -417,7 +417,8 @@ async fn apply(
     for entry in entries {
         let upstream_id = &entry.model_id;
         let existing: Option<(String, String)> = sqlx::query_as(
-            "SELECT id, model_id FROM offerings WHERE provider_id = ? AND upstream_model_id = ?",
+            "SELECT id, model_id FROM offerings \
+             WHERE provider_id = ? AND upstream_model_id = ? AND route = ''",
         )
         .bind(provider_id)
         .bind(upstream_id)

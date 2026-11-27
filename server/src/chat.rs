@@ -345,6 +345,9 @@ struct OfferingJoin {
     offering_route: String,
     /// Body fragment merged into the upstream request (provider pinning).
     offering_routing_json: Option<String>,
+    /// Sync-owned stale marker (D64): non-NULL means OpenRouter no longer
+    /// lists this route, so it is excluded from routing.
+    offering_route_removed_at: Option<String>,
     context_override: Option<i64>,
     max_output_override: Option<i64>,
     offering_headers_json: Option<String>,
@@ -362,6 +365,7 @@ struct OfferingJoin {
 
 const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream_model_id, \
      o.route AS offering_route, o.routing_json AS offering_routing_json, \
+     o.route_removed_at AS offering_route_removed_at, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
@@ -373,6 +377,7 @@ const OFFERING_JOIN_COLUMNS: &str = "o.id AS offering_id, o.model_id, o.upstream
 
 const SELECT_OFFERING_JOIN: &str = "SELECT o.id AS offering_id, o.model_id, o.upstream_model_id, \
      o.route AS offering_route, o.routing_json AS offering_routing_json, \
+     o.route_removed_at AS offering_route_removed_at, \
      o.context_override, o.max_output_override, o.headers_json AS offering_headers_json, \
      m.canonical_name, m.context_length, m.max_output_tokens, m.modalities_input, \
      pr.id AS provider_id, pr.name AS provider_name, pr.base_url, \
@@ -381,7 +386,8 @@ const SELECT_OFFERING_JOIN: &str = "SELECT o.id AS offering_id, o.model_id, o.up
      FROM offerings o \
      JOIN models m ON m.id = o.model_id \
      JOIN providers pr ON pr.id = o.provider_id \
-     WHERE pr.enabled = 1 AND o.enabled = 1 AND m.enabled = 1";
+     WHERE pr.enabled = 1 AND o.enabled = 1 AND m.enabled = 1 \
+       AND o.route_removed_at IS NULL";
 
 /// Builds one candidate from its join row, picking the provider credential
 /// (M3 cooldown demotion plus M5 breaker avoidance, see [`ordered_credentials`]).
@@ -411,7 +417,10 @@ fn build_candidate(
         base_url: row.base_url,
         route: row.offering_route,
         routing_json: row.offering_routing_json,
-        enabled: row.offering_enabled == 1 && row.provider_enabled == 1 && row.model_enabled == 1,
+        enabled: row.offering_enabled == 1
+            && row.provider_enabled == 1
+            && row.model_enabled == 1
+            && row.offering_route_removed_at.is_none(),
         context_length: row.context_override.or(row.context_length),
         max_output_tokens: row.max_output_override.or(row.max_output_tokens),
         modalities_input: row.modalities_input,
@@ -447,6 +456,7 @@ fn drop_superseded_aggregates(rows: Vec<OfferingJoin>) -> Vec<OfferingJoin> {
             && row.offering_enabled == 1
             && row.provider_enabled == 1
             && row.model_enabled == 1
+            && row.offering_route_removed_at.is_none()
         {
             routed.insert((row.provider_id.clone(), row.upstream_model_id.clone()));
         }
@@ -1233,15 +1243,25 @@ fn offering_mix_price(
 }
 
 /// Whether a pinned offering is more than `tolerance_pct` pricier than the
-/// cheapest *ready* candidate, at the combo's mix profile (D64). A pin whose
-/// price is unknown, or the cheapest, is never over the tolerance. The
+/// cheapest *ready* candidate **of the same model**, at the combo's mix profile
+/// (D64). Comparing across models would move a pin off its chosen model whenever
+/// another model is cheaper overall — which is the normal case for a
+/// `sort = quality` pool — so only the pinned model's other providers compete.
+/// Candidates excluded by either routing path are ignored too: a cheap row that
+/// `pool_exclusions` or `weighted_exclusions` already dropped cannot become the
+/// `best` that discards a valid pin. A pin whose price is unknown, or the
+/// cheapest among its model's providers, is never over the tolerance. The
 /// comparison keeps prompt caches warm while still moving off a provider whose
 /// price jumped.
+#[allow(clippy::too_many_arguments)]
 fn pin_exceeds_tolerance(
     pinned_id: &str,
+    pinned_model_id: &str,
     tolerance_pct: f64,
     candidates: &[Candidate],
     mix_prices: &HashMap<String, Option<mix::MixPrice>>,
+    pool_exclusions: &HashMap<String, combos::PoolExclusion>,
+    weighted_exclusions: &HashMap<String, routing::Exclusion>,
     state: &AppState,
     parsed: &WireRequest,
 ) -> bool {
@@ -1250,6 +1270,12 @@ fn pin_exceeds_tolerance(
     };
     let mut best: Option<f64> = None;
     for candidate in candidates {
+        if candidate.model_id != pinned_model_id {
+            continue;
+        }
+        if sticky_excluded(&candidate.offering_id, pool_exclusions, weighted_exclusions).is_some() {
+            continue;
+        }
         if !candidate_ready(state, candidate, parsed) {
             continue;
         }
@@ -1794,32 +1820,40 @@ pub async fn execute(
                     pin = None;
                 }
                 if let Some(existing) = pin {
+                    let pinned_index = candidates
+                        .iter()
+                        .position(|candidate| candidate.offering_id == existing.offering_id);
                     let excluded = sticky_excluded(
                         &existing.offering_id,
                         &pool_exclusions,
                         &weighted_exclusions,
                     );
-                    let ready = candidates
-                        .iter()
-                        .find(|candidate| candidate.offering_id == existing.offering_id)
-                        .is_some_and(|candidate| candidate_ready(state, candidate, &parsed));
+                    let ready = pinned_index
+                        .is_some_and(|index| candidate_ready(state, &candidates[index], &parsed));
                     if let (None, true) = (&excluded, ready) {
                         // D64: keep the pin while it is within the combo's
-                        // price tolerance of the cheapest ready candidate.
+                        // price tolerance of the cheapest ready candidate *of
+                        // the same model* (the pinned model's own providers);
+                        // a cheaper provider of a different model cannot move
+                        // a `sort = quality` pool off its chosen model.
+                        let pinned_model_id = pinned_index
+                            .and_then(|index| candidates.get(index))
+                            .map(|candidate| candidate.model_id.clone())
+                            .unwrap_or_default();
                         if pin_exceeds_tolerance(
                             &existing.offering_id,
+                            &pinned_model_id,
                             combo.sticky_price_tolerance_pct,
                             &candidates,
                             &mix_prices,
+                            &pool_exclusions,
+                            &weighted_exclusions,
                             state,
                             &parsed,
                         ) {
                             decision.sticky.replaced_why = Some("price_moved".to_string());
                         } else {
-                            if let Some(index) = candidates
-                                .iter()
-                                .position(|candidate| candidate.offering_id == existing.offering_id)
-                            {
+                            if let Some(index) = pinned_index {
                                 let candidate = candidates.remove(index);
                                 candidates.insert(0, candidate);
                             }
@@ -4202,6 +4236,7 @@ mod tests {
             upstream_model_id: upstream.to_string(),
             offering_route: route.to_string(),
             offering_routing_json: None,
+            offering_route_removed_at: None,
             context_override: None,
             max_output_override: None,
             offering_headers_json: None,
@@ -4240,6 +4275,13 @@ mod tests {
             ]);
             assert_eq!(kept.len(), 2, "a non-routable sibling keeps the aggregate");
         }
+
+        // A route the sync marked removed (`route_removed_at`) cannot serve
+        // either, so it must not supersede the aggregate.
+        let mut removed = join_row("p", "gpt-4o", "azure", 1, 1, 1);
+        removed.offering_route_removed_at = Some("2026-01-01T00:00:00.000Z".to_string());
+        let kept = drop_superseded_aggregates(vec![join_row("p", "gpt-4o", "", 1, 1, 1), removed]);
+        assert_eq!(kept.len(), 2, "a sync-removed sibling keeps the aggregate");
 
         // An enabled routed sibling does supersede the aggregate.
         let dropped = drop_superseded_aggregates(vec![
@@ -9426,6 +9468,74 @@ mod tests {
         .id
     }
 
+    /// A `pool = all`, sticky, `sort = quality` combo for the tolerance tests
+    /// (D64). The mix-price cap is generous so both test models stay in the
+    /// pool.
+    async fn create_quality_pool_combo(s: &Seeded, name: &str) -> String {
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        crate::combos::create(
+            &s.app.state.pool,
+            &actor,
+            &crate::combos::ComboInput {
+                name: name.to_string(),
+                strategy: "weighted".to_string(),
+                weights: Some(json!({"preset": "cheapest"})),
+                members: Vec::new(),
+                enabled: None,
+                pool: Some("all".to_string()),
+                min_quality: None,
+                max_mix_price_per_m: Some(1000.0),
+                mix_profile: None,
+                stickiness: Some(crate::combos::StickinessInput {
+                    enabled: Some(true),
+                    ttl_seconds: Some(1800),
+                    key_source: Some("auto".to_string()),
+                    price_tolerance_pct: None,
+                }),
+                sort: Some("quality".to_string()),
+                provider_selection: None,
+            },
+        )
+        .await
+        .expect("quality pool combo")
+        .id
+    }
+
+    /// A minimal ready candidate for the `pin_exceeds_tolerance` unit test:
+    /// one provider credential, enabled, no cooldown, no context cap.
+    fn unit_candidate(offering_id: &str, model_id: &str) -> Candidate {
+        let credential = Credential {
+            id: format!("cred-{offering_id}"),
+            secret_cipher: "cipher".to_string(),
+            headers_json: None,
+            cooled: false,
+            balance_usd: None,
+            balance_low_threshold: None,
+            balance_currency: None,
+        };
+        Candidate {
+            offering_id: offering_id.to_string(),
+            model_id: model_id.to_string(),
+            canonical_name: model_id.to_string(),
+            upstream_model_id: model_id.to_string(),
+            provider_id: format!("prov-{offering_id}"),
+            provider_name: "p".to_string(),
+            base_url: "https://example.test".to_string(),
+            route: String::new(),
+            routing_json: None,
+            enabled: true,
+            context_length: None,
+            max_output_tokens: None,
+            modalities_input: None,
+            offering_headers_json: None,
+            credential: Some(credential.clone()),
+            credentials: vec![credential],
+        }
+    }
+
     async fn price_offering(s: &Seeded, offering_id: &str, per_m: f64) {
         let actor = Actor {
             user_id: &s.uid,
@@ -9802,6 +9912,332 @@ mod tests {
         .await
         .expect("pin row");
         assert_eq!(stored, second, "the pin was rewritten to the new provider");
+    }
+
+    #[tokio::test]
+    async fn a_quality_pool_keeps_its_pinned_model_when_another_model_is_cheaper() {
+        // D64 regression: the tolerance compares the pinned offering against
+        // the other providers *of its own model*. A `sort = quality` pool
+        // usually pins a model that is not the pool's cheapest, so comparing
+        // across models would flag `price_moved` on every single request,
+        // re-pinning and resetting the age/TTL each time.
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        let quality_model = model(&s.app, &s.uid, "quality-model", None, None).await;
+        let cheap_model = model(&s.app, &s.uid, "cheap-model", None, None).await;
+        // The pinned model ranks first by quality, though its provider costs
+        // far more than the other model's.
+        crate::benchmarks::set_override(&s.app.state.pool, &actor, &quality_model, 1500.0)
+            .await
+            .expect("quality override");
+        crate::benchmarks::set_override(&s.app.state.pool, &actor, &cheap_model, 1000.0)
+            .await
+            .expect("quality override");
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let pinned = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &quality_model,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let cheaper_model_offering = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &cheap_model,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &pinned, 10.0).await;
+        price_offering(&s, &cheaper_model_offering, 1.0).await;
+        create_quality_pool_combo(&s, "sticky-quality").await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky-quality", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        assert_eq!(
+            log_rows(&s.app).await[0].resolved_offering_id.as_deref(),
+            Some(pinned.as_str()),
+            "the higher-quality model is chosen and pinned"
+        );
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(&s.cookie, chat_body("combo:sticky-quality", true), "sess-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let rows = log_rows(&s.app).await;
+        let log = rows.last().expect("second request log");
+        assert_eq!(
+            log.resolved_offering_id.as_deref(),
+            Some(pinned.as_str()),
+            "the pin holds even though another model is cheaper"
+        );
+        let decision = decision_of(log);
+        assert_eq!(decision["sticky"]["pinned"], pinned.as_str());
+        assert!(
+            decision["sticky"]["replaced_why"].is_null(),
+            "the pin is kept, not flagged price_moved: {decision}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_tolerance_compares_only_the_pinned_models_providers() {
+        let stub = Stub::spawn(vec![
+            Scenario::Stream {
+                events: vec![event(0)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(1)],
+                usage: Some(usage_json(3, 4)),
+            },
+            Scenario::Stream {
+                events: vec![event(2)],
+                usage: Some(usage_json(3, 4)),
+            },
+        ])
+        .await;
+        let s = seeded().await;
+        let actor = Actor {
+            user_id: &s.uid,
+            ip: "127.0.0.1",
+        };
+        let pinned_model = model(&s.app, &s.uid, "pinned-model", None, None).await;
+        let other_model = model(&s.app, &s.uid, "other-model", None, None).await;
+        crate::benchmarks::set_override(&s.app.state.pool, &actor, &pinned_model, 1500.0)
+            .await
+            .expect("quality override");
+        crate::benchmarks::set_override(&s.app.state.pool, &actor, &other_model, 1000.0)
+            .await
+            .expect("quality override");
+        let (p1, _) = provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
+        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let (p3, _) = provider_with_credential(&s.app, &s.uid, "p3", &stub.base_url, None).await;
+        let pinned = offering(
+            &s.app,
+            &s.uid,
+            &p1,
+            &pinned_model,
+            "test-model",
+            "2026-01-01T00:00:01.000Z",
+            None,
+        )
+        .await;
+        let same_model = offering(
+            &s.app,
+            &s.uid,
+            &p2,
+            &pinned_model,
+            "test-model-2",
+            "2026-01-01T00:00:02.000Z",
+            None,
+        )
+        .await;
+        let other_model_offering = offering(
+            &s.app,
+            &s.uid,
+            &p3,
+            &other_model,
+            "test-model-3",
+            "2026-01-01T00:00:03.000Z",
+            None,
+        )
+        .await;
+        price_offering(&s, &pinned, 0.5).await;
+        price_offering(&s, &same_model, 10.0).await;
+        price_offering(&s, &other_model_offering, 0.1).await;
+        create_quality_pool_combo(&s, "sticky-same-model").await;
+
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(
+                &s.cookie,
+                chat_body("combo:sticky-same-model", true),
+                "sess-a",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        assert_eq!(
+            log_rows(&s.app).await[0].resolved_offering_id.as_deref(),
+            Some(pinned.as_str())
+        );
+
+        // A cheaper provider of a *different* model cannot move the pin.
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(
+                &s.cookie,
+                chat_body("combo:sticky-same-model", true),
+                "sess-a",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let rows = log_rows(&s.app).await;
+        let log = rows.last().expect("second request log");
+        assert_eq!(
+            log.resolved_offering_id.as_deref(),
+            Some(pinned.as_str()),
+            "a cheaper provider of another model does not move the pin"
+        );
+        assert!(
+            decision_of(log)["sticky"]["replaced_why"].is_null(),
+            "the pin is kept: {}",
+            decision_of(log)
+        );
+
+        // A cheaper provider of the *same* model past the tolerance does move.
+        price_offering(&s, &same_model, 0.05).await;
+        let (status, _, body) = send_streaming(
+            s.app.router(),
+            chat_request_with_session(
+                &s.cookie,
+                chat_body("combo:sticky-same-model", true),
+                "sess-a",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = body_text(body).await;
+        let rows = log_rows(&s.app).await;
+        let log = rows.last().expect("third request log");
+        let decision = decision_of(log);
+        assert_eq!(
+            log.resolved_offering_id.as_deref(),
+            Some(same_model.as_str()),
+            "a cheaper same-model provider past the tolerance moves the pin"
+        );
+        assert_eq!(
+            decision["sticky"]["replaced_why"], "price_moved",
+            "{decision}"
+        );
+        assert_eq!(decision["sticky"]["pinned"], same_model.as_str());
+    }
+
+    #[tokio::test]
+    async fn pin_tolerance_ignores_excluded_same_model_candidates() {
+        // A cheap same-model candidate that the routing filters already
+        // excluded cannot become the `best` that discards a valid pin.
+        let app = TestApp::new().await;
+        let profile = crate::mix::code_agent_profile();
+        let mix = |per_m: f64| {
+            Some(
+                crate::mix::mix_price_from(
+                    crate::mix::ComponentPrices {
+                        input_per_m: Some(per_m),
+                        output_per_m: Some(per_m),
+                        ..Default::default()
+                    },
+                    &profile,
+                )
+                .expect("mix price"),
+            )
+        };
+        let parsed = WireRequest {
+            model: "m".to_string(),
+            messages: Vec::new(),
+            stream: false,
+            max_tokens: None,
+            extra: serde_json::Map::new(),
+        };
+        let candidates = vec![
+            unit_candidate("pinned", "m1"),
+            unit_candidate("same-model-cheap", "m1"),
+            unit_candidate("other-model-cheap", "m2"),
+        ];
+        let mut mix_prices: HashMap<String, Option<crate::mix::MixPrice>> = HashMap::new();
+        mix_prices.insert("pinned".to_string(), mix(10.0));
+        mix_prices.insert("same-model-cheap".to_string(), mix(1.0));
+        mix_prices.insert("other-model-cheap".to_string(), mix(1.0));
+        let no_pool: HashMap<String, combos::PoolExclusion> = HashMap::new();
+        let no_weighted: HashMap<String, routing::Exclusion> = HashMap::new();
+
+        // Sanity: without exclusions, the same-model candidate at $1 is far
+        // below the $10 pin, so the tolerance trips.
+        assert!(pin_exceeds_tolerance(
+            "pinned",
+            "m1",
+            5.0,
+            &candidates,
+            &mix_prices,
+            &no_pool,
+            &no_weighted,
+            &app.state,
+            &parsed,
+        ));
+
+        // A `pool_exclusions` entry hides it: the pin is kept.
+        let mut pool: HashMap<String, combos::PoolExclusion> = HashMap::new();
+        pool.insert(
+            "same-model-cheap".to_string(),
+            combos::PoolExclusion {
+                offering_id: "same-model-cheap".to_string(),
+                model: "m1".to_string(),
+                provider: "p".to_string(),
+                reason: combos::PoolReason::BelowMinQuality,
+                detail: "quality below the minimum".to_string(),
+            },
+        );
+        assert!(!pin_exceeds_tolerance(
+            "pinned",
+            "m1",
+            5.0,
+            &candidates,
+            &mix_prices,
+            &pool,
+            &no_weighted,
+            &app.state,
+            &parsed,
+        ));
+
+        // A `weighted_exclusions` entry does the same.
+        let mut weighted: HashMap<String, routing::Exclusion> = HashMap::new();
+        weighted.insert(
+            "same-model-cheap".to_string(),
+            routing::Exclusion::AccessDenied,
+        );
+        assert!(!pin_exceeds_tolerance(
+            "pinned",
+            "m1",
+            5.0,
+            &candidates,
+            &mix_prices,
+            &no_pool,
+            &weighted,
+            &app.state,
+            &parsed,
+        ));
     }
 
     #[tokio::test]

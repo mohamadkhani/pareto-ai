@@ -1388,23 +1388,26 @@ OpenRouter model as one aggregated offering:
    endpoints (bounded concurrency, per-model failures logged and tolerated)
    *before* the transaction, and writes one priced offering per route. A
    successfully parsed lookup is the complete provider set: a route it no
-   longer lists is **disabled, never deleted** (`enabled = 0`,
-   `routing_json = NULL`) and recorded as `pruned_routes` in the run's
-   `detail_json`, so telemetry, usage attribution, breaker history, headers,
-   and overrides survive; a later sync that lists the route again re-enables
-   it and restores its routing fragment, while an operator's own disable is
-   preserved. A lookup that *errors* leaves the model's rows untouched, and a
-   successful lookup with an empty endpoint list disables every route. The
-   routed models and any changed route prices are recorded in the run's
-   `detail_json`.
+   longer lists is marked `route_removed_at` (a sync-owned timestamp) and
+   recorded as `pruned_routes` in the run's `detail_json`. The marker excludes
+   the route from routing — the row is never deleted and its `enabled` is
+   never changed, so telemetry, usage attribution, breaker history, headers,
+   overrides, and an operator's own `enabled = 0` disable all survive. A later
+   sync that lists the route again clears `route_removed_at`, restoring the
+   route and refreshing its routing fragment. A lookup that *errors* leaves the
+   model's rows untouched, and a successful lookup with an empty endpoint list
+   marks every route removed. The routed models and any changed route prices
+   are recorded in the run's `detail_json`.
 3. **Routing.** The request path merges `routing_json` into the upstream body
    (the fragment wins over a client-supplied `provider`; `model`, `messages`,
    `stream`, and `max_tokens` are written last and never overridden), so the
-   provider whose price we ranked is the provider that runs. When a model has
-   a *routable* routed offering (offering, provider, and model all enabled),
-   its route-less aggregate is dropped from plain-model and catalog-pool
-   candidates (`drop_superseded_aggregates`); explicit combo members are left
-   alone because the operator named those rows.
+   provider whose price we ranked is the provider that runs. An offering whose
+   `route_removed_at` is set is excluded from routing. When a model has a
+   *routable* routed offering (offering, provider, and model all enabled and
+   the route not removed), its route-less aggregate is dropped from
+   plain-model and catalog-pool candidates (`drop_superseded_aggregates`);
+   explicit combo members are left alone because the operator named those
+   rows.
 4. **Combo knobs.** A `pool = all` combo carries two ordering axes: `sort`
    (`price` — cheapest model first — or `quality` — best model first) orders
    the models, and `provider_selection` (`mix_price` — cheapest at the combo's
@@ -1413,8 +1416,11 @@ OpenRouter model as one aggregated offering:
    pre-D64 pool order. A member pool keeps its explicit strategy order.
 5. **Stickiness tolerance.** `stickiness.price_tolerance_pct` (0-100, default
    5) keeps a session on its pinned provider while it costs no more than that
-   much over the cheapest ready candidate; a bigger gap moves the session and
-   rewrites the pin (the decision records `replaced_why: "price_moved"`).
+   much over the cheapest ready provider **of the same model**, ignoring
+   providers excluded by the routing filters. A cheaper provider of a
+   *different* model never moves the pin — that is what lets a `sort = quality`
+   pool stay on its chosen model. A bigger gap moves the session and rewrites
+   the pin (the decision records `replaced_why: "price_moved"`).
 
 **Why:** without the provider pin, the price we score is not the price that
 runs — OpenRouter would pick a provider itself. Storing the fragment instead of
