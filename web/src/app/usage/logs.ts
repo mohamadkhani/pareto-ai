@@ -278,11 +278,6 @@ export class Logs {
     }
   }
 
-  /** True when settled usage exists for the entry. */
-  protected hasUsage(entry: RequestLogEntry): boolean {
-    return entry.cost_usd !== null || entry.input_tokens !== null || entry.output_tokens !== null;
-  }
-
   /**
    * True when the ledger booked an amount for the row and it is not a pre-send
    * refusal (D64). A refusal consumed nothing and reads '—' rather than a
