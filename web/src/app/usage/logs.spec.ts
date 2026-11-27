@@ -449,10 +449,60 @@ describe('Logs', () => {
 
     const cells = Array.from(root.querySelectorAll('td.col-tokens'));
     expect(cells).toHaveLength(2);
-    expect(cells[0]?.querySelector('.tokens-in')?.textContent?.trim()).toBe('100 in');
-    expect(cells[0]?.querySelector('.tokens-out')?.textContent?.trim()).toBe('50 out');
-    expect(cells[1]?.querySelector('.tokens-in')?.textContent?.trim()).toBe('—');
+    expect(cells[0]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('100 in');
+    expect(cells[0]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe(
+      '50 out',
+    );
+    expect(cells[1]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('—');
     expect(cells[1]?.querySelector('.tokens-out')).toBeNull();
+  });
+
+  it('graphs every metric against the largest value in its own column', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            latency_ms: 1_000,
+            cost_usd: 0.5,
+          }),
+          entry(1, {
+            input_tokens: 500,
+            output_tokens: 50,
+            latency_ms: 2_000,
+            cost_usd: 1,
+          }),
+          // A pre-send refusal consumed nothing: no cost bar, a dash for a value.
+          entry(2, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            cost_usd: 0,
+            input_tokens: null,
+            output_tokens: null,
+            latency_ms: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const widths = (selector: string): string[] =>
+      Array.from(root.querySelectorAll<HTMLElement>(selector)).map((fill) => fill.style.width);
+
+    expect(widths('td.col-latency .metric-fill')).toEqual(['50%', '100%']);
+    expect(widths('td.col-cost .metric-fill')).toEqual(['50%', '100%']);
+    expect(widths('td.col-tokens .tokens-in .metric-fill')).toEqual(['100%', '50%']);
+    expect(widths('td.col-tokens .tokens-out .metric-fill')).toEqual(['100%', '50%']);
+    // The refusal has no cost and no bars at all.
+    expect(root.querySelectorAll('td.col-cost .metric-track')).toHaveLength(2);
+    expect(root.querySelectorAll('td.col-cost')[2]?.textContent?.trim()).toBe('—');
+    // The bars are decorative; the number beside each one carries the fact.
+    expect(root.querySelector('td.col-latency .metric-track')?.getAttribute('aria-hidden')).toBe(
+      'true',
+    );
   });
 
   it('collapses the model cell when the request and the target agree', async () => {

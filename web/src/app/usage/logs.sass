@@ -28,19 +28,38 @@
   .credential-name
     display: block
     font-size: var(--text-small)
-.col-cost
-  white-space: nowrap
 /*
- * Tokens stack: input on the first line, output under it, like the model and
- * provider cells (D64).
+ * Metric graphs (D64): the Cost, Tokens and Latency columns print their number
+ * with a thin bar under it, filled in proportion to the largest value in the
+ * same column among the loaded rows — so a column can be scanned for the
+ * slowest or costliest request without reading every number. Each bar is
+ * decorative; the number above it carries the fact, hence `aria-hidden`.
  */
-.col-tokens
-  .tokens-in,
-  .tokens-out
-    display: block
-    white-space: nowrap
-  .tokens-out
-    font-size: var(--text-small)
+.metric
+  display: block
+  & + .metric
+    margin-top: var(--space-1)
+.metric-value
+  display: block
+  white-space: nowrap
+.metric-track
+  display: block
+  height: var(--space-1)
+  margin-top: var(--space-1)
+  overflow: hidden
+  border-radius: var(--radius-full)
+  background: var(--surface-sunken)
+.metric-fill
+  display: block
+  height: 100%
+  border-radius: inherit
+  background: var(--accent)
+/*
+ * Tokens stack: input on the first line, output under it in the small size,
+ * like the model and provider cells (D64).
+ */
+.col-tokens .tokens-out .metric-value
+  font-size: var(--text-small)
 /*
  * 402/429/403 rows are money events: the request never reached a provider.
  */

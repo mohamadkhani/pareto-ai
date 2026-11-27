@@ -143,14 +143,54 @@
                     —
                   }
                 </td>
-                <td class="col-cost">{{ costText(entry) }}</td>
+                <td class="col-cost">
+                  <span class="metric">
+                    <span class="metric-value">{{ costText(entry) }}</span>
+                    @if (hasCost(entry)) {
+                      <span class="metric-track" aria-hidden="true"
+                        ><span class="metric-fill" [style.width.%]="costPercent(entry)"></span
+                      ></span>
+                    }
+                  </span>
+                </td>
                 <td class="col-tokens">
-                  <span class="tokens-in">{{ inputTokensText(entry) }}</span>
+                  <span class="metric tokens-in">
+                    <span class="metric-value">{{ inputTokensText(entry) }}</span>
+                    @if (entry.input_tokens !== null) {
+                      <span class="metric-track" aria-hidden="true"
+                        ><span
+                          class="metric-fill"
+                          [style.width.%]="inputTokensPercent(entry)"
+                        ></span
+                      ></span>
+                    }
+                  </span>
                   @if (entry.input_tokens !== null || entry.output_tokens !== null) {
-                    <span class="tokens-out">{{ outputTokensText(entry) }}</span>
+                    <span class="metric tokens-out">
+                      <span class="metric-value">{{ outputTokensText(entry) }}</span>
+                      @if (entry.output_tokens !== null) {
+                        <span class="metric-track" aria-hidden="true"
+                          ><span
+                            class="metric-fill"
+                            [style.width.%]="outputTokensPercent(entry)"
+                          ></span
+                        ></span>
+                      }
+                    </span>
                   }
                 </td>
-                <td>{{ entry.latency_ms === null ? '—' : entry.latency_ms + ' ms' }}</td>
+                <td class="col-latency">
+                  <span class="metric">
+                    <span class="metric-value">{{
+                      entry.latency_ms === null ? '—' : entry.latency_ms + ' ms'
+                    }}</span>
+                    @if (entry.latency_ms !== null) {
+                      <span class="metric-track" aria-hidden="true"
+                        ><span class="metric-fill" [style.width.%]="latencyPercent(entry)"></span
+                      ></span>
+                    }
+                  </span>
+                </td>
                 <td class="actions">
                   <ui-button
                     size="sm"

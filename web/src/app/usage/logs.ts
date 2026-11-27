@@ -269,16 +269,67 @@ export class Logs {
   }
 
   /**
-   * Cost text for the row: a pre-send refusal (402/429/403) consumed nothing,
-   * so it reads '—' rather than a silent `$0.00`; otherwise the settled cost
-   * uses adaptive precision so sub-cent requests do not collapse to `$0.00`
-   * (D64). Unknown cost is '—' (decision D10).
+   * True when the ledger booked an amount for the row and it is not a pre-send
+   * refusal (D64). A refusal consumed nothing and reads '—' rather than a
+   * silent `$0.00`; an unpriced request booked no amount at all (D10), so both
+   * show a dash.
+   */
+  protected hasCost(entry: RequestLogEntry): boolean {
+    return !this.isMoneyEvent(entry) && entry.cost_usd !== null;
+  }
+
+  /**
+   * Cost text for the row: the settled amount with adaptive precision, so a
+   * sub-cent request does not collapse to `$0.00` (D64); '—' when there is no
+   * amount (refusal, unpriced).
    */
   protected costText(entry: RequestLogEntry): string {
-    if (this.isMoneyEvent(entry)) {
-      return '—';
+    return this.hasCost(entry) ? formatUsdPrecise(entry.cost_usd) : '—';
+  }
+
+  /**
+   * The largest value each graph column scales against, over the rows currently
+   * loaded (D64). Every metric column draws the same bar, so scaling each to its
+   * own column keeps one column's numbers comparable with each other — the
+   * question a scan of that column asks.
+   */
+  private readonly graphScale = computed(() => {
+    const rows = this.entries();
+    const largest = (pick: (entry: RequestLogEntry) => number | null): number =>
+      rows.reduce((value, entry) => Math.max(value, pick(entry) ?? 0), 0);
+    return {
+      inputTokens: largest((entry) => entry.input_tokens),
+      outputTokens: largest((entry) => entry.output_tokens),
+      latency: largest((entry) => entry.latency_ms),
+      cost: largest((entry) => (this.hasCost(entry) ? entry.cost_usd : null)),
+    };
+  });
+
+  /**
+   * One bar's fill, as a 0–100 share of the largest value in its column (D64).
+   * A missing value, a zero row, or an all-zero column fills nothing.
+   */
+  private percentOf(value: number | null, scale: number): number {
+    if (value === null || value <= 0 || scale <= 0) {
+      return 0;
     }
-    return this.hasUsage(entry) ? formatUsdPrecise(entry.cost_usd) : '—';
+    return Number(Math.min(100, (value / scale) * 100).toFixed(2));
+  }
+
+  protected inputTokensPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.input_tokens, this.graphScale().inputTokens);
+  }
+
+  protected outputTokensPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.output_tokens, this.graphScale().outputTokens);
+  }
+
+  protected latencyPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.latency_ms, this.graphScale().latency);
+  }
+
+  protected costPercent(entry: RequestLogEntry): number {
+    return this.percentOf(this.hasCost(entry) ? entry.cost_usd : null, this.graphScale().cost);
   }
 
   /**
