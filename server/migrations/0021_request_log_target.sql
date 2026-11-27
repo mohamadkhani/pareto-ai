@@ -11,9 +11,10 @@
 -- origin error's provider status and code.
 --
 -- All three columns are nullable; rows written before this migration read as
--- unknown. `credential_id` references the credential table the same way the
--- rest of the request-log columns reference their tables (ON DELETE SET NULL),
--- so a deleted credential never blocks settlement and never cascades.
+-- unknown. `credential_id` is a real foreign key (the other id columns on this
+-- table — `resolved_offering_id`, `user_id`, `api_key_id` — are plain TEXT with
+-- no reference); ON DELETE SET NULL means a deleted credential neither blocks
+-- settlement nor cascades.
 
 ALTER TABLE request_logs ADD COLUMN credential_id TEXT REFERENCES provider_credentials (id) ON DELETE SET NULL;
 

@@ -263,7 +263,16 @@
     } @else if (loading() && rows().length === 0) {
       <p class="empty-note">Loading…</p>
     } @else if (rows().length === 0) {
-      @if (filterActive()) {
+      @if (exactModelId() !== '') {
+        <ui-empty
+          title="No model matches this link"
+          description="The linked model is not in the catalog any more. Clear the link to see the full list."
+        >
+          <span ui-empty-action>
+            <ui-button size="sm" (clicked)="exitExactModelView()">Clear model filter</ui-button>
+          </span>
+        </ui-empty>
+      } @else if (filterActive()) {
         <ui-empty
           title="No models match “{{ searchTerm() }}”"
           [description]="

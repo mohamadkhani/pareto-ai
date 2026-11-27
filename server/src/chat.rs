@@ -3606,10 +3606,17 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         None => None,
     };
     // The final attempt's identity and origin-error fields are copied onto
-    // the durable request row (D64): the credential that served the
-    // request, and the provider's own HTTP status / error code. `samples` is
-    // in attempt order, so the last one is the final attempt.
-    let last_attempt = settlement.decision.samples.last();
+    // the durable request row (D64): the credential that served the request,
+    // and the provider's own HTTP status / error code. Attribute them to the
+    // offering being settled: two rare paths (a streaming `Failed` whose
+    // candidate has no credential, and `Canceled`) push no final sample, so
+    // `last()` alone could pair this offering with an earlier attempt's
+    // credential/status. Fall back to the last sample for that offering; when
+    // no sample matches, all three stay null.
+    let last_attempt =
+        settlement.decision.samples.iter().rev().find(|attempt| {
+            settlement.offering_id.as_deref() == Some(attempt.offering_id.as_str())
+        });
     let served_credential_id = last_attempt.and_then(|attempt| attempt.credential_id.clone());
     let upstream_status = last_attempt.and_then(|attempt| attempt.upstream_status);
     let provider_error_code = last_attempt.and_then(|attempt| attempt.provider_error_code.clone());
@@ -4899,7 +4906,8 @@ mod tests {
         let model_id = model(&s.app, &s.uid, "m", None, None).await;
         let (p1, cred1) =
             provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
-        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let (p2, cred2) =
+            provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
         let off1 = offering(
             &s.app,
             &s.uid,
@@ -4944,6 +4952,11 @@ mod tests {
 
         let log = &log_rows(&s.app).await[0];
         assert_eq!(log.resolved_offering_id.as_deref(), Some(off2.as_str()));
+        // The durable credential belongs to the offering that served (the
+        // second attempt), and a request that succeeded carries no origin error.
+        assert_eq!(log.credential_id.as_deref(), Some(cred2.as_str()));
+        assert!(log.upstream_status.is_none());
+        assert!(log.provider_error_code.is_none());
         let decision = decision_of(log);
         assert_eq!(decision["candidates"][0]["id"], off1);
         assert_eq!(decision["candidates"][0]["outcome"], "failed");
@@ -6646,6 +6659,15 @@ mod tests {
         assert!((usage[0].cost_usd.expect("priced cost") - actual).abs() < 1e-12);
         assert_eq!(usage[1].cost_usd, Some(0.0), "a 402 consumes nothing");
         assert_eq!(usage[1].status, Some(402));
+
+        // The refusal never reached an upstream, so its durable row carries
+        // none of the target identity or origin-error fields (D64).
+        let logs = log_rows(&s.app).await;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[1].status, Some(402));
+        assert!(logs[1].credential_id.is_none());
+        assert!(logs[1].upstream_status.is_none());
+        assert!(logs[1].provider_error_code.is_none());
 
         let (used,): (f64,) = sqlx::query_as("SELECT used_usd FROM budgets WHERE user_id = ?")
             .bind(&s.uid)

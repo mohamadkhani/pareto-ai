@@ -42,8 +42,10 @@ export function formatUsd(value: number | null): string {
  * USD amount with adaptive precision for per-request cost, where a two-decimal
  * formatter collapses almost every request to `$0.00`. Whole-dollar amounts
  * keep two decimals, cents keep four, and smaller amounts keep up to six
- * significant decimals — mirroring `formatPricePerM`, so the console has one
- * idea of "small money". Unknown stays '—', never `$0`.
+ * decimal places with trailing zeros trimmed, so `0.000123456` prints
+ * `$0.000123` and a value that rounds to zero at six decimals prints `$0`) —
+ * mirroring `formatPricePerM`, so the console has one idea of "small money".
+ * Unknown stays '—', never `$0`.
  */
 export function formatUsdPrecise(value: number | null): string {
   if (value === null) {

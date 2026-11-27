@@ -1,3 +1,8 @@
-<button class="link-button" type="button" (click)="clicked.emit($event)">
+<button
+  class="link-button"
+  type="button"
+  [attr.aria-label]="label() || null"
+  (click)="clicked.emit($event)"
+>
   <ng-content />
 </button>

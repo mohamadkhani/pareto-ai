@@ -365,16 +365,17 @@ export class Logs {
     return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
   }
 
-  /** Input tokens on the first line, output tokens under it (D64). */
+  /**
+   * Input tokens on the first line, output tokens under it (D64). A line whose
+   * own count is unknown shows a dash: a missing count is never a measured zero.
+   * The second line renders only when at least one count exists (the template).
+   */
   protected inputTokensText(entry: RequestLogEntry): string {
-    if (entry.input_tokens === null && entry.output_tokens === null) {
-      return '—';
-    }
-    return `${entry.input_tokens ?? 0} in`;
+    return entry.input_tokens === null ? '—' : `${entry.input_tokens} in`;
   }
 
   protected outputTokensText(entry: RequestLogEntry): string {
-    return `${entry.output_tokens ?? 0} out`;
+    return entry.output_tokens === null ? '—' : `${entry.output_tokens} out`;
   }
 
   protected userName(id: string | null): string {

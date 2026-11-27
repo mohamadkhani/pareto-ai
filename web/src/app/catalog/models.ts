@@ -814,8 +814,10 @@ export class Models {
     }
     // Any other parameter write is the operator changing a filter, which ends
     // the exact-model view (D64): from there the model id would silently
-    // narrow a new search to nothing.
-    if (key !== 'model' && this.exactModelId() !== '') {
+    // narrow a new search to nothing. `mix` is exempt: switching the price
+    // basis is a column display choice, not a search or a cap, so the exact
+    // link survives it.
+    if (key !== 'model' && key !== 'mix' && this.exactModelId() !== '') {
       params.delete('model');
       this.exactModelId.set('');
     }
@@ -824,10 +826,10 @@ export class Models {
 
   /**
    * Ends the exact-model view (D64): the operator changed a control that does
-   * not live in the URL (the show-disabled switch), so the deep link no longer
-   * describes what is on screen.
+   * not live in the URL (the show-disabled switch, or closing the detail
+   * dialog), so the deep link no longer describes what is on screen.
    */
-  private exitExactModelView(): void {
+  protected exitExactModelView(): void {
     if (this.exactModelId() !== '') {
       this.exactModelId.set('');
       this.writeUrlParam('model', null);
@@ -1365,6 +1367,9 @@ export class Models {
     this.detailOpen.set(false);
     this.detailKey.set(null);
     this.removeOfferingOpen.set(false);
+    // Closing the dialog leaves the exact-model view (D64): otherwise a later
+    // Refresh or profile reload would reopen it with no way to keep it closed.
+    this.exitExactModelView();
   }
 
   /**

@@ -489,6 +489,35 @@ mod tests {
         .execute(&app.state.pool)
         .await
         .expect("log row");
+        // A second provider with its own offering and an identically-classed
+        // failure: dropping the provider clause would return two rows.
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url) VALUES ('p2', 'P2', 'https://p2/v1')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("provider 2");
+        sqlx::query("INSERT INTO models (id, canonical_name) VALUES ('m2', 'm2')")
+            .execute(&app.state.pool)
+            .await
+            .expect("model 2");
+        sqlx::query(
+            "INSERT INTO offerings (id, provider_id, model_id, upstream_model_id) \
+             VALUES ('o2', 'p2', 'm2', 'm2-upstream')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("offering 2");
+        sqlx::query(
+            "INSERT INTO request_logs \
+             (request_id, occurred_at, method, path, resolved_offering_id, status, error_class, \
+              error_detail) \
+             VALUES ('r2', '2026-11-19T09:00:00.000Z', 'POST', '/v1/chat/completions', 'o2', \
+                     502, 'upstream_error', 'the other provider exploded')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("second log row");
         for (id, outcome, status, code, detail) in [
             (
                 1i64,
@@ -543,6 +572,19 @@ mod tests {
         // The origin error's provider status and code are durable (D64).
         assert_eq!(entries[0]["upstream_status"], 502);
         assert_eq!(entries[0]["provider_error_code"], "bad_gateway");
+
+        // The provider clause really excludes the other provider's row: with no
+        // filter both rows come back, newest first.
+        let unfiltered = send(
+            router.clone(),
+            api_request(Method::GET, "/api/logs", None, Some(&admin_cookie), None),
+        )
+        .await;
+        assert_eq!(unfiltered.status, StatusCode::OK, "{}", unfiltered.body);
+        let all = unfiltered.body["entries"].as_array().expect("entries");
+        assert_eq!(all.len(), 2, "{}", unfiltered.body);
+        assert_eq!(all[0]["request_id"], "r1");
+        assert_eq!(all[1]["request_id"], "r2");
 
         let wrong_status = send(
             router.clone(),

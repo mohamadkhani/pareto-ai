@@ -457,6 +457,35 @@ describe('Logs', () => {
     expect(cells[1]?.querySelector('.tokens-out')).toBeNull();
   });
 
+  it('shows a dash for an unknown count instead of a measured zero', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, { input_tokens: 1200, output_tokens: null }),
+          entry(1, { input_tokens: null, output_tokens: 300 }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-tokens'));
+    // Input known, output unknown: the missing count never reads as 0.
+    expect(cells[0]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe(
+      '1200 in',
+    );
+    expect(cells[0]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe('—');
+    // The output line has no bar while its own count is unknown.
+    expect(cells[0]?.querySelector('.tokens-out .metric-track')).toBeNull();
+    // Output known, input unknown: the same rule, mirrored.
+    expect(cells[1]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('—');
+    expect(cells[1]?.querySelector('.tokens-in .metric-track')).toBeNull();
+    expect(cells[1]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe(
+      '300 out',
+    );
+  });
+
   it('graphs every metric against the largest value in its own column', async () => {
     fetchMock.respond(
       jsonResponse(200, {

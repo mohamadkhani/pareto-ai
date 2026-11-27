@@ -670,6 +670,69 @@ describe('Models', () => {
     expect(TestBed.inject(Location).path()).not.toContain('model=');
   });
 
+  it('escapes a stale ?model= link with an empty state that restores the list', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, null, null, 'gone');
+    const root = fixture.nativeElement as HTMLElement;
+
+    // The id is not in the catalog: the exact view is empty and no dialog opens.
+    expect(root.textContent).toContain('No model matches this link');
+    expect(detailDialog(root).querySelector('dialog')?.open).toBe(false);
+
+    buttonByText(root, 'Clear model filter').click();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    expect(TestBed.inject(Location).path()).not.toContain('model=');
+  });
+
+  it('leaves the exact-model view when the detail dialog closes', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, null, null, 'm1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(TestBed.inject(Location).path()).toContain('model=m1');
+
+    buttonByText(detailDialog(root), 'Close').click();
+    fixture.detectChanges();
+
+    expect(TestBed.inject(Location).path()).not.toContain('model=');
+  });
+
+  it('keeps the exact-model view when the price basis changes', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, null, null, 'm1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    fetchMock.respond(jsonResponse(200, allOverview));
+    const basis = root.querySelector<HTMLSelectElement>('#models-price-basis');
+    if (basis === null) {
+      throw new Error('no price basis select');
+    }
+    basis.value = 'components';
+    basis.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const path = TestBed.inject(Location).path();
+    expect(path).toContain('mix=components');
+    expect(path).toContain('model=m1');
+  });
+
+  it('leaves the exact-model view when the show-disabled switch changes', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create('admin', null, null, null, null, null, 'm1');
+    const root = fixture.nativeElement as HTMLElement;
+
+    expect(TestBed.inject(Location).path()).toContain('model=m1');
+
+    showDisabledSwitch(root).click();
+    fixture.detectChanges();
+
+    expect(TestBed.inject(Location).path()).not.toContain('model=');
+    expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+  });
+
   it('starts from ?mix= when the URL names a profile, and falls back on an unknown one', async () => {
     queueReload(fetchMock, allOverview, { profiles: [codeAgent, chatProfile] });
     const fixture = await create('admin', null, 'mix-chat');

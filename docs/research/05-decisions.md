@@ -1376,9 +1376,9 @@ so the console never resolves catalog GUIDs itself:
 
 - Migration `0021_request_log_target.sql` adds three nullable columns:
   `credential_id`, `upstream_status`, `provider_error_code`, written by settle
-  from the request's **final attempt** (`decision.samples.last()`).
-  `credential_id` references `provider_credentials` with `ON DELETE SET NULL`.
-  No backfill: rows written earlier read as unknown.
+  from the settled offering's final attempt (the last `decision.samples` entry
+  for that offering). `credential_id` references `provider_credentials` with
+  `ON DELETE SET NULL`. No backfill: rows written earlier read as unknown.
 - `list_request_logs` joins `offerings → models, providers` and
   `provider_credentials`, so each entry carries `provider_id`, `provider_name`,
   `model_id`, `model_canonical_name`, `model_upstream_model_id`, `credential_id`
@@ -1403,8 +1403,13 @@ so the console never resolves catalog GUIDs itself:
   Credential as separate columns: there each attempt's target genuinely is a
   different fact.
 - Per-request cost uses adaptive precision (two decimals at `≥ $1`, four at
-  `≥ $0.01`, up to six significant decimals below) so a sub-cent request no
-  longer renders as `$0.00`; a pre-send refusal shows `—`, never a silent zero.
+  `≥ $0.01`, six decimal places below with trailing zeros trimmed: `0.000123456`
+  prints `$0.000123`, and a value that rounds to zero at six decimals prints
+  `$0`) so a sub-cent request no longer renders as `$0.00`; a pre-send refusal
+  shows `—`, never a silent zero.
+- The Cost, Tokens and Latency columns print their number with a thin decorative
+  (`aria-hidden`) bar filled in proportion to the largest value in the same
+  column among the loaded rows, and there is no text colouring.
 - Expanded details show **all** raw identifiers in a collapsed block, and an
   **Origin error** block (class, provider status, provider code, bounded redacted
   provider message) when the request itself failed.

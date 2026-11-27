@@ -107,9 +107,11 @@
                 </td>
                 <td class="col-access">
                   @if (entry.provider_name) {
-                    <ui-link-button (clicked)="filterByProvider(entry.provider_id)">{{
-                      entry.provider_name
-                    }}</ui-link-button>
+                    <ui-link-button
+                      [label]="'Filter logs by ' + entry.provider_name"
+                      (clicked)="filterByProvider(entry.provider_id)"
+                      >{{ entry.provider_name }}</ui-link-button
+                    >
                     @if (entry.credential_name) {
                       <span class="credential-name">{{ entry.credential_name }}</span>
                     }
