@@ -1433,6 +1433,35 @@ or response body is stored: the "origin error" is the bounded, redacted provider
 message D49 already captures, surfaced at request level with its status and code
 (D11 stays in force for bodies).
 
+### D65. The Models page's active view keys on routability, not the model flag alone
+
+**Decision (2026-11-27):** the default ("active only") view of the Models page
+shows a model only when routing would actually consider at least one of its
+offerings — the offering, its provider, and the model are all enabled (D61). In
+All-providers scope this is `routable_offerings > 0`; in provider scope it is
+the offering's own `enabled` and the row's `provider_enabled` together. The
+overview gains `AllModelsRow.routable_offerings` and
+`ProviderModelRow.provider_enabled`, both computed in the one joined query so
+the console keeps its single fetch.
+
+**Why:** D61 made `models.enabled` the kill switch but left the page deciding
+"active" from `model_enabled && offerings_count > 0`. That reported a model as
+active whenever it still had offerings, even after an operator disabled every
+one of them, or when its only providers were themselves disabled; routing
+skips both cases, so the active list showed models no request could reach. The
+same gap let an enabled offering on a disabled provider appear as active in
+provider scope, because the row never saw the provider's flag.
+
+**Consequences, accepted deliberately:** a model with `model_enabled` true but
+no routable offering now hides under **Show disabled**, labelled with the hidden
+count, rather than in the active list; the operator turns one offering (or its
+provider) back on to bring it back. The status badge in provider scope reads
+`provider disabled` and its tooltip names the provider switch, and the detail
+dialog explains the same. `model_enabled` keeps its D61 meaning — it is still
+the authority that overrides per-offering flags — and `routable_offerings`
+never rewrites any flag; it is a read-only count for the view. Two wire fields
+are added (`routable_offerings`, `provider_enabled`), an additive change.
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

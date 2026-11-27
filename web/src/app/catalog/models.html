@@ -618,6 +618,11 @@
               This model is disabled for all providers. Select All providers and enable the model
               before enabling this offering.
             </ui-banner>
+          } @else if (offeringProviderDisabled(row)) {
+            <ui-banner tone="warning">
+              This provider is disabled, so none of its offerings are routable. Enable the provider
+              to route this offering.
+            </ui-banner>
           }
           <dl class="facts">
             <div>

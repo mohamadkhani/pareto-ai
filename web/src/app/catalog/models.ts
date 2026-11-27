@@ -1005,15 +1005,18 @@ export class Models {
   }
 
   /**
-   * The row's effective state, matching the success badge: a globally disabled
-   * model overrides the offering's own flag, and the All scope also needs at
-   * least one offering to count as enabled.
+   * The row's effective state, matching the success badge: routing considers a
+   * row only when the model, the provider, and the offering are all enabled
+   * (D61). In All-providers scope a model is active only while at least one of
+   * its offerings is routable — a model whose offerings are all disabled, or
+   * whose only providers are disabled, is not active even though
+   * `model_enabled` stays true.
    */
   protected rowEnabled(row: OverviewRow): boolean {
     if (isProviderRow(row)) {
-      return row.enabled && row.model_enabled;
+      return row.enabled && row.model_enabled && row.provider_enabled;
     }
-    return row.model_enabled && row.offerings_count > 0;
+    return row.model_enabled && row.routable_offerings > 0;
   }
 
   protected statusTone(row: OverviewRow): BadgeTone {
@@ -1025,16 +1028,23 @@ export class Models {
       return 'disabled (all)';
     }
     if (isProviderRow(row)) {
+      if (!row.provider_enabled) {
+        return row.enabled ? 'provider disabled' : 'disabled';
+      }
       return row.enabled ? 'enabled' : 'disabled';
     }
     return `${row.offerings_count} offering${row.offerings_count === 1 ? '' : 's'}`;
   }
 
-  /** Tooltip for a status badge whose model is disabled for every provider. */
+  /** Tooltip for a status badge explaining why a row is inactive. */
   protected statusTitle(row: OverviewRow): string | null {
-    return row.model_enabled
-      ? null
-      : 'This model is disabled for all providers. Enable it with All providers selected.';
+    if (!row.model_enabled) {
+      return 'This model is disabled for all providers. Enable it with All providers selected.';
+    }
+    if (isProviderRow(row) && !row.provider_enabled) {
+      return 'This provider is disabled, so none of its offerings are routable. Enable the provider to route them.';
+    }
+    return null;
   }
 
   protected rowUnpriced(row: OverviewRow): boolean {
@@ -1088,6 +1098,11 @@ export class Models {
     // Effective state: a model disabled for all providers overrides the
     // offering's own flag, which is kept for when the model is enabled again.
     return isProviderRow(row) && row.enabled && row.model_enabled;
+  }
+
+  /** True when a provider-scoped row's provider is disabled. */
+  protected offeringProviderDisabled(row: OverviewRow): boolean {
+    return isProviderRow(row) && !row.provider_enabled;
   }
 
   /** The per-provider switch is blocked while the model is disabled everywhere. */
