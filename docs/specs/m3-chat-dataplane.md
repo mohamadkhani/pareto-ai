@@ -51,6 +51,12 @@ request_logs(request_id TEXT PK, client_request_id TEXT, occurred_at TEXT NOT
           CHECK (has_request_body IN (0,1)))
 ```
 
+Amended by `0017_upstream_errors.sql` (`error_detail`) and
+`0021_request_log_target.sql` (`credential_id`, `upstream_status`,
+`provider_error_code`); see D49 and D64. `GET /api/logs` joins the offering's
+provider and model plus the credential, so the viewer shows names rather than
+offering/credential GUIDs.
+
 - `request_id` is **server-generated** and is the ledger key; the client's
   optional `x-request-id` is preserved in `client_request_id` (amended after
   review blocker B1, 2026-11-16: a client-controlled PK let a duplicate id

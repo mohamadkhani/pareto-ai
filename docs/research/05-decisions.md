@@ -1368,6 +1368,71 @@ prompt still succeeds while a large-context member is eligible. `pool = "all"`
 combos stay null because their candidate set is the whole catalog and a minimum
 there would advertise the smallest catalog model's window.
 
+### D64. The request log names its real target, and its origin error is durable
+
+**Decision (2026-11-26):** `request_logs` records the identity of the target that
+actually served a request, and `GET /api/logs` returns it with the resolved names,
+so the console never resolves catalog GUIDs itself:
+
+- Migration `0021_request_log_target.sql` adds three nullable columns:
+  `credential_id`, `upstream_status`, `provider_error_code`, written by settle
+  from the settled offering's final attempt (the last `decision.samples` entry
+  for that offering). `credential_id` references `provider_credentials` with
+  `ON DELETE SET NULL`. No backfill: rows written earlier read as unknown.
+- `list_request_logs` joins `offerings → models, providers` and
+  `provider_credentials`, so each entry carries `provider_id`, `provider_name`,
+  `model_id`, `model_canonical_name`, `model_upstream_model_id`, `credential_id`
+  and `credential_name`. `list_attempts` returns the same shape per attempt. The
+  raw offering/credential ids stay on the wire for filters, links, and debugging.
+- The console (`/logs`) drops the offering GUID column and replaces it with one
+  **Provider / credential** column: the provider's name (which doubles as the
+  control that narrows the log to that provider) with the serving credential's
+  label on a second line. The provider control is a new link-style primitive,
+  `<ui-link-button>` (documented on `/styleguide`, D28): it inherits the
+  surrounding font and line instead of carrying a `ui-button`'s control height
+  and padding, so both lines share one left edge and one text size. A request
+  that has a provider but no credential — one settled before the migration —
+  shows the provider alone, and a row with neither shows a dash. Two facts with
+  different owners therefore share one cell without a second 36-character
+  column. The token counts stack the same way: input tokens on the first line,
+  output under it. The model cell shows the requested
+  name plus the resolved `canonical_name · upstream_model_id` when they differ,
+  and links to `/models?model=<id>`, an **exclusive** filter on the Models page
+  that ignores and clears the search and the price/quality caps and opens the
+  model's detail dialog. The per-attempt table keeps Provider, Model and
+  Credential as separate columns: there each attempt's target genuinely is a
+  different fact.
+- Per-request cost uses adaptive precision (two decimals at `≥ $1`, four at
+  `≥ $0.01`, six decimal places below with trailing zeros trimmed: `0.000123456`
+  prints `$0.000123`, and a value that rounds to zero at six decimals prints
+  `$0`) so a sub-cent request no longer renders as `$0.00`; a pre-send refusal
+  shows `—`, never a silent zero.
+- The Cost, Tokens and Latency columns print their number with a thin decorative
+  (`aria-hidden`) bar filled in proportion to the largest value in the same
+  column among the loaded rows, and there is no text colouring.
+- Expanded details show **all** raw identifiers in a collapsed block, and an
+  **Origin error** block (class, provider status, provider code, bounded redacted
+  provider message) whenever the row carries a provider-side origin — the
+  provider's own HTTP status, its error code, or its bounded redacted message.
+  The block stays closed for the gateway's own pre-send refusals and rejections
+  (budget, token cap, access, invalid body, unknown model, context overflow, key
+  TPM), whose origin is the gateway, not a provider.
+
+**Why:** the request log is the operator's only window into a bad request, and a
+row that showed a 36-character offering GUID and two-decimal cost told them
+neither what was actually called nor what it cost. The credential and the
+provider's own status/code existed only in `telemetry_attempts`, which keeps the
+newest 200 rows per offering and prunes the rest (D49), so the log lost the
+identity of anything older than that window.
+
+**Consequences:** an additive schema change and an additive wire change; every
+existing field stays, so `/api/logs` clients other than the console are
+unaffected. The durable `credential_id` is the *final* credential — a request
+that failed over tried several, and those remain visible per attempt. No request
+or response body is stored: the "origin error" is the bounded, redacted provider
+message D49 already captures, surfaced at request level with its status and code
+(D11 stays in force for bodies).
+
 ## Open questions
 
 1. **Where does the money actually come from?** Team-paid central account, or

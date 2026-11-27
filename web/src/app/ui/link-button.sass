@@ -1,0 +1,22 @@
+/*
+ * A text action: inline with the surrounding text, same font and size, no box.
+ * The accent colour and underline are set below rather than inherited from the
+ * global `a` rule (this is a `<button>`), so it reads exactly like a link while
+ * staying a real `<button>` for keyboard and screen readers.
+ */
+:host
+  display: inline
+.link-button
+  padding: 0
+  border: 0
+  background: none
+  color: var(--accent)
+  font: inherit
+  text-decoration: underline
+  text-underline-offset: 0.15em
+  cursor: pointer
+.link-button:hover
+  color: var(--accent-hover)
+.link-button:focus-visible
+  outline: var(--focus-ring-width) solid var(--focus-ring)
+  outline-offset: var(--focus-ring-offset)

@@ -39,6 +39,30 @@ export function formatUsd(value: number | null): string {
 }
 
 /**
+ * USD amount with adaptive precision for per-request cost, where a two-decimal
+ * formatter collapses almost every request to `$0.00`. Whole-dollar amounts
+ * keep two decimals, cents keep four, and smaller amounts keep up to six
+ * decimal places with trailing zeros trimmed, so `0.000123456` prints
+ * `$0.000123` and a value that rounds to zero at six decimals prints `$0`) —
+ * mirroring `formatPricePerM`, so the console has one idea of "small money".
+ * Unknown stays '—', never `$0`.
+ */
+export function formatUsdPrecise(value: number | null): string {
+  if (value === null) {
+    return '—';
+  }
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1) {
+    return `$${value.toFixed(2)}`;
+  }
+  if (magnitude >= 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  const trimmed = value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+  return `$${trimmed}`;
+}
+
+/**
  * USD per 1M tokens for the models table. Exact whole-cent values keep two
  * decimals; sub-cent prices keep up to six significant decimals so a real
  * price never collapses to `$0.00`. Unknown is always '—', never `$0`.

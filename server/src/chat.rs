@@ -3562,6 +3562,21 @@ fn resolve_usage(settlement: &Settlement) -> (Option<Usage>, bool) {
     }
 }
 
+/// The sample a settled request attributes its durable fields to: the last
+/// attempt of the offering being settled, or `None` when that offering pushed
+/// no sample (D64). Taking the last sample of all could pair this offering with
+/// another attempt's credential.
+fn settled_sample<'a>(
+    samples: &'a [telemetry::AttemptSample],
+    offering_id: Option<&str>,
+) -> Option<&'a telemetry::AttemptSample> {
+    let offering_id = offering_id?;
+    samples
+        .iter()
+        .rev()
+        .find(|attempt| attempt.offering_id == offering_id)
+}
+
 /// Writes the `usage_events` + `request_logs` pair, one `telemetry_attempts`
 /// sample per classified attempt (decision D26), settles the request's
 /// reservation (budgets and token caps, decision D7), and books the
@@ -3605,6 +3620,21 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         },
         None => None,
     };
+    // The final attempt's identity and origin-error fields are copied onto
+    // the durable request row (D64): the credential that served the request,
+    // and the provider's own HTTP status / error code. Attribute them to the
+    // offering being settled: two rare paths (a streaming `Failed` whose
+    // candidate has no credential, and `Canceled`) push no final sample, so
+    // `last()` alone could pair this offering with an earlier attempt's
+    // credential/status. Fall back to the last sample for that offering; when
+    // no sample matches, all three stay null.
+    let last_attempt = settled_sample(
+        &settlement.decision.samples,
+        settlement.offering_id.as_deref(),
+    );
+    let served_credential_id = last_attempt.and_then(|attempt| attempt.credential_id.clone());
+    let upstream_status = last_attempt.and_then(|attempt| attempt.upstream_status);
+    let provider_error_code = last_attempt.and_then(|attempt| attempt.provider_error_code.clone());
     let cost = money::compute_cost(price.as_ref(), usage.as_ref());
     let tokens = usage.as_ref().map(money::total_tokens).unwrap_or(0);
     let started_at = chrono::DateTime::parse_from_rfc3339(&settlement.meta.started_at)
@@ -3662,8 +3692,9 @@ async fn settle(state: &AppState, settlement: &Settlement) {
         "INSERT INTO request_logs \
          (request_id, client_request_id, occurred_at, method, path, requested_model, \
           resolved_offering_id, decision_json, status, error_class, bytes_in, bytes_out, user_id, \
-          api_key_id, has_request_body, error_detail) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          api_key_id, has_request_body, error_detail, credential_id, upstream_status, \
+          provider_error_code) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&settlement.meta.request_id)
     .bind(&settlement.meta.client_request_id)
@@ -3681,6 +3712,9 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     .bind(&api_key_id)
     .bind(i64::from(settlement.has_request_body))
     .bind(&settlement.error_detail)
+    .bind(&served_credential_id)
+    .bind(upstream_status)
+    .bind(&provider_error_code)
     .execute(&mut *tx)
     .await;
 
@@ -4261,6 +4295,10 @@ mod tests {
         bytes_in: Option<i64>,
         bytes_out: Option<i64>,
         has_request_body: i64,
+        /// The credential that served the request, durable on the row (D64).
+        credential_id: Option<String>,
+        upstream_status: Option<i64>,
+        provider_error_code: Option<String>,
     }
 
     async fn usage_rows(app: &TestApp) -> Vec<UsageRow> {
@@ -4278,7 +4316,8 @@ mod tests {
     async fn log_rows(app: &TestApp) -> Vec<LogRow> {
         sqlx::query_as::<_, LogRow>(
             "SELECT request_id, client_request_id, requested_model, resolved_offering_id, \
-             decision_json, status, error_class, bytes_in, bytes_out, has_request_body \
+             decision_json, status, error_class, bytes_in, bytes_out, has_request_body, \
+             credential_id, upstream_status, provider_error_code \
              FROM request_logs ORDER BY rowid",
         )
         .fetch_all(&app.state.pool)
@@ -4416,6 +4455,14 @@ mod tests {
         assert_eq!(log.bytes_in, Some(body.to_string().len() as i64));
         assert!(log.bytes_out.unwrap() > 0);
         assert_eq!(log.has_request_body, 1);
+        // The serving credential is durable on the request row (D64); a
+        // success has no origin error to record.
+        assert!(
+            log.credential_id.is_some(),
+            "the serving credential is recorded"
+        );
+        assert!(log.upstream_status.is_none());
+        assert!(log.provider_error_code.is_none());
 
         let decision = decision_of(log);
         let candidates = decision["candidates"].as_array().expect("candidates");
@@ -4874,7 +4921,8 @@ mod tests {
         let model_id = model(&s.app, &s.uid, "m", None, None).await;
         let (p1, cred1) =
             provider_with_credential(&s.app, &s.uid, "p1", &stub.base_url, None).await;
-        let (p2, _) = provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
+        let (p2, cred2) =
+            provider_with_credential(&s.app, &s.uid, "p2", &stub.base_url, None).await;
         let off1 = offering(
             &s.app,
             &s.uid,
@@ -4919,6 +4967,11 @@ mod tests {
 
         let log = &log_rows(&s.app).await[0];
         assert_eq!(log.resolved_offering_id.as_deref(), Some(off2.as_str()));
+        // The durable credential belongs to the offering that served (the
+        // second attempt), and a request that succeeded carries no origin error.
+        assert_eq!(log.credential_id.as_deref(), Some(cred2.as_str()));
+        assert!(log.upstream_status.is_none());
+        assert!(log.provider_error_code.is_none());
         let decision = decision_of(log);
         assert_eq!(decision["candidates"][0]["id"], off1);
         assert_eq!(decision["candidates"][0]["outcome"], "failed");
@@ -5811,6 +5864,14 @@ mod tests {
         let row = &usage_rows(&s.app).await[0];
         assert_eq!(row.error_class.as_deref(), Some("upstream_error"));
         assert_eq!(row.status, Some(502));
+
+        // The origin error's provider status is durable on the request row,
+        // together with the credential that produced it (D64).
+        let log = &log_rows(&s.app).await[0];
+        assert_eq!(log.error_class.as_deref(), Some("upstream_error"));
+        assert!(log.credential_id.is_some());
+        assert_eq!(log.upstream_status, Some(500));
+        assert_eq!(log.provider_error_code, None);
     }
 
     // -----------------------------------------------------------------------
@@ -6319,6 +6380,44 @@ mod tests {
     // Pure pipeline units
     // -----------------------------------------------------------------------
 
+    /// D64: the durable credential/status/code come from the last attempt of
+    /// the offering being settled, never from another attempt's last sample.
+    #[test]
+    fn settled_sample_follows_the_offering_being_settled() {
+        let sample = |offering: &str, credential: &str| telemetry::AttemptSample {
+            offering_id: offering.to_string(),
+            credential_id: Some(credential.to_string()),
+            outcome: None,
+            latency_ms: None,
+            ttft_ms: None,
+            output_tokens: None,
+            upstream_status: None,
+            provider_error_code: None,
+            error_detail: None,
+        };
+
+        // (a) The settled offering pushed samples: its last one is chosen, and
+        // a later sample for the same offering wins over an earlier one.
+        let samples = vec![
+            sample("off2", "c2a"),
+            sample("off1", "c1"),
+            sample("off2", "c2b"),
+        ];
+        assert_eq!(
+            settled_sample(&samples, Some("off2")).and_then(|s| s.credential_id.as_deref()),
+            Some("c2b"),
+        );
+
+        // (b) Samples exist, but only for a different offering: no sample. The
+        // old `samples.last()` would wrongly return off1's credential here.
+        let other = vec![sample("off1", "c1"), sample("off1", "c1b")];
+        assert!(settled_sample(&other, Some("off2")).is_none());
+
+        // (c) Nothing settled, or no samples at all.
+        assert!(settled_sample(&[], Some("off1")).is_none());
+        assert!(settled_sample(&other, None).is_none());
+    }
+
     #[test]
     fn parse_request_enforces_the_documented_limits() {
         let ok = parse_request(
@@ -6613,6 +6712,15 @@ mod tests {
         assert!((usage[0].cost_usd.expect("priced cost") - actual).abs() < 1e-12);
         assert_eq!(usage[1].cost_usd, Some(0.0), "a 402 consumes nothing");
         assert_eq!(usage[1].status, Some(402));
+
+        // The refusal never reached an upstream, so its durable row carries
+        // none of the target identity or origin-error fields (D64).
+        let logs = log_rows(&s.app).await;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[1].status, Some(402));
+        assert!(logs[1].credential_id.is_none());
+        assert!(logs[1].upstream_status.is_none());
+        assert!(logs[1].provider_error_code.is_none());
 
         let (used,): (f64,) = sqlx::query_as("SELECT used_usd FROM budgets WHERE user_id = ?")
             .bind(&s.uid)

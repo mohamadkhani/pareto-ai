@@ -4,6 +4,7 @@ import {
   formatPricePerM,
   formatTime,
   formatUsd,
+  formatUsdPrecise,
   joinTags,
   parseTags,
 } from './format';
@@ -24,6 +25,16 @@ describe('catalog format helpers', () => {
 
   it('formatUsd renders two decimal places', () => {
     expect(formatUsd(12.5)).toBe('$12.50');
+  });
+
+  it('formatUsdPrecise adapts precision and keeps unknown as missing', () => {
+    expect(formatUsdPrecise(null)).toBe('—');
+    expect(formatUsdPrecise(2.1)).toBe('$2.10');
+    expect(formatUsdPrecise(12.5)).toBe('$12.50');
+    expect(formatUsdPrecise(0.0234)).toBe('$0.0234');
+    expect(formatUsdPrecise(0.000123)).toBe('$0.000123');
+    expect(formatUsdPrecise(0)).toBe('$0');
+    expect(formatUsdPrecise(0.0000001)).toBe('$0');
   });
 
   it('formatPricePerM keeps sub-cent prices visible and unknown as missing', () => {

@@ -1,10 +1,10 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { AuthService } from '../auth/auth.service';
 import { CatalogService } from '../catalog/catalog.service';
 import type { Provider } from '../catalog/catalog.types';
 import { describeError, isForbidden } from '../catalog/errors';
-import { formatTime, formatUsd } from '../catalog/format';
+import { formatTime, formatUsdPrecise } from '../catalog/format';
 import { DecisionPanel } from '../routing/decision-panel';
 import { parseDecision } from '../routing/routing.types';
 import { UiBadge } from '../ui/badge';
@@ -13,6 +13,7 @@ import { UiButton } from '../ui/button';
 import { type ComboboxOption, UiCombobox } from '../ui/combobox';
 import { UiEmpty } from '../ui/empty';
 import { UiField } from '../ui/field';
+import { UiLinkButton } from '../ui/link-button';
 import { UiSelect } from '../ui/select';
 import { UiTable } from '../ui/table';
 import { UsersService } from '../users/users.service';
@@ -42,12 +43,14 @@ const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as
   selector: 'app-logs',
   imports: [
     DecisionPanel,
+    RouterLink,
     UiBadge,
     UiBanner,
     UiButton,
     UiCombobox,
     UiEmpty,
     UiField,
+    UiLinkButton,
     UiSelect,
     UiTable,
   ],
@@ -114,7 +117,6 @@ export class Logs {
   );
 
   protected readonly formatTime = formatTime;
-  protected readonly formatUsd = formatUsd;
 
   constructor() {
     // Non-admins never call the API: it would answer 403 and the read is audited.
@@ -193,6 +195,19 @@ export class Logs {
     void this.reload();
   }
 
+  /**
+   * Narrows the log to the provider that served one row (the Provider cell).
+   * Reuses the existing filter so the operator stays in context; the control
+   * and the URL-less state agree because both drive `providerFilter`.
+   */
+  protected filterByProvider(providerId: string | null): void {
+    if (providerId === null || providerId === this.providerFilter()) {
+      return;
+    }
+    this.providerFilter.set(providerId);
+    void this.reload();
+  }
+
   /** Paging ends on a short page or when the server omits `next_cursor`. */
   private cursorOf(page: LogPage): LogCursor | null {
     return page.entries.length < PAGE_SIZE ? null : page.next_cursor;
@@ -220,6 +235,21 @@ export class Logs {
    */
   protected isMoneyEvent(entry: RequestLogEntry): boolean {
     return entry.status === 402 || entry.status === 403 || entry.status === 429;
+  }
+
+  /**
+   * Whether the row carries a provider-side origin (D64): the provider's own HTTP
+   * status, its error code, or its bounded redacted message. The gateway's own
+   * pre-send refusals and rejections set none of the three, so the block stays
+   * closed for them — and a provider failure whose class happens to share a name
+   * with a gateway one (both use `invalid_request`) still shows its origin.
+   */
+  protected hasOriginError(entry: RequestLogEntry): boolean {
+    return (
+      entry.upstream_status !== null ||
+      entry.provider_error_code !== null ||
+      entry.error_detail !== null
+    );
   }
 
   /** Opens/closes the details of one entry and loads its attempts on demand. */
@@ -253,11 +283,114 @@ export class Logs {
     return entry.cost_usd !== null || entry.input_tokens !== null || entry.output_tokens !== null;
   }
 
-  protected tokenText(entry: RequestLogEntry): string {
-    if (entry.input_tokens === null && entry.output_tokens === null) {
+  /**
+   * True when the ledger booked an amount for the row and it is not a pre-send
+   * refusal (D64). A refusal consumed nothing and reads '—' rather than a
+   * silent `$0.00`; an unpriced request booked no amount at all (D10), so both
+   * show a dash.
+   */
+  protected hasCost(entry: RequestLogEntry): boolean {
+    return !this.isMoneyEvent(entry) && entry.cost_usd !== null;
+  }
+
+  /**
+   * Cost text for the row: the settled amount with adaptive precision, so a
+   * sub-cent request does not collapse to `$0.00` (D64); '—' when there is no
+   * amount (refusal, unpriced).
+   */
+  protected costText(entry: RequestLogEntry): string {
+    return this.hasCost(entry) ? formatUsdPrecise(entry.cost_usd) : '—';
+  }
+
+  /**
+   * The largest value each graph column scales against, over the rows currently
+   * loaded (D64). Every metric column draws the same bar, so scaling each to its
+   * own column keeps one column's numbers comparable with each other — the
+   * question a scan of that column asks.
+   */
+  private readonly graphScale = computed(() => {
+    const rows = this.entries();
+    const largest = (pick: (entry: RequestLogEntry) => number | null): number =>
+      rows.reduce((value, entry) => Math.max(value, pick(entry) ?? 0), 0);
+    return {
+      inputTokens: largest((entry) => entry.input_tokens),
+      outputTokens: largest((entry) => entry.output_tokens),
+      latency: largest((entry) => entry.latency_ms),
+      cost: largest((entry) => (this.hasCost(entry) ? entry.cost_usd : null)),
+    };
+  });
+
+  /**
+   * One bar's fill, as a 0–100 share of the largest value in its column (D64).
+   * A missing value, a zero row, or an all-zero column fills nothing.
+   */
+  private percentOf(value: number | null, scale: number): number {
+    if (value === null || value <= 0 || scale <= 0) {
+      return 0;
+    }
+    return Number(Math.min(100, (value / scale) * 100).toFixed(2));
+  }
+
+  protected inputTokensPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.input_tokens, this.graphScale().inputTokens);
+  }
+
+  protected outputTokensPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.output_tokens, this.graphScale().outputTokens);
+  }
+
+  protected latencyPercent(entry: RequestLogEntry): number {
+    return this.percentOf(entry.latency_ms, this.graphScale().latency);
+  }
+
+  protected costPercent(entry: RequestLogEntry): number {
+    return this.percentOf(this.hasCost(entry) ? entry.cost_usd : null, this.graphScale().cost);
+  }
+
+  /**
+   * The resolved model's display text: `canonical · upstream`, with the
+   * upstream id shown only when it differs from the canonical name (D64).
+   * '—' when no model resolved (a pre-send refusal, or a deleted row).
+   */
+  protected resolvedModelText(entry: RequestLogEntry): string {
+    const canonical = entry.model_canonical_name;
+    if (canonical === null) {
       return '—';
     }
-    return `${entry.input_tokens ?? 0} in / ${entry.output_tokens ?? 0} out`;
+    const upstream = entry.model_upstream_model_id;
+    return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
+  }
+
+  /**
+   * True when the requested model is worth its own line: the client asked for
+   * something other than the canonical model that served, so a rewrite or an
+   * alias is visible (D64).
+   */
+  protected showsRequestedModel(entry: RequestLogEntry): boolean {
+    return entry.requested_model !== null && entry.requested_model !== entry.model_canonical_name;
+  }
+
+  /** One attempt's target model, same `canonical · upstream` shape (D64). */
+  protected attemptModelText(attempt: LogAttempt): string {
+    const canonical = attempt.model_canonical_name;
+    if (canonical === null) {
+      return '—';
+    }
+    const upstream = attempt.model_upstream_model_id;
+    return upstream !== null && upstream !== canonical ? `${canonical} · ${upstream}` : canonical;
+  }
+
+  /**
+   * Input tokens on the first line, output tokens under it (D64). A line whose
+   * own count is unknown shows a dash: a missing count is never a measured zero.
+   * The second line renders only when at least one count exists (the template).
+   */
+  protected inputTokensText(entry: RequestLogEntry): string {
+    return entry.input_tokens === null ? '—' : `${entry.input_tokens} in`;
+  }
+
+  protected outputTokensText(entry: RequestLogEntry): string {
+    return entry.output_tokens === null ? '—' : `${entry.output_tokens} out`;
   }
 
   protected userName(id: string | null): string {
@@ -265,10 +398,6 @@ export class Logs {
       return '—';
     }
     return this.users().find((user) => user.id === id)?.email ?? id;
-  }
-
-  protected providerName(id: string): string {
-    return this.providers().find((provider) => provider.id === id)?.name ?? id.slice(0, 8);
   }
 
   /** `open_for_ms` is relative; show it as seconds still to wait, not a time. */

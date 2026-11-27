@@ -1,10 +1,10 @@
 import { signal } from '@angular/core';
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap } from '@angular/router';
+import { ActivatedRoute, convertToParamMap, provideRouter } from '@angular/router';
 import { FetchMock, jsonResponse } from '../../testing/fetch-mock';
 import { AuthService, type User } from '../auth/auth.service';
 import type { UserView } from '../users/users.types';
-import type { RequestLogEntry } from './usage.types';
+import type { LogAttempt, RequestLogEntry } from './usage.types';
 import { Logs } from './logs';
 
 function authStub(role: 'admin' | 'user'): object {
@@ -45,10 +45,19 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     path: '/v1/chat/completions',
     requested_model: 'openai/gpt-5',
     resolved_offering_id: 'off1',
+    provider_id: 'p1',
+    provider_name: 'OpenRouter',
+    model_id: 'm1',
+    model_canonical_name: 'openai/gpt-5',
+    model_upstream_model_id: 'openai/gpt-5',
+    credential_id: 'c1',
+    credential_name: 'primary',
     decision_json: null,
     status: 200,
     error_class: null,
     error_detail: null,
+    upstream_status: null,
+    provider_error_code: null,
     bytes_in: 10,
     bytes_out: 20,
     user_id: 'u1',
@@ -58,6 +67,34 @@ function entry(i: number, overrides: Partial<RequestLogEntry> = {}): RequestLogE
     cost_usd: 0.25,
     tokens_estimated: 120,
     latency_ms: 800,
+    ...overrides,
+  };
+}
+
+/**
+ * One attempt of the fixture entry (D49): names come from the server join
+ * (D64), never from a client-side catalog lookup.
+ */
+function attemptFixture(overrides: Partial<LogAttempt> = {}): LogAttempt {
+  return {
+    id: 1,
+    request_id: 'r0',
+    occurred_at: '2026-01-01T00:00:01.000Z',
+    offering_id: 'off1',
+    provider_id: 'p1',
+    provider_name: 'OpenRouter',
+    model_id: 'm1',
+    model_canonical_name: 'openai/gpt-5',
+    model_upstream_model_id: 'openai/gpt-5-2025-01-01',
+    credential_id: 'c1',
+    credential_name: 'primary',
+    outcome: 'upstream_error',
+    upstream_status: 502,
+    provider_error_code: 'bad_gateway',
+    error_detail: 'boom',
+    latency_ms: 120,
+    ttft_ms: null,
+    output_tokens: null,
     ...overrides,
   };
 }
@@ -99,11 +136,14 @@ function buttonByText(scope: ParentNode, text: string): HTMLButtonElement {
 
 describe('Logs', () => {
   let fetchMock: FetchMock;
+  /** What the `/api/logs/{id}/attempts` route answers with. */
+  let attempts: LogAttempt[] = [];
 
   beforeEach(() => {
+    attempts = [];
     fetchMock = new FetchMock();
     fetchMock.respondTo('/api/providers', () => jsonResponse(200, []));
-    fetchMock.respondTo('/api/logs/', () => jsonResponse(200, []));
+    fetchMock.respondTo('/api/logs/', () => jsonResponse(200, attempts));
     vi.stubGlobal('fetch', fetchMock.fetch);
   });
 
@@ -111,14 +151,18 @@ describe('Logs', () => {
     vi.unstubAllGlobals();
   });
 
-  async function create(role: 'admin' | 'user' = 'admin'): Promise<ComponentFixture<Logs>> {
+  async function create(
+    role: 'admin' | 'user' = 'admin',
+    query: Record<string, string> = {},
+  ): Promise<ComponentFixture<Logs>> {
     TestBed.configureTestingModule({
       imports: [Logs],
       providers: [
+        provideRouter([]),
         { provide: AuthService, useValue: authStub(role) },
         {
           provide: ActivatedRoute,
-          useValue: { snapshot: { queryParamMap: convertToParamMap({}) } },
+          useValue: { snapshot: { queryParamMap: convertToParamMap(query) } },
         },
       ],
     });
@@ -310,5 +354,442 @@ describe('Logs', () => {
 
     expect(root.querySelector('app-decision-panel')).toBeNull();
     expect(root.textContent).toContain('no readable routing decision');
+  });
+
+  it('shows the requested and the real target model, with names not GUIDs', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            requested_model: 'gpt-5',
+            model_canonical_name: 'openai/gpt-5',
+            model_upstream_model_id: 'openai/gpt-5-2025-01-01',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+    const text = root.textContent ?? '';
+
+    // Both models are visible: the request and the real target.
+    expect(text).toContain('gpt-5');
+    expect(text).toContain('openai/gpt-5 · openai/gpt-5-2025-01-01');
+    // Provider and credential show their names; no offering/provider GUID.
+    expect(text).toContain('OpenRouter');
+    expect(text).toContain('primary');
+    expect(text).not.toContain('off1');
+    // The resolved model opens the exact Models filter.
+    const link = root.querySelector<HTMLAnchorElement>('a.resolved-model');
+    expect(link?.getAttribute('href')).toBe('/models?model=m1');
+
+    const headers = Array.from(root.querySelectorAll('thead th')).map((th) =>
+      th.textContent?.trim(),
+    );
+    expect(headers).not.toContain('Offering');
+    expect(headers).toEqual([
+      'Time',
+      'User',
+      'Model',
+      'Provider / credential',
+      'Status',
+      'Error',
+      'Cost',
+      'Tokens',
+      'Latency',
+      'Details',
+    ]);
+  });
+
+  it('puts the credential under its provider in one cell, or the provider alone', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0),
+          // A request with a provider but no credential (settled before 0021).
+          entry(1, { credential_id: null, credential_name: null }),
+          // A pre-send refusal: neither.
+          entry(2, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            provider_id: null,
+            provider_name: null,
+            model_id: null,
+            model_canonical_name: null,
+            model_upstream_model_id: null,
+            credential_id: null,
+            credential_name: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-access'));
+    expect(cells).toHaveLength(3);
+    expect(cells[0]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[0]?.querySelector('.credential-name')?.textContent?.trim()).toBe('primary');
+    expect(cells[1]?.querySelector('ui-link-button')?.textContent?.trim()).toBe('OpenRouter');
+    expect(cells[1]?.querySelector('.credential-name')).toBeNull();
+    expect(cells[2]?.textContent?.trim()).toBe('—');
+  });
+
+  it('stacks the token counts on two lines, and shows a dash when there are none', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [entry(0), entry(1, { input_tokens: null, output_tokens: null })],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-tokens'));
+    expect(cells).toHaveLength(2);
+    expect(cells[0]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('100 in');
+    expect(cells[0]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe(
+      '50 out',
+    );
+    expect(cells[1]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('—');
+    expect(cells[1]?.querySelector('.tokens-out')).toBeNull();
+  });
+
+  it('shows a dash for an unknown count instead of a measured zero', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, { input_tokens: 1200, output_tokens: null }),
+          entry(1, { input_tokens: null, output_tokens: 300 }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-tokens'));
+    // Input known, output unknown: the missing count never reads as 0.
+    expect(cells[0]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe(
+      '1200 in',
+    );
+    expect(cells[0]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe('—');
+    // The output line has no bar while its own count is unknown.
+    expect(cells[0]?.querySelector('.tokens-out .metric-track')).toBeNull();
+    // Output known, input unknown: the same rule, mirrored.
+    expect(cells[1]?.querySelector('.tokens-in .metric-value')?.textContent?.trim()).toBe('—');
+    expect(cells[1]?.querySelector('.tokens-in .metric-track')).toBeNull();
+    expect(cells[1]?.querySelector('.tokens-out .metric-value')?.textContent?.trim()).toBe(
+      '300 out',
+    );
+  });
+
+  it('graphs every metric against the largest value in its own column', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            latency_ms: 1_000,
+            cost_usd: 0.5,
+          }),
+          entry(1, {
+            input_tokens: 500,
+            output_tokens: 50,
+            latency_ms: 2_000,
+            cost_usd: 1,
+          }),
+          // A pre-send refusal consumed nothing: no cost bar, a dash for a value.
+          entry(2, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            cost_usd: 0,
+            input_tokens: null,
+            output_tokens: null,
+            latency_ms: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const widths = (selector: string): string[] =>
+      Array.from(root.querySelectorAll<HTMLElement>(selector)).map((fill) => fill.style.width);
+
+    expect(widths('td.col-latency .metric-fill')).toEqual(['50%', '100%']);
+    expect(widths('td.col-cost .metric-fill')).toEqual(['50%', '100%']);
+    expect(widths('td.col-tokens .tokens-in .metric-fill')).toEqual(['100%', '50%']);
+    expect(widths('td.col-tokens .tokens-out .metric-fill')).toEqual(['100%', '50%']);
+    // The refusal has no cost and no bars at all.
+    expect(root.querySelectorAll('td.col-cost .metric-track')).toHaveLength(2);
+    expect(root.querySelectorAll('td.col-cost')[2]?.textContent?.trim()).toBe('—');
+    // The bars are decorative; the number beside each one carries the fact.
+    expect(root.querySelector('td.col-latency .metric-track')?.getAttribute('aria-hidden')).toBe(
+      'true',
+    );
+  });
+
+  it('collapses the model cell when the request and the target agree', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Requested and canonical are both `openai/gpt-5`: one line, one link.
+    expect(root.querySelectorAll('.col-model .resolved-model').length).toBe(1);
+    expect(root.querySelector('.col-model .requested-model')).toBeNull();
+    expect(root.querySelector('.col-model a.resolved-model')?.textContent?.trim()).toBe(
+      'openai/gpt-5',
+    );
+  });
+
+  it('narrows the log to the provider clicked in a row', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    fetchMock.respond(jsonResponse(200, { entries: [entry(1)] }));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'OpenRouter').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const url = new URL(fetchMock.requests[2].url, 'https://example.test');
+    expect(url.pathname).toBe('/api/logs');
+    expect(url.searchParams.get('provider')).toBe('p1');
+  });
+
+  it('shows sub-cent costs with adaptive precision instead of $0.00', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, { cost_usd: 0.000123 }),
+          entry(1, { cost_usd: 0.0234 }),
+          entry(2, { cost_usd: 2.1 }),
+          entry(3, { cost_usd: null }),
+          entry(4, { status: 402, error_class: 'budget_exceeded', cost_usd: 0 }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const cells = Array.from(root.querySelectorAll('td.col-cost')).map((cell) =>
+      cell.textContent?.trim(),
+    );
+    expect(cells).toEqual(['$0.000123', '$0.0234', '$2.10', '—', '—']);
+  });
+
+  it('shows the origin error with the provider status, code, and message', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 502,
+            error_class: 'upstream_error',
+            error_detail: 'the provider exploded',
+            upstream_status: 502,
+            provider_error_code: 'bad_gateway',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('Origin error');
+    expect(text).toContain('upstream_error');
+    expect(text).toContain('502');
+    expect(text).toContain('bad_gateway');
+    expect(text).toContain('the provider exploded');
+  });
+
+  it('omits the origin error block when the request itself succeeded', async () => {
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('omits the origin error block for a pre-send budget refusal', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            error_detail: null,
+            upstream_status: null,
+            provider_error_code: null,
+            cost_usd: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The class is set, but nothing was sent: no provider origin to show.
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('omits the origin error block for a gateway model_not_found, which has no provider origin', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 404,
+            error_class: 'model_not_found',
+            error_detail: null,
+            upstream_status: null,
+            provider_error_code: null,
+            cost_usd: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The gateway rejected the request before sending: the gate must key off
+    // the provider-origin facts, not `error_class !== null`.
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('shows the origin error for an upstream timeout that records only the detail', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 504,
+            error_class: 'upstream_timeout',
+            error_detail: 'request timed out after 60s',
+            upstream_status: null,
+            provider_error_code: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // A transport failure has no provider status or code, only the transport
+    // text: the gate must not be status-only.
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('upstream_timeout');
+    expect(text).toContain('request timed out after 60s');
+  });
+
+  it('shows the origin error for an upstream 429, which does have a provider origin', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 429,
+            error_class: 'upstream_rate_limited',
+            error_detail: 'slow down',
+            upstream_status: 429,
+            provider_error_code: 'rate_limit_exceeded',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('upstream_rate_limited');
+    expect(text).toContain('429');
+    expect(text).toContain('rate_limit_exceeded');
+    expect(text).toContain('slow down');
+  });
+
+  it('names the provider, model, and credential on every attempt', async () => {
+    attempts = [attemptFixture()];
+    fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const row = root.querySelector('.attempts-table tbody tr');
+    const text = row?.textContent ?? '';
+    expect(text).toContain('OpenRouter');
+    expect(text).toContain('openai/gpt-5 · openai/gpt-5-2025-01-01');
+    expect(text).toContain('primary');
+    expect(text).toContain('upstream_error');
+    expect(text).not.toContain('off1');
+
+    const link = row?.querySelector<HTMLAnchorElement>('a.resolved-model');
+    expect(link?.getAttribute('href')).toBe('/models?model=m1');
+  });
+
+  it('keeps the raw identifiers in a collapsed technical block', async () => {
+    fetchMock.respond(
+      jsonResponse(200, { entries: [entry(0, { client_request_id: 'client-9' })] }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const details = root.querySelector<HTMLDetailsElement>('details.technical');
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    const text = details?.textContent ?? '';
+    expect(text).toContain('r0');
+    expect(text).toContain('client-9');
+    expect(text).toContain('off1');
+    expect(text).toContain('m1');
   });
 });

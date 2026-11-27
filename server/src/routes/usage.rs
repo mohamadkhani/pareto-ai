@@ -473,15 +473,51 @@ mod tests {
         .await
         .expect("offering");
         sqlx::query(
+            "INSERT INTO provider_credentials (id, provider_id, label, secret_cipher) \
+             VALUES ('c1', 'p1', 'primary', 'sealed')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("credential");
+        sqlx::query(
             "INSERT INTO request_logs \
              (request_id, occurred_at, method, path, resolved_offering_id, status, error_class, \
-              error_detail) \
+              error_detail, credential_id, upstream_status, provider_error_code) \
              VALUES ('r1', '2026-11-19T10:00:00.000Z', 'POST', '/v1/chat/completions', 'o1', \
-                     502, 'upstream_error', 'the provider exploded')",
+                     502, 'upstream_error', 'the provider exploded', 'c1', 502, 'bad_gateway')",
         )
         .execute(&app.state.pool)
         .await
         .expect("log row");
+        // A second provider with its own offering and an identically-classed
+        // failure: dropping the provider clause would return two rows.
+        sqlx::query(
+            "INSERT INTO providers (id, name, base_url) VALUES ('p2', 'P2', 'https://p2/v1')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("provider 2");
+        sqlx::query("INSERT INTO models (id, canonical_name) VALUES ('m2', 'm2')")
+            .execute(&app.state.pool)
+            .await
+            .expect("model 2");
+        sqlx::query(
+            "INSERT INTO offerings (id, provider_id, model_id, upstream_model_id) \
+             VALUES ('o2', 'p2', 'm2', 'm2-upstream')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("offering 2");
+        sqlx::query(
+            "INSERT INTO request_logs \
+             (request_id, occurred_at, method, path, resolved_offering_id, status, error_class, \
+              error_detail) \
+             VALUES ('r2', '2026-11-19T09:00:00.000Z', 'POST', '/v1/chat/completions', 'o2', \
+                     502, 'upstream_error', 'the other provider exploded')",
+        )
+        .execute(&app.state.pool)
+        .await
+        .expect("second log row");
         for (id, outcome, status, code, detail) in [
             (
                 1i64,
@@ -496,7 +532,8 @@ mod tests {
                 "INSERT INTO telemetry_attempts \
                  (id, request_id, offering_id, outcome, upstream_status, provider_error_code, \
                   error_detail, occurred_at) \
-                 VALUES (?, 'r1', 'o1', ?, ?, ?, ?, '2026-11-19T10:00:01.000Z')",
+                 VALUES (?, 'r1', 'o1', ?, ?, ?, ?, \
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour'))",
             )
             .bind(id)
             .bind(outcome)
@@ -523,6 +560,31 @@ mod tests {
         let entries = filtered.body["entries"].as_array().expect("entries");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["error_detail"], "the provider exploded");
+        // The resolved target's names and ids are joined server-side (D64), so
+        // the console never resolves an offering/credential GUID itself.
+        assert_eq!(entries[0]["provider_id"], "p1");
+        assert_eq!(entries[0]["provider_name"], "P");
+        assert_eq!(entries[0]["model_id"], "m1");
+        assert_eq!(entries[0]["model_canonical_name"], "m");
+        assert_eq!(entries[0]["model_upstream_model_id"], "m-upstream");
+        assert_eq!(entries[0]["credential_id"], "c1");
+        assert_eq!(entries[0]["credential_name"], "primary");
+        // The origin error's provider status and code are durable (D64).
+        assert_eq!(entries[0]["upstream_status"], 502);
+        assert_eq!(entries[0]["provider_error_code"], "bad_gateway");
+
+        // The provider clause really excludes the other provider's row: with no
+        // filter both rows come back, newest first.
+        let unfiltered = send(
+            router.clone(),
+            api_request(Method::GET, "/api/logs", None, Some(&admin_cookie), None),
+        )
+        .await;
+        assert_eq!(unfiltered.status, StatusCode::OK, "{}", unfiltered.body);
+        let all = unfiltered.body["entries"].as_array().expect("entries");
+        assert_eq!(all.len(), 2, "{}", unfiltered.body);
+        assert_eq!(all[0]["request_id"], "r1");
+        assert_eq!(all[1]["request_id"], "r2");
 
         let wrong_status = send(
             router.clone(),
@@ -560,6 +622,12 @@ mod tests {
         assert_eq!(rows[0]["error_detail"], "boom");
         assert_eq!(rows[0]["upstream_status"], 502);
         assert_eq!(rows[0]["provider_error_code"], "bad_gateway");
+        // Each attempt names its own target (D64).
+        assert_eq!(rows[0]["provider_name"], "P");
+        assert_eq!(rows[0]["model_canonical_name"], "m");
+        assert_eq!(rows[0]["model_upstream_model_id"], "m-upstream");
+        assert_eq!(rows[0]["model_id"], "m1");
+        assert_eq!(rows[0]["provider_id"], "p1");
         assert_eq!(rows[1]["outcome"], serde_json::Value::Null);
 
         let summary = send(
