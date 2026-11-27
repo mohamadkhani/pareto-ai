@@ -35,10 +35,14 @@
           (valueChange)="onProviderFilterChange($event)"
         />
       </ui-field>
-      <ui-field label="Route" [controlId]="'logs-route'">
+      <ui-field
+        label="Upstream provider"
+        [controlId]="'logs-route'"
+        hint="The company an intermediary provider bought the model from."
+      >
         <ui-combobox
           [value]="routeFilter()"
-          placeholder="All routes"
+          placeholder="All upstream providers"
           [options]="routeOptions()"
           (valueChange)="onRouteFilterChange($event)"
         />
@@ -75,7 +79,7 @@
               <th scope="col">Time</th>
               <th scope="col">User</th>
               <th scope="col">Model</th>
-              <th scope="col">Provider / credential</th>
+              <th scope="col">Provider / upstream / credential</th>
               <th scope="col">Status</th>
               <th scope="col">Error</th>
               <th scope="col">Cost</th>
@@ -123,7 +127,7 @@
                     @if (entry.route) {
                       <ui-link-button
                         class="route-link"
-                        [label]="'Filter logs by route ' + entry.route"
+                        [label]="'Filter logs by upstream provider ' + entry.route"
                         (clicked)="filterByRoute(entry.route)"
                         >· {{ entry.route }}</ui-link-button
                       >
@@ -255,7 +259,7 @@
                           <thead>
                             <tr>
                               <th scope="col">Time</th>
-                              <th scope="col">Provider</th>
+                              <th scope="col">Provider / upstream</th>
                               <th scope="col">Model</th>
                               <th scope="col">Credential</th>
                               <th scope="col">Outcome</th>

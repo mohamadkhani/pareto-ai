@@ -437,12 +437,12 @@ fn build_candidate(
 
 impl Candidate {
     /// The provider label a decision or preview shows: the provider name, plus
-    /// the OpenRouter route slug when the offering is pinned to a provider
-    /// (D65), so two offerings of one provider stay distinguishable.
+    /// the route (upstream provider) when the offering is pinned to one (D65),
+    /// so two routes of one provider stay distinguishable.
     fn provider_label(&self) -> String {
         match self.route.is_empty() {
             true => self.provider_name.clone(),
-            false => format!("{}/{}", self.provider_name, self.route),
+            false => format!("{} · {}", self.provider_name, self.route),
         }
     }
 }

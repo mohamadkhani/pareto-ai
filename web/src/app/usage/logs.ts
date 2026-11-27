@@ -158,9 +158,9 @@ export class Logs {
   ]);
 
   /**
-   * Route filter options (D65): the OpenRouter upstream providers seen in the
-   * loaded page. The selected route is always kept so filtering by one does
-   * not hide its own option, and the empty value is "All routes".
+   * Upstream-provider filter options (D65): the routes seen in the loaded page.
+   * The selected route is always kept so filtering by one does not hide its own
+   * option, and the empty value is "All upstream providers".
    */
   protected readonly routeOptions = computed<ComboboxOption[]>(() => {
     const seen = new Set<string>();
@@ -174,7 +174,7 @@ export class Logs {
       seen.add(selected);
     }
     return [
-      { value: '', label: 'All routes' },
+      { value: '', label: 'All upstream providers' },
       ...[...seen].sort().map((route) => ({ value: route, label: route })),
     ];
   });
@@ -298,8 +298,8 @@ export class Logs {
   }
 
   /**
-   * Narrows the log to the OpenRouter route that served one row (D65). The
-   * provider cell shows both the provider row and the pinned upstream slug.
+   * Narrows the log to the upstream provider (route) that served one row (D65).
+   * The provider cell shows both the provider row and the pinned route slug.
    */
   protected filterByRoute(route: string | null): void {
     if (route === null || route === '' || route === this.routeFilter()) {

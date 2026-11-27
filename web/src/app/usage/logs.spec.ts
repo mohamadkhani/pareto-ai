@@ -446,7 +446,7 @@ describe('Logs', () => {
       'Time',
       'User',
       'Model',
-      'Provider / credential',
+      'Provider / upstream / credential',
       'Status',
       'Error',
       'Cost',

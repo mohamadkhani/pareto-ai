@@ -8,12 +8,21 @@ vocabulary the operator, the API and the admin console share.
 
 **Provider**:
 A company whose HTTP API serves chat completions and whose account holds the
-money, such as OpenRouter or SailResearch.
+money, such as OpenRouter or SailResearch. It is one row in `providers` and owns
+the base URL and the credentials.
 _Avoid_: Upstream, vendor, backend
+
+**Route**:
+One company an intermediary provider (such as OpenRouter) buys a model from,
+stored on the offering as `offerings.route` (the provider's slug, e.g. `azure`).
+A route holds no credential and no money of its own: it only changes the price
+and the serving quality of that one offering. One provider has many routes.
+_Avoid_: Provider, upstream provider, sub-provider, vendor
 
 **Offering**:
 One model sold by one provider at one price, reachable through one base URL.
-The unit the router chooses between.
+With a routed provider there is one offering per (model, route); the offering is
+the unit the router chooses between.
 _Avoid_: Model, endpoint, route
 
 **Credential**:

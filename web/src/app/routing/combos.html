@@ -228,15 +228,15 @@
                 </ui-select>
               </ui-field>
               <ui-field
-                label="Provider selection"
+                label="Upstream provider"
                 controlId="combo-provider-selection"
-                hint="Picks the provider of a model once it is chosen."
+                hint="Orders a model's upstream providers once the model is chosen. Quality is per model, so it cannot break a tie here."
               >
                 <ui-select
                   [value]="draft().providerSelection"
                   (valueChange)="setProviderSelection($event)"
                 >
-                  <option value="mix_price">mix_price (cheapest at the blend)</option>
+                  <option value="mix_price">price (cheapest at this combo's blend)</option>
                   <option value="speed">speed (most throughput)</option>
                   <option value="reliability">reliability (fewest failures)</option>
                 </ui-select>
