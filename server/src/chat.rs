@@ -3562,6 +3562,21 @@ fn resolve_usage(settlement: &Settlement) -> (Option<Usage>, bool) {
     }
 }
 
+/// The sample a settled request attributes its durable fields to: the last
+/// attempt of the offering being settled, or `None` when that offering pushed
+/// no sample (D64). Taking the last sample of all could pair this offering with
+/// another attempt's credential.
+fn settled_sample<'a>(
+    samples: &'a [telemetry::AttemptSample],
+    offering_id: Option<&str>,
+) -> Option<&'a telemetry::AttemptSample> {
+    let offering_id = offering_id?;
+    samples
+        .iter()
+        .rev()
+        .find(|attempt| attempt.offering_id == offering_id)
+}
+
 /// Writes the `usage_events` + `request_logs` pair, one `telemetry_attempts`
 /// sample per classified attempt (decision D26), settles the request's
 /// reservation (budgets and token caps, decision D7), and books the
@@ -3613,10 +3628,10 @@ async fn settle(state: &AppState, settlement: &Settlement) {
     // `last()` alone could pair this offering with an earlier attempt's
     // credential/status. Fall back to the last sample for that offering; when
     // no sample matches, all three stay null.
-    let last_attempt =
-        settlement.decision.samples.iter().rev().find(|attempt| {
-            settlement.offering_id.as_deref() == Some(attempt.offering_id.as_str())
-        });
+    let last_attempt = settled_sample(
+        &settlement.decision.samples,
+        settlement.offering_id.as_deref(),
+    );
     let served_credential_id = last_attempt.and_then(|attempt| attempt.credential_id.clone());
     let upstream_status = last_attempt.and_then(|attempt| attempt.upstream_status);
     let provider_error_code = last_attempt.and_then(|attempt| attempt.provider_error_code.clone());
@@ -6364,6 +6379,44 @@ mod tests {
     // -----------------------------------------------------------------------
     // Pure pipeline units
     // -----------------------------------------------------------------------
+
+    /// D64: the durable credential/status/code come from the last attempt of
+    /// the offering being settled, never from another attempt's last sample.
+    #[test]
+    fn settled_sample_follows_the_offering_being_settled() {
+        let sample = |offering: &str, credential: &str| telemetry::AttemptSample {
+            offering_id: offering.to_string(),
+            credential_id: Some(credential.to_string()),
+            outcome: None,
+            latency_ms: None,
+            ttft_ms: None,
+            output_tokens: None,
+            upstream_status: None,
+            provider_error_code: None,
+            error_detail: None,
+        };
+
+        // (a) The settled offering pushed samples: its last one is chosen, and
+        // a later sample for the same offering wins over an earlier one.
+        let samples = vec![
+            sample("off2", "c2a"),
+            sample("off1", "c1"),
+            sample("off2", "c2b"),
+        ];
+        assert_eq!(
+            settled_sample(&samples, Some("off2")).and_then(|s| s.credential_id.as_deref()),
+            Some("c2b"),
+        );
+
+        // (b) Samples exist, but only for a different offering: no sample. The
+        // old `samples.last()` would wrongly return off1's credential here.
+        let other = vec![sample("off1", "c1"), sample("off1", "c1b")];
+        assert!(settled_sample(&other, Some("off2")).is_none());
+
+        // (c) Nothing settled, or no samples at all.
+        assert!(settled_sample(&[], Some("off1")).is_none());
+        assert!(settled_sample(&other, None).is_none());
+    }
 
     #[test]
     fn parse_request_enforces_the_documented_limits() {

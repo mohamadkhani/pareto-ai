@@ -631,6 +631,64 @@ describe('Logs', () => {
     expect(root.querySelector('.origin-error')).toBeNull();
   });
 
+  it('omits the origin error block for a pre-send budget refusal', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 402,
+            error_class: 'budget_exceeded',
+            error_detail: null,
+            upstream_status: null,
+            provider_error_code: null,
+            cost_usd: null,
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    // The class is set, but nothing was sent: no provider origin to show.
+    expect(root.querySelector('.origin-error')).toBeNull();
+  });
+
+  it('shows the origin error for an upstream 429, which does have a provider origin', async () => {
+    fetchMock.respond(
+      jsonResponse(200, {
+        entries: [
+          entry(0, {
+            status: 429,
+            error_class: 'upstream_rate_limited',
+            error_detail: 'slow down',
+            upstream_status: 429,
+            provider_error_code: 'rate_limit_exceeded',
+          }),
+        ],
+      }),
+    );
+    fetchMock.respond(jsonResponse(200, [userFixture()]));
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const block = root.querySelector('.origin-error');
+    expect(block).not.toBeNull();
+    const text = block?.textContent ?? '';
+    expect(text).toContain('upstream_rate_limited');
+    expect(text).toContain('429');
+    expect(text).toContain('rate_limit_exceeded');
+    expect(text).toContain('slow down');
+  });
+
   it('names the provider, model, and credential on every attempt', async () => {
     attempts = [attemptFixture()];
     fetchMock.respond(jsonResponse(200, { entries: [entry(0)] }));

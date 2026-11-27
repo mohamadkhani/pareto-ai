@@ -210,7 +210,7 @@
               @if (expandedId() === entry.request_id) {
                 <tr class="details-row" [attr.id]="'details-' + entry.request_id">
                   <td colspan="10">
-                    @if (entry.error_class) {
+                    @if (hasOriginError(entry)) {
                       <section class="origin-error">
                         <h3>Origin error</h3>
                         <dl class="origin-facts">

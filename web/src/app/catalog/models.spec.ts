@@ -717,6 +717,9 @@ describe('Models', () => {
     const path = TestBed.inject(Location).path();
     expect(path).toContain('mix=components');
     expect(path).toContain('model=m1');
+    // A basis change reloads the overview; the dialog stays open because the
+    // URL still names the model (the loadOverview path, not only reload).
+    expect(detailDialog(root).querySelector('dialog')?.open).toBe(true);
   });
 
   it('leaves the exact-model view when the show-disabled switch changes', async () => {

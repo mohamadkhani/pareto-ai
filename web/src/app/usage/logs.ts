@@ -35,6 +35,9 @@ const ERROR_CLASSES = [
   'internal',
 ] as const;
 
+/** The gateway's own pre-send denials: nothing was sent, so no provider origin. */
+const GATEWAY_DENIALS = new Set(['budget_exceeded', 'token_cap_exceeded', 'access_denied']);
+
 /** Settled statuses worth filtering on, including the common failures. */
 const STATUSES = [200, 400, 401, 402, 403, 404, 422, 429, 500, 502, 503, 504] as const;
 
@@ -235,6 +238,14 @@ export class Logs {
    */
   protected isMoneyEvent(entry: RequestLogEntry): boolean {
     return entry.status === 402 || entry.status === 403 || entry.status === 429;
+  }
+
+  /**
+   * Whether the row has a provider-side origin error to show (D64). A pre-send
+   * denial has none; an upstream 429 does, even though its status is 429.
+   */
+  protected hasOriginError(entry: RequestLogEntry): boolean {
+    return entry.error_class !== null && !GATEWAY_DENIALS.has(entry.error_class);
   }
 
   /** Opens/closes the details of one entry and loads its attempts on demand. */
