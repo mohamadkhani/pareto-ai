@@ -620,8 +620,7 @@
             </ui-banner>
           } @else if (offeringProviderDisabled(row)) {
             <ui-banner tone="warning">
-              This provider is disabled, so none of its offerings are routable. Enable the provider
-              to route this offering.
+              {{ offeringProviderBanner(row) }}
             </ui-banner>
           }
           <dl class="facts">

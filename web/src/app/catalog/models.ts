@@ -1046,12 +1046,14 @@ export class Models {
     }
     if (isProviderRow(row)) {
       if (!row.provider_enabled) {
-        return 'This provider is disabled, so none of its offerings are routable. Enable the provider to route them.';
+        return row.enabled
+          ? 'This provider is disabled, so none of its offerings are routable. Enable the provider to route them.'
+          : 'This provider is disabled and the offering is disabled too. Enable both to route this offering.';
       }
       return null;
     }
     if (row.routable_offerings === 0) {
-      return 'Every offering is disabled, or every provider that offers it is disabled, so routing skips this model. Enable one offering or its provider.';
+      return 'No offering has all three switches on: every offering is disabled or its provider is disabled, so routing skips this model. Enable an offering or its provider.';
     }
     return null;
   }
@@ -1113,6 +1115,14 @@ export class Models {
   /** True when a provider-scoped row's provider is disabled. */
   protected offeringProviderDisabled(row: OverviewRow): boolean {
     return isProviderRow(row) && !row.provider_enabled;
+  }
+
+  /** Banner text for an offering whose provider (and maybe offering) is off. */
+  protected offeringProviderBanner(row: OverviewRow): string {
+    if (isProviderRow(row) && !row.enabled) {
+      return 'This provider is disabled and the offering is disabled too. Enable both to route this offering.';
+    }
+    return 'This provider is disabled, so none of its offerings are routable. Enable the provider to route this offering.';
   }
 
   /** The per-provider switch is blocked while the model is disabled everywhere. */

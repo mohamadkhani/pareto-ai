@@ -1439,9 +1439,9 @@ message D49 already captures, surfaced at request level with its status and code
 shows a model only when routing would actually consider at least one of its
 offerings — the offering, its provider, and the model are all enabled. In
 All-providers scope this is `routable_offerings > 0`; in provider scope it is
-the offering's own `enabled` and the row's `provider_enabled` together. The
-overview gains `AllModelsRow.routable_offerings` and
-`ProviderModelRow.provider_enabled`, both fed by the one joined query (the
+the offering's own `enabled`, the row's `provider_enabled`, and
+`model_enabled` together. The overview gains `AllModelsRow.routable_offerings`
+and `ProviderModelRow.provider_enabled`, both fed by the one joined query (the
 provider's `enabled` flag is selected in SQL; the routable count is counted in
 `aggregate`) so the console keeps its single fetch.
 
