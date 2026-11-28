@@ -78,6 +78,12 @@
 //! full id matches. Two entries of one run resolving to the same model keep
 //! the better rank.
 //!
+//! When the external identity registry has rows, the resolved set is widened
+//! by [`crate::model_identity::ModelIndex::with_registry`] to every catalog
+//! row sharing a registry canonical key (D38 amendment); a source that reports
+//! several keys for one alias is skipped, and an absent registry leaves the
+//! spelling behaviour untouched.
+//!
 //! **Run log.** `benchmark_sync_runs` holds one row per source per attempt
 //! with status, counts, duration, a secret-free `error`, and `source_url`
 //! (pruned to [`MAX_RUNS`] per source, the D19 pattern). **Scheduling.** The
@@ -864,18 +870,24 @@ pub fn parse_benchlm(raw: &str) -> Result<BenchLmPage, SyncError> {
     Ok(page)
 }
 
-/// Loads the catalog index from `models` and `offerings`.
+/// Loads the catalog index from `models` and `offerings`, including the
+/// external identity registry, so a benchmark that matches one spelling also
+/// reaches every catalog row the source groups under the same canonical id
+/// (D38 amendment). The registry is optional data: with no rows the index
+/// behaves exactly as the pure spelling matcher.
 /// Failure mode: [`SyncError::Db`].
 pub async fn load_model_index(pool: &SqlitePool) -> Result<ModelIndex, SyncError> {
+    let mut conn = pool.acquire().await?;
     let models: Vec<(String, String)> = sqlx::query_as("SELECT canonical_name, id FROM models")
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
     let offerings: Vec<(String, String)> = sqlx::query_as(
         "SELECT upstream_model_id, model_id FROM offerings WHERE upstream_model_id IS NOT NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
-    Ok(ModelIndex::new(models.into_iter().chain(offerings)))
+    let registry = crate::catalog::registry::load(&mut conn).await?;
+    Ok(ModelIndex::with_registry(models, offerings, registry))
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,5 +2680,63 @@ mod tests {
         .await
         .expect("run row");
         assert_eq!(run, (2, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_registry_group_sibling_inherits_the_benchmark_score() {
+        let app = TestApp::new().await;
+        let uid = admin(&app).await;
+        let base = seed_model(&app, &uid, "openai/gpt-6-luna").await;
+        let pro = seed_model(&app, &uid, "openai/gpt-6-luna-pro").await;
+        // The external source groups both spellings under the base canonical
+        // id; without it the benchmark only knows `GPT-6 Luna`.
+        for (alias, canonical) in [
+            ("openai/gpt-6-luna", "openai/gpt-6-luna"),
+            ("openai/gpt-6-luna-pro", "openai/gpt-6-luna"),
+        ] {
+            sqlx::query(
+                "INSERT INTO model_registry (source, alias, canonical, fetched_at) \
+                 VALUES ('models_dev', ?, ?, ?)",
+            )
+            .bind(alias)
+            .bind(canonical)
+            .bind(catalog::now_ts())
+            .execute(&app.state.pool)
+            .await
+            .expect("registry row");
+        }
+        let fetcher = FixtureFetcher::new(vec![(
+            "offset=0&length=100",
+            r#"{"rows":[{"row":{"model_name":"GPT-6 Luna (Max)","rating":1578.0,
+                "category":"overall","rank":1}}],"num_rows_total":1}"#,
+        )]);
+        let outcome = run_source(&app.state.pool, SourceId::Arena, &fetcher, false, None)
+            .await
+            .expect("sync");
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert_eq!(outcome.counts.published, 1);
+        assert_eq!(outcome.counts.matched_hints, 1);
+        assert_eq!(
+            outcome.counts.matched, 2,
+            "the registry sibling inherits the row"
+        );
+
+        let rows: Vec<(String, f64, String)> = sqlx::query_as(
+            "SELECT model_id, score, scale FROM benchmarks WHERE source = 'arena' \
+             ORDER BY model_id",
+        )
+        .fetch_all(&app.state.pool)
+        .await
+        .expect("rows");
+        assert_eq!(rows.len(), 2, "one arena row per model");
+        let mut ids: Vec<&str> = rows.iter().map(|(id, _, _)| id.as_str()).collect();
+        ids.sort();
+        let mut expected = vec![base.as_str(), pro.as_str()];
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(
+            rows.iter()
+                .all(|(_, score, scale)| (*score - 1578.0).abs() < 1e-9 && scale == "elo")
+        );
     }
 }

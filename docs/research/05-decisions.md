@@ -587,6 +587,31 @@ and even when two spellings normalized alike the old matcher reported
   specific); picking the "best" of several candidates (a guess); matching
   `:free` rows onto the paid model (they are separate offerings).
 
+**Amendment (2026-11-25, registry widening):** when the external model identity
+registry (D59/D60) is populated, a resolved match is widened to every catalog
+row that shares a registry canonical key with a model it already matched. The
+spelling identity stays the base matcher; the registry only *adds* rows that an
+external source explicitly groups with a matched one.
+
+- The widening key comes from the catalog `canonical_name` only, never from an
+  offering's `upstream_model_id`: the canonical name is the row's chosen
+  identity, and an upstream id is a provider's own spelling that may name a
+  different tier.
+- Registry keys decide the widened set exactly as the write path does: a source
+  that reports several canonical ids for one alias is skipped, and keys from
+  models.dev and OpenRouter are united. A model with no registry answer is left
+  alone.
+- This is why `openai/gpt-6-luna-pro` and `meta/muse-spark-1.3-contributor`
+  inherit the Arena score of `gpt-6-luna` and `muse-spark-1.3`: models.dev
+  groups each pair under one `canonical_model_id`. It is not a spelling guess —
+  without the registry row, `-pro` and `-contributor` remain distinct and the
+  sibling stays unscored.
+- The widening never strips a tier suffix to broaden a match (`-pro` is not a
+  stripped marker, by the generic-tail rule above); only an external grouping
+  can join those rows. Registry data is optional and operator-loaded via
+  `gateway sync-model-registry`, so a gateway without it keeps the pure
+  spelling behaviour.
+
 ### D39. Argon2id passwords, hashed off the async runtime
 
 **Decision (2026-11-17):** new password hashes are Argon2id with `m = 64 MiB`,
@@ -1258,8 +1283,8 @@ builds the registry does not cover. The rule set needs no per-model mapping in
 this repository, and the registry is data with provenance rather than code.
 The benchmark matcher (D38) keeps its own, fuzzier rules — tier/date stripping,
 vendor aliases, and generic-token guards — because a published score is
-model-level; that code predates this decision and is not used to pick a catalog
-row.
+model-level; it never picks a catalog row, though its 2026-11-25 amendment
+(D38) does widen a resolved match through this registry's canonical groups.
 
 **Consequences, accepted deliberately:** the stored spelling belongs to
 whichever provider created the row first and is never rewritten; `/v1/models`
