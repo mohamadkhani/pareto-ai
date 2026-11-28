@@ -131,6 +131,7 @@ function modelRow(priced: boolean): unknown {
     max_output_tokens: 8192,
     providers_count: 1,
     offerings_count: 1,
+    routable_offerings: 1,
     unpriced_offerings: priced ? 0 : 1,
     variable_offerings: 0,
     price_avg: priced ? { input_per_m: 1, output_per_m: 2, cache_read_per_m: null } : null,

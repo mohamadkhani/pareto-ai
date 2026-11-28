@@ -83,6 +83,11 @@ export interface ProviderOverviewRow {
   /** The provider that owns the offering; used by per-provider notices. */
   provider_id: string;
   upstream_model_id: string;
+  /**
+   * The provider's own switch. A disabled provider excludes its offerings from
+   * routing, so an enabled offering on a disabled provider is still inactive.
+   */
+  provider_enabled: boolean;
   /** The offering's own flag; `model_enabled` overrides it when false. */
   enabled: boolean;
   /**
@@ -124,6 +129,14 @@ export interface ModelOverviewRow {
   providers: OverviewProvider[];
   providers_count: number;
   offerings_count: number;
+  /**
+   * Offerings routing would actually consider: the offering, its provider, and
+   * the model are all enabled (the model flag is D61). Zero for a model whose
+   * every offering is disabled or whose only providers are disabled, even while
+   * `model_enabled` is true. The default "active" view keys on this, not
+   * `model_enabled` alone.
+   */
+  routable_offerings: number;
   /** Offerings with no price row or an all-null price row (never averaged). */
   unpriced_offerings: number;
   /**

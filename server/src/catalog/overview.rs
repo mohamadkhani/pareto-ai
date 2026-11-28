@@ -58,6 +58,15 @@
 //! `upstream_model_id`, then offering id; model rows by `canonical_name`, then
 //! model id. One joined query feeds both scopes (no N+1), and the quality
 //! lookup is a fixed number of set queries.
+//!
+//! **Routability (`scope=all`).** `routable_offerings` counts the offerings
+//! routing would actually consider: the offering is enabled, its provider is
+//! enabled, and its model is enabled (the model flag is D61). A model whose
+//! every offering is disabled, or whose only providers are disabled, reports
+//! zero even while `model_enabled` stays true. The console uses this count, not
+//! `model_enabled` alone, to decide whether a model belongs in its default
+//! "active" view, so a model that cannot serve any request never appears as
+//! active.
 
 use std::collections::HashMap;
 
@@ -122,6 +131,9 @@ pub struct ProviderModelRow {
     /// The provider that owns the offering; the console names it in notices.
     pub provider_id: String,
     pub upstream_model_id: String,
+    /// The provider's own switch. A disabled provider excludes every offering
+    /// it owns from routing (see the provider gate in `chat.rs`).
+    pub provider_enabled: bool,
     /// The offering's own flag. A globally disabled model overrides it (see
     /// `model_enabled`).
     pub enabled: bool,
@@ -157,6 +169,12 @@ pub struct AllModelsRow {
     pub providers: Vec<OverviewProvider>,
     pub providers_count: usize,
     pub offerings_count: usize,
+    /// Offerings routing would actually consider: the offering, its provider,
+    /// and the model are all enabled (the model flag is D61). Zero for a model
+    /// whose every offering is disabled or whose only providers are disabled,
+    /// even though `model_enabled` is true; the "active" view uses this, not
+    /// `model_enabled` alone, so such a model stays out of the active list.
+    pub routable_offerings: usize,
     /// Offerings with no price row or an all-null price row (never averaged).
     pub unpriced_offerings: usize,
     /// Offerings whose source published a variable price (the `"-1"`
@@ -237,6 +255,8 @@ struct OverviewRowRaw {
     model_enabled: i64,
     provider_id: String,
     provider_name: String,
+    /// `providers.enabled`: a disabled provider excludes all its offerings.
+    provider_enabled: i64,
     offering_id: String,
     upstream_model_id: String,
     context_override: Option<i64>,
@@ -335,6 +355,7 @@ pub async fn load_with_search(
                             offering_id: row.offering_id.clone(),
                             provider_id: row.provider_id.clone(),
                             upstream_model_id: row.upstream_model_id.clone(),
+                            provider_enabled: row.provider_enabled != 0,
                             enabled: row.enabled != 0,
                             model_enabled: row.model_enabled != 0,
                             price: row.price_view(),
@@ -392,7 +413,8 @@ async fn fetch_rows(
         "SELECT m.id AS model_id, m.canonical_name, m.family, m.modalities_input, \
                 m.modalities_output, m.context_length, m.max_output_tokens, \
                 m.enabled AS model_enabled, \
-                o.provider_id, pr.name AS provider_name, o.id AS offering_id, o.upstream_model_id, \
+                o.provider_id, pr.name AS provider_name, pr.enabled AS provider_enabled, \
+                o.id AS offering_id, o.upstream_model_id, \
                 o.context_override, max_output_override, o.enabled, \
                 p.input_per_m, p.output_per_m, p.cache_read_per_m, p.cache_write_per_m, \
                 p.reasoning_per_m, p.request_fee, p.variable_price, p.currency, p.source, p.fetched_at \
@@ -541,6 +563,12 @@ fn aggregate(
                 providers,
                 providers_count,
                 offerings_count: offerings.len(),
+                routable_offerings: offerings
+                    .iter()
+                    .filter(|row| {
+                        row.model_enabled != 0 && row.provider_enabled != 0 && row.enabled != 0
+                    })
+                    .count(),
                 unpriced_offerings: offerings.len() - priced.len(),
                 variable_offerings: offerings
                     .iter()
@@ -945,6 +973,90 @@ mod tests {
             offering.enabled,
             "the offering's own flag is not rewritten by the model switch"
         );
+        assert!(offering.provider_enabled, "the provider stays enabled");
+    }
+
+    #[tokio::test]
+    async fn routable_offerings_ignores_disabled_offerings_and_disabled_providers() {
+        let app = TestApp::new().await;
+        fixture(&app).await;
+
+        // Baseline: every fixture offering is routable.
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        let counts = |overview: &ModelsOverview, model_id: &str| -> (usize, usize) {
+            overview
+                .rows
+                .iter()
+                .find_map(|row| match row {
+                    OverviewRow::All(row) if row.model_id == model_id => {
+                        Some((row.offerings_count, row.routable_offerings))
+                    }
+                    _ => None,
+                })
+                .expect("model row")
+        };
+        assert_eq!(counts(&all, "model-a"), (3, 3));
+
+        // Disabling one offering drops the routable count but keeps the total.
+        sqlx::query("UPDATE offerings SET enabled = 0 WHERE id = 'off-a3'")
+            .execute(&app.state.pool)
+            .await
+            .expect("disable offering");
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        assert_eq!(counts(&all, "model-a"), (3, 2));
+
+        // Disabling a provider removes its offerings from routing even though
+        // the offering flags are still set.
+        sqlx::query("UPDATE providers SET enabled = 0 WHERE id = 'prov-b'")
+            .execute(&app.state.pool)
+            .await
+            .expect("disable provider");
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        // off-a1 (prov-a, enabled) and off-a2 (prov-b, disabled) and off-a3
+        // (prov-a, disabled): only off-a1 remains routable.
+        assert_eq!(counts(&all, "model-a"), (3, 1));
+
+        // A provider-scoped row exposes the provider's own switch so the
+        // console can mark the offering inactive.
+        let provider = load_with_search(&app.state.pool, Some("prov-b"), None, None, None)
+            .await
+            .expect("provider scope");
+        let OverviewRow::Provider(row) = &provider.rows[0] else {
+            panic!("provider row");
+        };
+        assert!(row.enabled, "the offering's own flag is untouched");
+        assert!(!row.provider_enabled, "but its provider is disabled");
+
+        // Disabling the model itself drops the routable count to zero even
+        // though a provider and offering are still enabled, proving the count
+        // honours all three flags.
+        sqlx::query("UPDATE providers SET enabled = 1 WHERE id = 'prov-b'")
+            .execute(&app.state.pool)
+            .await
+            .expect("re-enable provider");
+        sqlx::query("UPDATE models SET enabled = 0 WHERE id = 'model-a'")
+            .execute(&app.state.pool)
+            .await
+            .expect("disable model");
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        assert_eq!(counts(&all, "model-a"), (3, 0));
+        let OverviewRow::All(model_a) = all
+            .rows
+            .iter()
+            .find(|row| matches!(row, OverviewRow::All(row) if row.model_id == "model-a"))
+            .expect("model-a row")
+        else {
+            panic!("model-a row shape");
+        };
+        assert!(!model_a.model_enabled, "the model switch is reported");
     }
 
     #[tokio::test]
@@ -1175,6 +1287,7 @@ mod tests {
             "max_output_tokens",
             "offering_id",
             "upstream_model_id",
+            "provider_enabled",
             "enabled",
             "price",
             "mix_price",
@@ -1200,6 +1313,7 @@ mod tests {
             "providers",
             "providers_count",
             "offerings_count",
+            "routable_offerings",
             "unpriced_offerings",
             "variable_offerings",
             "price_avg",

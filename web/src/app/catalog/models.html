@@ -297,8 +297,8 @@
         </ui-empty>
       } @else if (hiddenDisabledCount() > 0) {
         <ui-empty
-          title="No enabled models"
-          description="Every model in this view is disabled. Enable one, or show the disabled models."
+          title="No active models"
+          description="Every model in this view is disabled or cannot be routed. Enable the model, an offering, or its provider, or show the disabled models."
         >
           <span ui-empty-action>
             <ui-button size="sm" (clicked)="setShowDisabled(true)">Show disabled</ui-button>
@@ -617,6 +617,10 @@
             <ui-banner tone="warning">
               This model is disabled for all providers. Select All providers and enable the model
               before enabling this offering.
+            </ui-banner>
+          } @else if (offeringProviderDisabled(row)) {
+            <ui-banner tone="warning">
+              {{ offeringProviderBanner(row) }}
             </ui-banner>
           }
           <dl class="facts">
