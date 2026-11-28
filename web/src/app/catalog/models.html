@@ -297,8 +297,8 @@
         </ui-empty>
       } @else if (hiddenDisabledCount() > 0) {
         <ui-empty
-          title="No enabled models"
-          description="Every model in this view is disabled or cannot be routed. Enable an offering or provider, or show the disabled models."
+          title="No active models"
+          description="Every model in this view is disabled or cannot be routed. Enable the model, an offering, or its provider, or show the disabled models."
         >
           <span ui-empty-action>
             <ui-button size="sm" (clicked)="setShowDisabled(true)">Show disabled</ui-button>

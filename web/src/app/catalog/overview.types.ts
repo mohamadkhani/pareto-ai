@@ -131,9 +131,10 @@ export interface ModelOverviewRow {
   offerings_count: number;
   /**
    * Offerings routing would actually consider: the offering, its provider, and
-   * the model are all enabled (D61). Zero for a model whose every offering is
-   * disabled or whose only providers are disabled, even while `model_enabled`
-   * is true. The default "active" view keys on this, not `model_enabled` alone.
+   * the model are all enabled (the model flag is D61). Zero for a model whose
+   * every offering is disabled or whose only providers are disabled, even while
+   * `model_enabled` is true. The default "active" view keys on this, not
+   * `model_enabled` alone.
    */
   routable_offerings: number;
   /** Offerings with no price row or an all-null price row (never averaged). */

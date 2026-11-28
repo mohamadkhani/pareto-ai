@@ -303,6 +303,18 @@ function modelNames(root: HTMLElement): string[] {
   );
 }
 
+/** The status badge in the row whose name matches `name`. */
+function statusBadge(root: HTMLElement, name: string): HTMLElement {
+  const row = Array.from(root.querySelectorAll('tbody tr')).find((candidate) =>
+    candidate.textContent?.includes(name),
+  );
+  const badge = row?.querySelector<HTMLElement>('td ui-badge[title]');
+  if (badge === null || badge === undefined) {
+    throw new Error(`no status badge with a title for ${name}`);
+  }
+  return badge;
+}
+
 function searchBox(root: HTMLElement): HTMLInputElement {
   const input = root.querySelector<HTMLInputElement>('#models-search input');
   if (input === null) {
@@ -327,7 +339,7 @@ function minQualityBox(root: HTMLElement): HTMLInputElement {
   return input;
 }
 
-/** The toolbar switch that reveals rows whose effective state is disabled. */
+/** The toolbar switch that reveals inactive rows (disabled or unroutable). */
 function showDisabledSwitch(root: HTMLElement): HTMLButtonElement {
   const control = root.querySelector<HTMLButtonElement>('.models-toolbar button[role="switch"]');
   if (control === null) {
@@ -968,7 +980,7 @@ describe('Models', () => {
 
     // The disabled model is hidden by default; the switch reveals it so the
     // blocked per-provider control can be inspected.
-    expect(root.textContent).toContain('No enabled models');
+    expect(root.textContent).toContain('No active models');
     showDisabledSwitch(root).click();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1012,7 +1024,7 @@ describe('Models', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(root.textContent).toContain('No enabled models');
+    expect(root.textContent).toContain('No active models');
 
     showDisabledSwitch(root).click();
     await fixture.whenStable();
@@ -1031,7 +1043,7 @@ describe('Models', () => {
     const fixture = await create();
     const root = fixture.nativeElement as HTMLElement;
 
-    expect(root.textContent).toContain('No enabled models');
+    expect(root.textContent).toContain('No active models');
     buttonByText(root, 'Show disabled').click();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -1069,6 +1081,9 @@ describe('Models', () => {
     expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
     // The revealed row explains itself instead of looking merely disabled.
     expect(root.textContent).toContain('not routable');
+    expect(statusBadge(root, 'anthropic/claude').getAttribute('title')).toContain(
+      'routing skips this model',
+    );
   });
 
   it('hides an enabled offering on a disabled provider in provider scope', async () => {
@@ -1088,7 +1103,7 @@ describe('Models', () => {
     await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(root.textContent).toContain('No enabled models');
+    expect(root.textContent).toContain('No active models');
 
     showDisabledSwitch(root).click();
     await fixture.whenStable();
@@ -1096,6 +1111,9 @@ describe('Models', () => {
 
     expect(modelNames(root)).toEqual(['openai/gpt-5']);
     expect(root.textContent).toContain('provider disabled');
+    expect(statusBadge(root, 'openai/gpt-5').getAttribute('title')).toContain(
+      'This provider is disabled',
+    );
 
     // The detail dialog explains the disabled provider rather than leaving the
     // checked "Offering enabled" switch unexplained.

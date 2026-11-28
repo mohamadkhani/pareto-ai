@@ -1442,7 +1442,7 @@ All-providers scope this is `routable_offerings > 0`; in provider scope it is
 the offering's own `enabled` and the row's `provider_enabled` together. The
 overview gains `AllModelsRow.routable_offerings` and
 `ProviderModelRow.provider_enabled`, both fed by the one joined query (the
-provider's `enabled` flag is selected in SQL; the routable count is summed in
+provider's `enabled` flag is selected in SQL; the routable count is counted in
 `aggregate`) so the console keeps its single fetch.
 
 **Why:** D61 made `models.enabled` the kill switch but left the page deciding

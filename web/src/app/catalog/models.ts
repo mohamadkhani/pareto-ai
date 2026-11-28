@@ -1007,9 +1007,9 @@ export class Models {
   /**
    * The row's effective state, matching the success badge: routing considers a
    * row only when the model, the provider, and the offering are all enabled
-   * (D61). In All-providers scope a model is active only while at least one of
-   * its offerings is routable — a model whose offerings are all disabled, or
-   * whose only providers are disabled, is not active even though
+   * (the model flag is D61). In All-providers scope a model is active only while
+   * at least one of its offerings is routable — a model whose offerings are all
+   * disabled, or whose only providers are disabled, is not active even though
    * `model_enabled` stays true.
    */
   protected rowEnabled(row: OverviewRow): boolean {
@@ -1029,7 +1029,7 @@ export class Models {
     }
     if (isProviderRow(row)) {
       if (!row.provider_enabled) {
-        return row.enabled ? 'provider disabled' : 'disabled';
+        return 'provider disabled';
       }
       return row.enabled ? 'enabled' : 'disabled';
     }

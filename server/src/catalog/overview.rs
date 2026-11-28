@@ -61,11 +61,12 @@
 //!
 //! **Routability (`scope=all`).** `routable_offerings` counts the offerings
 //! routing would actually consider: the offering is enabled, its provider is
-//! enabled, and its model is enabled (D61). A model whose every offering is
-//! disabled, or whose only providers are disabled, reports zero even while
-//! `model_enabled` stays true. The console uses this count, not `model_enabled`
-//! alone, to decide whether a model belongs in its default "active" view, so a
-//! model that cannot serve any request never appears as active.
+//! enabled, and its model is enabled (the model flag is D61). A model whose
+//! every offering is disabled, or whose only providers are disabled, reports
+//! zero even while `model_enabled` stays true. The console uses this count, not
+//! `model_enabled` alone, to decide whether a model belongs in its default
+//! "active" view, so a model that cannot serve any request never appears as
+//! active.
 
 use std::collections::HashMap;
 
@@ -131,8 +132,7 @@ pub struct ProviderModelRow {
     pub provider_id: String,
     pub upstream_model_id: String,
     /// The provider's own switch. A disabled provider excludes every offering
-    /// it owns from routing (see `AllModelsRow::routable_offerings` and the
-    /// routing gate in `chat.rs`).
+    /// it owns from routing (see the provider gate in `chat.rs`).
     pub provider_enabled: bool,
     /// The offering's own flag. A globally disabled model overrides it (see
     /// `model_enabled`).
@@ -170,9 +170,9 @@ pub struct AllModelsRow {
     pub providers_count: usize,
     pub offerings_count: usize,
     /// Offerings routing would actually consider: the offering, its provider,
-    /// and the model are all enabled (D61). Zero for a model whose every
-    /// offering is disabled or whose only providers are disabled, even though
-    /// `model_enabled` is true; the "active" view uses this, not
+    /// and the model are all enabled (the model flag is D61). Zero for a model
+    /// whose every offering is disabled or whose only providers are disabled,
+    /// even though `model_enabled` is true; the "active" view uses this, not
     /// `model_enabled` alone, so such a model stays out of the active list.
     pub routable_offerings: usize,
     /// Offerings with no price row or an all-null price row (never averaged).
