@@ -1106,9 +1106,10 @@ export class Models {
   }
 
   protected offeringEnabled(row: OverviewRow): boolean {
-    // The offering's own flag. The model kill switch overrides it (the switch
-    // stays checked so re-enabling the model restores it), and a disabled
-    // provider is explained by the banner rather than reflected here.
+    // Effective switch state: a globally disabled model makes this read
+    // unchecked while the stored offering flag is kept, so re-enabling the
+    // model restores it; a disabled provider is explained by the banner, not
+    // reflected here.
     return isProviderRow(row) && row.enabled && row.model_enabled;
   }
 

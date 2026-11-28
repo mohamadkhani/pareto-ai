@@ -1125,6 +1125,38 @@ describe('Models', () => {
     );
   });
 
+  it('tells a provider-disabled row that the offering is off too', async () => {
+    queueReload(fetchMock, allOverview);
+    const fixture = await create();
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Both switches are off: enabling only the provider must not be presented
+    // as enough, so the tooltip and the detail banner say "Enable both".
+    fetchMock.respond(
+      jsonResponse(200, {
+        ...providerOverview,
+        rows: [providerRow({ enabled: false, provider_enabled: false })],
+      }),
+    );
+    changeProvider(root, 'p1');
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    showDisabledSwitch(root).click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(modelNames(root)).toEqual(['openai/gpt-5']);
+    expect(statusBadge(root, 'openai/gpt-5').getAttribute('title')).toContain('Enable both');
+
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(detailDialog(root).textContent).toContain(
+      'This provider is disabled and the offering is disabled too',
+    );
+  });
+
   it('sets a quality override from the detail dialog', async () => {
     queueReload(fetchMock, allOverview);
     const fixture = await create();
