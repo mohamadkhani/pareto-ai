@@ -1067,6 +1067,8 @@ describe('Models', () => {
     fixture.detectChanges();
 
     expect(modelNames(root)).toEqual(['anthropic/claude', 'openai/gpt-5']);
+    // The revealed row explains itself instead of looking merely disabled.
+    expect(root.textContent).toContain('not routable');
   });
 
   it('hides an enabled offering on a disabled provider in provider scope', async () => {
@@ -1094,6 +1096,15 @@ describe('Models', () => {
 
     expect(modelNames(root)).toEqual(['openai/gpt-5']);
     expect(root.textContent).toContain('provider disabled');
+
+    // The detail dialog explains the disabled provider rather than leaving the
+    // checked "Offering enabled" switch unexplained.
+    buttonByText(root, 'Details').click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(detailDialog(root).textContent).toContain(
+      'This provider is disabled, so none of its offerings are routable',
+    );
   });
 
   it('sets a quality override from the detail dialog', async () => {

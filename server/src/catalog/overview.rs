@@ -131,7 +131,8 @@ pub struct ProviderModelRow {
     pub provider_id: String,
     pub upstream_model_id: String,
     /// The provider's own switch. A disabled provider excludes every offering
-    /// it owns from routing (see `routable_offerings`).
+    /// it owns from routing (see `AllModelsRow::routable_offerings` and the
+    /// routing gate in `chat.rs`).
     pub provider_enabled: bool,
     /// The offering's own flag. A globally disabled model overrides it (see
     /// `model_enabled`).
@@ -1031,6 +1032,31 @@ mod tests {
         };
         assert!(row.enabled, "the offering's own flag is untouched");
         assert!(!row.provider_enabled, "but its provider is disabled");
+
+        // Disabling the model itself drops the routable count to zero even
+        // though a provider and offering are still enabled, proving the count
+        // honours all three flags.
+        sqlx::query("UPDATE providers SET enabled = 1 WHERE id = 'prov-b'")
+            .execute(&app.state.pool)
+            .await
+            .expect("re-enable provider");
+        sqlx::query("UPDATE models SET enabled = 0 WHERE id = 'model-a'")
+            .execute(&app.state.pool)
+            .await
+            .expect("disable model");
+        let all = load_with_search(&app.state.pool, None, None, None, None)
+            .await
+            .expect("all scope");
+        assert_eq!(counts(&all, "model-a"), (3, 0));
+        let OverviewRow::All(model_a) = all
+            .rows
+            .iter()
+            .find(|row| matches!(row, OverviewRow::All(row) if row.model_id == "model-a"))
+            .expect("model-a row")
+        else {
+            panic!("model-a row shape");
+        };
+        assert!(!model_a.model_enabled, "the model switch is reported");
     }
 
     #[tokio::test]

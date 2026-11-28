@@ -1437,12 +1437,13 @@ message D49 already captures, surfaced at request level with its status and code
 
 **Decision (2026-11-27):** the default ("active only") view of the Models page
 shows a model only when routing would actually consider at least one of its
-offerings — the offering, its provider, and the model are all enabled (D61). In
+offerings — the offering, its provider, and the model are all enabled. In
 All-providers scope this is `routable_offerings > 0`; in provider scope it is
 the offering's own `enabled` and the row's `provider_enabled` together. The
 overview gains `AllModelsRow.routable_offerings` and
-`ProviderModelRow.provider_enabled`, both computed in the one joined query so
-the console keeps its single fetch.
+`ProviderModelRow.provider_enabled`, both fed by the one joined query (the
+provider's `enabled` flag is selected in SQL; the routable count is summed in
+`aggregate`) so the console keeps its single fetch.
 
 **Why:** D61 made `models.enabled` the kill switch but left the page deciding
 "active" from `model_enabled && offerings_count > 0`. That reported a model as

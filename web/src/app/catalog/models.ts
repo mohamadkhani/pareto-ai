@@ -450,7 +450,7 @@ export class Models {
   protected readonly anyFilterActive = computed(
     () => this.filterActive() || this.refinementActive() || this.exactModelId() !== '',
   );
-  /** Disabled rows the default "enabled only" view hides. */
+  /** Rows the default "active only" view hides (disabled flag or unroutable). */
   protected readonly hiddenDisabledCount = computed(
     () => this.overviewRows().filter((row) => !this.rowEnabled(row)).length,
   );
@@ -836,7 +836,7 @@ export class Models {
     }
   }
 
-  /** The "Show disabled" switch: reveals disabled rows and ends any exact view. */
+  /** The "Show disabled" switch: reveals inactive rows and ends any exact view. */
   protected setShowDisabled(value: boolean): void {
     this.showDisabled.set(value);
     this.exitExactModelView();
@@ -1033,6 +1033,9 @@ export class Models {
       }
       return row.enabled ? 'enabled' : 'disabled';
     }
+    if (row.routable_offerings === 0) {
+      return 'not routable';
+    }
     return `${row.offerings_count} offering${row.offerings_count === 1 ? '' : 's'}`;
   }
 
@@ -1041,8 +1044,14 @@ export class Models {
     if (!row.model_enabled) {
       return 'This model is disabled for all providers. Enable it with All providers selected.';
     }
-    if (isProviderRow(row) && !row.provider_enabled) {
-      return 'This provider is disabled, so none of its offerings are routable. Enable the provider to route them.';
+    if (isProviderRow(row)) {
+      if (!row.provider_enabled) {
+        return 'This provider is disabled, so none of its offerings are routable. Enable the provider to route them.';
+      }
+      return null;
+    }
+    if (row.routable_offerings === 0) {
+      return 'Every offering is disabled, or every provider that offers it is disabled, so routing skips this model. Enable one offering or its provider.';
     }
     return null;
   }
@@ -1095,8 +1104,9 @@ export class Models {
   }
 
   protected offeringEnabled(row: OverviewRow): boolean {
-    // Effective state: a model disabled for all providers overrides the
-    // offering's own flag, which is kept for when the model is enabled again.
+    // The offering's own flag. The model kill switch overrides it (the switch
+    // stays checked so re-enabling the model restores it), and a disabled
+    // provider is explained by the banner rather than reflected here.
     return isProviderRow(row) && row.enabled && row.model_enabled;
   }
 
